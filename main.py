@@ -835,12 +835,9 @@ class AIAnalyzer:
 
         prompt = (
             "Bạn là chuyên gia phân tích kỹ thuật chứng khoán."
-            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến phổ biến"
-            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự."
+            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến phổ biến, sóng Elliott và mô hình Wyckoff."
             "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác:\n"
             "{\n"
-            "  \"support_levels\": [giá1, giá2, ...],\n"
-            "  \"resistance_levels\": [giá1, giá2, ...],\n"
             "  \"patterns\": [\n"
             "    {\"name\": \"tên mẫu hình\", \"description\": \"giải thích ngắn\"},\n"
             "    ...\n"
@@ -867,14 +864,21 @@ class AIAnalyzer:
                 text = await resp.text()
                 try:
                     result = json.loads(text)
+                    if 'choices' not in result or not result['choices'] or 'message' not in result['choices'][0]:
+                        logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
+                        return {"patterns": []}
+                    
                     content = result['choices'][0]['message']['content']
-                    return json.loads(content)
+                    parsed_content = json.loads(content)
+                    return {"patterns": parsed_content.get("patterns", []), 
+                            "support_levels": [], 
+                            "resistance_levels": []}
                 except json.JSONDecodeError:
                     logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                    return {}
+                    return {"patterns": [], "support_levels": [], "resistance_levels": []}
                 except KeyError:
                     logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
-                    return {}
+                    return {"patterns": [], "support_levels": [], "resistance_levels": []}
 
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
@@ -900,8 +904,6 @@ class AIAnalyzer:
                 "technical_indicators": indicators['1D']
             }
             openrouter_result = await self.analyze_with_openrouter(technical_data)
-            support_levels = openrouter_result.get('support_levels', [])
-            resistance_levels = openrouter_result.get('resistance_levels', [])
             patterns = openrouter_result.get('patterns', [])
 
             forecast, prophet_model = forecast_with_prophet(df_1d, periods=7)
@@ -959,8 +961,6 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
             prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
             prompt += f"\n**Tin tức:**\n{news_text}\n"
             prompt += f"\n**Phân tích từ OpenRouter:**\n"
-            prompt += f"- Hỗ trợ: {', '.join(map(str, support_levels))}\n"
-            prompt += f"- Kháng cự: {', '.join(map(str, resistance_levels))}\n"
             prompt += f"- Mẫu hình: {', '.join([p['name'] for p in patterns])}\n"
             prompt += f"\n{xgb_summary}\n"
             prompt += f"{forecast_summary}\n"
