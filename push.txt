@@ -1,0 +1,5 @@
+git init
+git remote add origin https://github.com/Anvt1991/anvt.git
+git add .
+git commit -m "Initial commit"
+git push -u origin main
