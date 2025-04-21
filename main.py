@@ -835,9 +835,12 @@ class AIAnalyzer:
 
         prompt = (
             "Bạn là chuyên gia phân tích kỹ thuật chứng khoán."
-            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến phổ biến, sóng Elliott và mô hình Wyckoff."
+            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing,"
+            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự."
             "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác:\n"
             "{\n"
+            "  \"support_levels\": [giá1, giá2, ...],\n"
+            "  \"resistance_levels\": [giá1, giá2, ...],\n"
             "  \"patterns\": [\n"
             "    {\"name\": \"tên mẫu hình\", \"description\": \"giải thích ngắn\"},\n"
             "    ...\n"
@@ -864,28 +867,29 @@ class AIAnalyzer:
                 text = await resp.text()
                 try:
                     result = json.loads(text)
-                    if 'choices' not in result or not result['choices'] or 'message' not in result['choices'][0]:
-                        logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
-                        return {"patterns": []}
-                    
                     content = result['choices'][0]['message']['content']
                     parsed_content = json.loads(content)
-                    return {"patterns": parsed_content.get("patterns", []), 
-                            "support_levels": [], 
-                            "resistance_levels": []}
+                    # Ensure all expected fields are present
+                    if 'support_levels' not in parsed_content:
+                        parsed_content['support_levels'] = []
+                    if 'resistance_levels' not in parsed_content:
+                        parsed_content['resistance_levels'] = []
+                    if 'patterns' not in parsed_content:
+                        parsed_content['patterns'] = []
+                    return parsed_content
                 except json.JSONDecodeError:
                     logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                    return {"patterns": [], "support_levels": [], "resistance_levels": []}
+                    return {}
                 except KeyError:
                     logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
-                    return {"patterns": [], "support_levels": [], "resistance_levels": []}
+                    return {}
 
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
             tech_analyzer = TechnicalAnalyzer()
             indicators = tech_analyzer.calculate_multi_timeframe_indicators(dfs)
             news = await get_news(symbol=symbol)
-            news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}\n📝 {n['summary']}" for n in news])
+            news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}" for n in news[:3]])
             df_1d = dfs.get('1D')
             close_today = df_1d['close'].iloc[-1]
             close_yesterday = df_1d['close'].iloc[-2]
@@ -904,6 +908,8 @@ class AIAnalyzer:
                 "technical_indicators": indicators['1D']
             }
             openrouter_result = await self.analyze_with_openrouter(technical_data)
+            support_levels = openrouter_result.get('support_levels', [])
+            resistance_levels = openrouter_result.get('resistance_levels', [])
             patterns = openrouter_result.get('patterns', [])
 
             forecast, prophet_model = forecast_with_prophet(df_1d, periods=7)
@@ -929,6 +935,9 @@ class AIAnalyzer:
             xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
 
             outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
+
+            # Limit the number of patterns to include
+            patterns_summary = ", ".join([p['name'] for p in patterns[:3]])
 
             prompt = f"""
 Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
@@ -961,7 +970,9 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
             prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
             prompt += f"\n**Tin tức:**\n{news_text}\n"
             prompt += f"\n**Phân tích từ OpenRouter:**\n"
-            prompt += f"- Mẫu hình: {', '.join([p['name'] for p in patterns])}\n"
+            prompt += f"- Hỗ trợ: {', '.join(map(str, support_levels))}\n"
+            prompt += f"- Kháng cự: {', '.join(map(str, resistance_levels))}\n"
+            prompt += f"- Mẫu hình: {patterns_summary}\n"
             prompt += f"\n{xgb_summary}\n"
             prompt += f"{forecast_summary}\n"
             prompt += """
@@ -969,17 +980,18 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 1. So sánh giá phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định hỗ trợ/kháng cự từ OpenRouter. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất MUA/BÁN/NẮM GIỮ với % tin cậy, điểm vào, cắt lỗ, chốt lời. Phương án đi vốn, phân bổ tỷ trọng cụ thể.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
 7. Kết hợp tin tức, phân tích kỹ thuật, cơ bản và kết quả từ OpenRouter để đưa ra nhận định.
 8. Trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
 
 **Hướng dẫn bổ sung:**
-- Không cần theo form cố định. 
+- Không cần theo form cố định. Sử dụng định dạng markdown để phân vùng nội dung rõ ràng.
 - Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
 - Nếu có lịch sử báo cáo, đánh giá xem dự đoán trước đúng hay sai để điều chỉnh nhận định.
 - Phát hiện tín hiệu đảo chiều (RSI > 70 hoặc < 30, MACD cắt tín hiệu, giá chạm Bollinger Bands, Ichimoku signals).
+- Tin tức có thể là yếu tố xác nhận hoặc phủ định xu hướng kỹ thuật và cơ bản.
 - Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
 - Nếu thiếu dữ liệu, hãy nói "Không đủ thông tin để kết luận".
 - Chú ý: VNINDEX, VN30 là chỉ số, không phải cổ phiếu.
