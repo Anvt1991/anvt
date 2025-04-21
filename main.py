@@ -856,7 +856,7 @@ class AIAnalyzer:
             "X-Title": "Stock Analysis Bot"
         }
         payload = {
-            "model": "mistralai/mixtral-8x7b",
+            "model": "mistralai/mixtral-8x7b-instruct",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 2048,
             "temperature": 0.2
