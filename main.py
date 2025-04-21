@@ -856,9 +856,9 @@ class AIAnalyzer:
             "X-Title": "Stock Analysis Bot"
         }
         payload = {
-            "model": "anthropic/claude-3-haiku",
+            "model": "anthropic/mistralai/mixtral-8x7b",
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "temperature": 0.2
         }
 
@@ -868,15 +868,7 @@ class AIAnalyzer:
                 try:
                     result = json.loads(text)
                     content = result['choices'][0]['message']['content']
-                    parsed_content = json.loads(content)
-                    # Ensure all expected fields are present
-                    if 'support_levels' not in parsed_content:
-                        parsed_content['support_levels'] = []
-                    if 'resistance_levels' not in parsed_content:
-                        parsed_content['resistance_levels'] = []
-                    if 'patterns' not in parsed_content:
-                        parsed_content['patterns'] = []
-                    return parsed_content
+                    return json.loads(content)
                 except json.JSONDecodeError:
                     logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
                     return {}
@@ -889,25 +881,22 @@ class AIAnalyzer:
             tech_analyzer = TechnicalAnalyzer()
             indicators = tech_analyzer.calculate_multi_timeframe_indicators(dfs)
             news = await get_news(symbol=symbol)
-            # Further limit the number of news items to reduce token usage
-            news_text = "\n".join([f"📰 {n['title']}" for n in news[:2]])
-
-            # Summarize indicators instead of listing all
-            indicators_summary = "\n".join([f"{tf}: {', '.join([f'{k}: {v:.2f}' for k, v in ind.items() if k in ['sma20', 'rsi', 'macd']])}" for tf, ind in indicators.items()])
-
-            # Truncate past report to the most recent entry
+            news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}\n📝 {n['summary']}" for n in news])
+            df_1d = dfs.get('1D')
+            close_today = df_1d['close'].iloc[-1]
+            close_yesterday = df_1d['close'].iloc[-2]
+            price_action = self.analyze_price_action(df_1d)
+            history = await self.load_report_history(symbol)
+            past_report = ""
             if history:
                 last = history[-1]
                 past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
-                past_report = f"📜 Báo cáo trước ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
-
-            tech_analyzer = TechnicalAnalyzer()
-            price_action = self.analyze_price_action(dfs['1D'])
+                past_report = f"📜 **Báo cáo trước** ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
             fundamental_report = deep_fundamental_analysis(fundamental_data)
 
             # Phân tích với OpenRouter
             technical_data = {
-                "candlestick_data": dfs['1D'].tail(50).to_dict(orient="records"),
+                "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
                 "technical_indicators": indicators['1D']
             }
             openrouter_result = await self.analyze_with_openrouter(technical_data)
@@ -915,9 +904,9 @@ class AIAnalyzer:
             resistance_levels = openrouter_result.get('resistance_levels', [])
             patterns = openrouter_result.get('patterns', [])
 
-            forecast, prophet_model = forecast_with_prophet(dfs['1D'], periods=7)
-            prophet_perf = evaluate_prophet_performance(dfs['1D'], forecast)
-            future_forecast = forecast[forecast['ds'] > dfs['1D'].index[-1].tz_localize(None)]
+            forecast, prophet_model = forecast_with_prophet(df_1d, periods=7)
+            prophet_perf = evaluate_prophet_performance(df_1d, forecast)
+            future_forecast = forecast[forecast['ds'] > df_1d.index[-1].tz_localize(None)]
             if not future_forecast.empty:
                 next_day_pred = future_forecast.iloc[0]
                 day7_pred = future_forecast.iloc[6] if len(future_forecast) >= 7 else future_forecast.iloc[-1]
@@ -930,7 +919,7 @@ class AIAnalyzer:
             forecast_summary += f"- Sau 7 ngày ({day7_pred['ds'].strftime('%d/%m/%Y')}): {day7_pred['yhat']:.2f}\n"
 
             features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-            xgb_signal, xgb_perf = predict_xgboost_signal(dfs['1D'].copy(), features)
+            xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
             if isinstance(xgb_signal, int):
                 xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
             else:
@@ -938,9 +927,6 @@ class AIAnalyzer:
             xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
 
             outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
-
-            # Limit the number of patterns to include
-            patterns_summary = ", ".join([p['name'] for p in patterns[:3]])
 
             prompt = f"""
 Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
@@ -960,21 +946,39 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 {outlier_text}
 
 **Chỉ số kỹ thuật:**
-{indicators_summary}
+"""
+            for tf, ind in indicators.items():
+                prompt += f"\n--- {tf} ---\n"
+                prompt += f"- Close: {ind.get('close', 0):.2f}\n"
+                prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
+                prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
+                prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
+                prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
+                prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
+                prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
+            prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
+            prompt += f"\n**Tin tức:**\n{news_text}\n"
+            prompt += f"\n**Phân tích từ OpenRouter:**\n"
+            prompt += f"- Hỗ trợ: {', '.join(map(str, support_levels))}\n"
+            prompt += f"- Kháng cự: {', '.join(map(str, resistance_levels))}\n"
+            prompt += f"- Mẫu hình: {', '.join([p['name'] for p in patterns])}\n"
+            prompt += f"\n{xgb_summary}\n"
+            prompt += f"{forecast_summary}\n"
+            prompt += """
+**Yêu cầu:**
+1. So sánh giá/ chỉ số phiên hiện tại và phiên trước đó.
+2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
+3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
+4. Xác định hỗ trợ/kháng cự từ OpenRouter. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+5. Đề xuất MUA/BÁN/NẮM GIỮ với % tin cậy, điểm vào, cắt lỗ, chốt lời. Phương án đi vốn, phân bổ tỷ trọng cụ thể.
+6. Đánh giá rủi ro và tỷ lệ risk/reward.
+7. Kết hợp tin tức, phân tích kỹ thuật, cơ bản và kết quả từ OpenRouter để đưa ra nhận định.
+8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
 
-**Cơ bản:**
-{fundamental_report}
-
-**Tin tức:**
-{news_text}
-
-**Phân tích từ OpenRouter:**
-- Hỗ trợ: {', '.join(map(str, support_levels))}
-- Kháng cự: {', '.join(map(str, resistance_levels))}
-- Mẫu hình: {patterns_summary}
-
-{xgb_summary}
-{forecast_summary}
+**Hướng dẫn bổ sung:**
+- Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
+- Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
+- Chú ý: VNINDEX, VN30 là chỉ số, không phải cổ phiếu.
 """
             response = await self.generate_content(prompt)
             report = response.text
