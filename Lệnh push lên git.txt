@@ -1,0 +1,8 @@
+git add .
+git commit -m "Cập nhật bot 18.9"
+git push
+
+
+git add requirements.txt
+git commit -m "fix: add support for telegram bot"
+git push
