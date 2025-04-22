@@ -19,6 +19,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import gc
 import time
+from functools import lru_cache
 
 import pandas as pd
 import numpy as np
