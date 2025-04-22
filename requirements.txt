@@ -19,7 +19,7 @@ matplotlib
 SQLAlchemy>=1.4
 asyncpg
 
-redis>=4.5.5,<5.0.0
+redis[hiredis]>=4.5.5,<5.0.0
 
 python-telegram-bot[webhooks]>=20.3
 
@@ -31,7 +31,7 @@ kaleido
 
 psycopg2-binary
 
-holiday
+holidays
 
 APScheduler>=3.7.0
 
