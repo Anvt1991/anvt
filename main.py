@@ -1125,7 +1125,7 @@ class AIAnalyzer:
             "Bạn là chuyên gia phân tích kỹ thuật chứng khoán."
             " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing,"
             " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự."
-            "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác:\n"
+            "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác và không bọc trong cặp dấu ```:\n"
             "{\n"
             "  \"support_levels\": [giá1, giá2, ...],\n"
             "  \"resistance_levels\": [giá1, giá2, ...],\n"
@@ -1155,14 +1155,37 @@ class AIAnalyzer:
                 text = await resp.text()
                 try:
                     result = json.loads(text)
+                    logger.info(f"OpenRouter response keys: {result.keys()}")
                     content = result['choices'][0]['message']['content']
-                    return json.loads(content)
+                    
+                    # Xử lý khi nội dung được bọc trong ```json ... ```
+                    if content.startswith('```json') and content.endswith('```'):
+                        content = content[7:-3]  # Cắt bỏ ```json và ```
+                    
+                    # Xử lý khi nội dung là plain JSON
+                    try:
+                        return json.loads(content)
+                    except json.JSONDecodeError:
+                        logger.error(f"Lỗi parse JSON từ nội dung: {content}")
+                        return {
+                            "support_levels": [],
+                            "resistance_levels": [],
+                            "patterns": []
+                        }
                 except json.JSONDecodeError:
                     logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                    return {}
-                except KeyError:
-                    logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
-                    return {}
+                    return {
+                        "support_levels": [],
+                        "resistance_levels": [],
+                        "patterns": []
+                    }
+                except KeyError as e:
+                    logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
+                    return {
+                        "support_levels": [],
+                        "resistance_levels": [],
+                        "patterns": []
+                    }
 
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
@@ -1254,13 +1277,13 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
             prompt += f"{forecast_summary}\n"
             prompt += """
 **Yêu cầu:**
-1. So sánh giá/ chỉ số phiên hiện tại và phiên trước đó.
+1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
 4. Xác định hỗ trợ/kháng cự từ OpenRouter hoặc tính toán. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
-5. Đề xuất MUA/BÁN/NẮM GIỮ với % tin cậy, điểm vào, cắt lỗ, chốt lời. Phương án đi vốn, phân bổ tỷ trọng cụ thể.
+5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
-7. Kết hợp tin tức, phân tích kỹ thuật, cơ bản và kết quả từ OpenRouter để đưa ra nhận định.
+7. Đưa ra nhận định.
 8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
 
 **Hướng dẫn bổ sung:**
