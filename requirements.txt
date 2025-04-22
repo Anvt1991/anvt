@@ -18,6 +18,7 @@ matplotlib
 
 SQLAlchemy>=1.4
 asyncpg
+psycopg2-binary  # Cần thiết cho SQLAlchemy với PostgreSQL
 
 redis[hiredis]>=4.5.5,<5.0.0
 
@@ -25,11 +26,8 @@ python-telegram-bot[webhooks]>=20.3
 
 scikit-learn
 
-nest_asyncio
-
-kaleido
-
-psycopg2-binary
+# Thư viện được sử dụng trong các tính năng cụ thể
+nest_asyncio  # Chỉ được sử dụng trong chế độ test/debug
 
 holidays
 
@@ -37,7 +35,15 @@ APScheduler>=3.7.0
 
 openrouter
 
-statsmodels
+# Thư viện không được sử dụng trực tiếp - có thể bỏ
+# kaleido  
+# statsmodels
+
+# Thư viện mới bổ sung
+pydantic>=2.0.0
+memory-profiler  # Tùy chọn, dùng cho profile hiệu suất
+line_profiler  # Tùy chọn, dùng cho profile hiệu suất
+orjson  # Thư viện JSON hiệu suất cao
 
 
 
