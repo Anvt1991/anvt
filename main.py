@@ -1413,7 +1413,7 @@ Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CH�
 1. Đánh giá tổng quan thị trường. So sánh chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của CHỈ SỐ.
 3. Đánh giá các mô hình, mẫu hình, sóng (nếu có) chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự cho CHỈ SỐ. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định vùng hỗ trợ/kháng cự cho CHỈ SỐ (căn cứ). Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất chiến lược cho nhà đầu tư: nên theo xu hướng thị trường hay đi ngược, mức độ thận trọng.
 6. Đánh giá rủi ro thị trường hiện tại.
 7. Đưa ra nhận định tổng thể về xu hướng thị trường.
@@ -1471,7 +1471,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các mô hình, mẫu hình, sóng (nếu có), chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định hỗ trợ/kháng cự (căn cứ). Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
 7. Đưa ra nhận định.
