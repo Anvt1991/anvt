@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Bot Chứng Khoán Toàn Diện Phiên Bản V18.11 (Nâng cấp):
+Bot Chứng Khoán Toàn Diện Phiên Bản V18.9 (Nâng cấp):
 - Tích hợp AI OpenRouter cho phân tích mẫu hình, sóng, và nến nhật.
 - Sử dụng mô hình deepseek/deepseek-chat-v3-0324:free.
 - Chuẩn hóa dữ liệu và pipeline xử lý.
@@ -17,9 +17,6 @@ import pickle
 from datetime import datetime, timedelta
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import gc
-import time
-from functools import lru_cache
 
 import pandas as pd
 import numpy as np
@@ -45,7 +42,6 @@ from sklearn.metrics import accuracy_score
 from prophet import Prophet
 
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
 import holidays
 import html
 
@@ -54,11 +50,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 import aiohttp
 import json
-from pydantic import BaseModel, field_validator
-import cProfile
-import pstats
-from io import StringIO
-import ta
 
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
@@ -91,227 +82,162 @@ async def run_in_thread(func, *args, **kwargs):
 # ---------- CHUẨN HÓA DỮ LIỆU ----------
 class DataNormalizer:
     """
-    Lớp chuẩn hóa và xử lý dữ liệu với các phương pháp nâng cao
-    để xử lý các trường hợp ngoại lệ và bất thường.
+    Lớp chuẩn hóa dữ liệu cho chứng khoán:
+    - Chuẩn hóa tên cột
+    - Xử lý giá trị ngoại lai
+    - Điền giá trị thiếu
+    - Xác thực dữ liệu
     """
     
     @staticmethod
     def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Chuẩn hóa dataframe theo nhiều phương pháp khác nhau
-        """
-        if df.empty:
-            return df
-            
-        # Tạo bản sao để tránh thay đổi dữ liệu gốc
-        normalized_df = df.copy()
+        """Chuẩn hóa DataFrame để đảm bảo định dạng nhất quán"""
+        if df is None or df.empty:
+            raise ValueError("DataFrame rỗng, không thể chuẩn hóa")
         
-        # Đảm bảo các cột số đúng định dạng
-        numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_columns:
-            if col in normalized_df.columns:
-                # Chuyển đổi sang kiểu số
-                normalized_df[col] = pd.to_numeric(normalized_df[col], errors='coerce')
+        # Chuẩn hóa tên cột
+        column_mapping = {
+            'time': 'date', 'Time': 'date', 'Date': 'date',
+            'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
+            'Adj Close': 'adj_close'
+        }
         
-        # Xử lý các cột ngày tháng
-        date_columns = ['date', 'time', 'datetime']
-        for col in date_columns:
-            if col in normalized_df.columns:
-                try:
-                    normalized_df[col] = pd.to_datetime(normalized_df[col], errors='coerce')
-                except:
-                    pass
-                    
-        # Xóa các hàng trùng lặp
-        normalized_df = normalized_df.drop_duplicates()
+        df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
         
-        # Sắp xếp theo ngày nếu có cột date
-        if 'date' in normalized_df.columns:
-            normalized_df = normalized_df.sort_values('date')
-            
-        return normalized_df
+        # Đảm bảo có đủ các cột cần thiết
+        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.warning(f"Thiếu các cột: {missing_columns}")
+        
+        # Chuyển đổi định dạng index thành datetime nếu chưa phải
+        if 'date' in df.columns and not pd.api.types.is_datetime64_any_dtype(df.index):
+            df['date'] = pd.to_datetime(df['date'])
+            df = df.set_index('date')
+        
+        if not pd.api.types.is_datetime64_any_dtype(df.index):
+            df.index = pd.to_datetime(df.index)
+        
+        return df
     
     @staticmethod
     def validate_data(df: pd.DataFrame) -> (bool, str):
-        """
-        Kiểm tra tính hợp lệ của dữ liệu
-        """
-        if df.empty:
+        """Xác thực tính hợp lệ của dữ liệu chứng khoán"""
+        if df is None or df.empty:
             return False, "DataFrame rỗng"
-            
-        required_columns = ['open', 'high', 'low', 'close']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            return False, f"Thiếu các cột: {', '.join(missing_columns)}"
-            
-        # Kiểm tra dữ liệu hợp lệ
-        if df['high'].min() < df['low'].min():
-            return False, "Có giá trị high nhỏ hơn giá trị low"
-            
-        # Kiểm tra giá âm
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            if col in df.columns and (df[col] < 0).any():
-                return False, f"Có giá trị âm trong cột {col}"
-                
-        # Kiểm tra giá đóng cửa nằm ngoài phạm vi high-low
-        invalid_close = ((df['close'] > df['high']) | (df['close'] < df['low'])).sum()
-        if invalid_close > 0:
-            return False, f"Có {invalid_close} giá đóng cửa nằm ngoài phạm vi high-low"
-            
-        return True, "Dữ liệu hợp lệ"
+        
+        errors = []
+        
+        # Kiểm tra dữ liệu cần thiết
+        if 'close' not in df.columns:
+            errors.append("Thiếu cột 'close'")
+        
+        # Kiểm tra high >= low
+        if 'high' in df.columns and 'low' in df.columns:
+            invalid_hl = (~(df['high'] >= df['low'])).sum()
+            if invalid_hl > 0:
+                errors.append(f"Có {invalid_hl} hàng với giá high < low")
+        
+        # Kiểm tra low <= close <= high
+        if all(col in df.columns for col in ['low', 'close', 'high']):
+            invalid_range = (~((df['close'] >= df['low']) & (df['close'] <= df['high']))).sum()
+            if invalid_range > 0:
+                errors.append(f"Có {invalid_range} hàng với giá close nằm ngoài khoảng [low, high]")
+        
+        # Kiểm tra volume âm
+        if 'volume' in df.columns:
+            negative_volume = (df['volume'] < 0).sum()
+            if negative_volume > 0:
+                errors.append(f"Có {negative_volume} hàng với volume âm")
+        
+        return len(errors) == 0, "\n".join(errors)
     
     @staticmethod
     def detect_outliers(df: pd.DataFrame, columns=['open', 'high', 'low', 'close'], 
                          method='zscore', threshold=3) -> (pd.DataFrame, str):
-        """
-        Phát hiện giá trị ngoại lai trong dữ liệu sử dụng nhiều phương pháp
-        """
-        if df.empty:
-            return df, "DataFrame rỗng"
-            
-        outlier_report = {}
-        outlier_indices = set()
+        """Phát hiện giá trị ngoại lai trong dữ liệu"""
+        if df is None or df.empty:
+            return df, "Không có dữ liệu để phát hiện outlier"
         
-        # Tạo bản sao để tránh thay đổi dữ liệu gốc
-        df_copy = df.copy()
+        report_lines = []
+        df = df.copy()
+        df['is_outlier'] = False
         
         for col in columns:
-            if col not in df_copy.columns:
+            if col not in df.columns:
                 continue
                 
-            # Phát hiện giá trị ngoại lai bằng phương pháp Z-Score
             if method == 'zscore':
-                z_scores = np.abs((df_copy[col] - df_copy[col].mean()) / df_copy[col].std())
+                z_scores = np.abs((df[col] - df[col].mean()) / df[col].std())
                 outliers = z_scores > threshold
-                col_outliers = df_copy.index[outliers].tolist()
-                
-                if len(col_outliers) > 0:
-                    outlier_report[col] = {
-                        'count': len(col_outliers),
-                        'indices': col_outliers[:10],  # Chỉ lấy 10 vị trí đầu tiên để tránh quá dài
-                        'method': 'Z-Score'
-                    }
-                    outlier_indices.update(col_outliers)
-            
-            # Phát hiện giá trị ngoại lai bằng IQR (Interquartile Range)
             elif method == 'iqr':
-                Q1 = df_copy[col].quantile(0.25)
-                Q3 = df_copy[col].quantile(0.75)
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
                 IQR = Q3 - Q1
-                
-                outliers = (df_copy[col] < (Q1 - 1.5 * IQR)) | (df_copy[col] > (Q3 + 1.5 * IQR))
-                col_outliers = df_copy.index[outliers].tolist()
-                
-                if len(col_outliers) > 0:
-                    outlier_report[col] = {
-                        'count': len(col_outliers),
-                        'indices': col_outliers[:10],
-                        'method': 'IQR'
-                    }
-                    outlier_indices.update(col_outliers)
+                outliers = (df[col] < (Q1 - 1.5 * IQR)) | (df[col] > (Q3 + 1.5 * IQR))
+            else:
+                raise ValueError(f"Phương pháp phát hiện outlier '{method}' không được hỗ trợ")
             
-            # Phương pháp Modified Z-Score (Robust Z-Score)
-            elif method == 'modified_zscore':
-                median = df_copy[col].median()
-                # Sử dụng MAD (Median Absolute Deviation) thay vì độ lệch chuẩn
-                mad = np.median(np.abs(df_copy[col] - median))
-                
-                if mad == 0:  # Tránh chia cho 0
-                    continue
-                    
-                modified_z_scores = 0.6745 * np.abs(df_copy[col] - median) / mad
-                outliers = modified_z_scores > threshold
-                col_outliers = df_copy.index[outliers].tolist()
-                
-                if len(col_outliers) > 0:
-                    outlier_report[col] = {
-                        'count': len(col_outliers),
-                        'indices': col_outliers[:10],
-                        'method': 'Modified Z-Score'
-                    }
-                    outlier_indices.update(col_outliers)
-        
-        # Tạo báo cáo tóm tắt
-        report_text = ""
-        total_outliers = len(outlier_indices)
-        
-        if total_outliers > 0:
-            report_text = f"Phát hiện {total_outliers} giá trị ngoại lai trong {len(columns)} cột.\n"
-            for col, details in outlier_report.items():
-                report_text += f"- Cột {col}: {details['count']} giá trị ngoại lai (phương pháp {details['method']})\n"
-        else:
-            report_text = "Không phát hiện giá trị ngoại lai."
+            # Ghi nhận outlier
+            df.loc[outliers, 'is_outlier'] = True
+            outlier_rows = df[outliers]
             
-        return df_copy, report_text
+            if not outlier_rows.empty:
+                report_lines.append(f"Phát hiện {len(outlier_rows)} giá trị bất thường trong cột {col}:")
+                for idx, row in outlier_rows.iterrows():
+                    report_lines.append(f"- {idx.strftime('%Y-%m-%d')}: {row[col]:.2f}")
+        
+        return df, "\n".join(report_lines) if report_lines else "Không có giá trị bất thường"
     
     @staticmethod
     def fill_missing_values(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Điền các giá trị bị thiếu bằng nhiều phương pháp nâng cao
-        """
-        if df.empty:
+        """Điền các giá trị bị thiếu trong dữ liệu"""
+        if df is None or df.empty:
             return df
-            
-        # Tạo bản sao để tránh thay đổi dữ liệu gốc
+        
+        # Kiểm tra giá trị NaN
+        if not df.isna().any().any():
+            return df
+        
         df_filled = df.copy()
         
-        # Danh sách các cột số
-        numeric_columns = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_columns:
-            if col not in df_filled.columns:
-                continue
-                
-            # Kiểm tra giá trị NaN
-            if df_filled[col].isna().sum() > 0:
-                # Nếu ít hơn 10% giá trị bị thiếu, sử dụng nội suy tuyến tính
-                if df_filled[col].isna().mean() < 0.1:
-                    df_filled[col] = df_filled[col].interpolate(method='linear')
-                # Nếu lớn hơn 10% nhưng nhỏ hơn 30%, sử dụng phương pháp nội suy spline
-                elif df_filled[col].isna().mean() < 0.3:
-                    df_filled[col] = df_filled[col].interpolate(method='spline', order=3)
-                # Nếu quá nhiều giá trị bị thiếu, sử dụng giá trị trung bình
-                else:
-                    df_filled[col] = df_filled[col].fillna(df_filled[col].mean())
+        # Điền cột close
+        if 'close' in df.columns and df['close'].isna().any():
+            df_filled['close'] = df_filled['close'].fillna(method='ffill')
         
-        # Đối với các cột phi số
-        for col in df_filled.columns:
-            if col not in numeric_columns and df_filled[col].isna().any():
-                # Sử dụng phương pháp ffill (forward fill) cho dữ liệu thời gian
-                if col in ['date', 'time', 'datetime']:
-                    df_filled[col] = df_filled[col].fillna(method='ffill')
-                # Đối với các cột khác, sử dụng chế độ (giá trị phổ biến nhất)
+        # Điền các cột giá còn lại
+        for col in ['open', 'high', 'low']:
+            if col in df.columns and df[col].isna().any():
+                # Sử dụng giá close nếu có
+                if 'close' in df.columns:
+                    df_filled[col] = df_filled[col].fillna(df_filled['close'])
                 else:
-                    df_filled[col] = df_filled[col].fillna(df_filled[col].mode()[0])
+                    df_filled[col] = df_filled[col].fillna(method='ffill')
+        
+        # Điền volume
+        if 'volume' in df.columns and df['volume'].isna().any():
+            df_filled['volume'] = df_filled['volume'].fillna(0)
         
         return df_filled
     
     @staticmethod
     def standardize_for_db(data: dict) -> dict:
-        """
-        Chuẩn hóa dữ liệu cho cơ sở dữ liệu
-        """
-        if not data:
-            return {}
-            
-        # Tạo bản sao để tránh thay đổi dữ liệu gốc
-        standardized = data.copy()
-        
-        # Xử lý các kiểu dữ liệu phức tạp
-        for key, value in standardized.items():
-            # Chuyển đổi datetime thành chuỗi ISO format
-            if isinstance(value, datetime):
-                standardized[key] = value.isoformat()
-            # Chuyển đổi pandas Timestamp thành chuỗi ISO format
-            elif hasattr(value, 'timestamp') and callable(getattr(value, 'timestamp')):
-                standardized[key] = value.isoformat()
-            # Chuyển đổi numpy int/float thành Python int/float
-            elif hasattr(value, 'item') and callable(getattr(value, 'item')):
-                standardized[key] = value.item()
-            # Chuyển đổi NaN thành None
-            elif pd.isna(value):
-                standardized[key] = None
-                
-        return standardized
+        """Chuẩn hóa dữ liệu cho lưu trữ database"""
+        standardized_data = {}
+        for key, value in data.items():
+            if isinstance(value, np.float64):
+                standardized_data[key] = float(value)
+            elif isinstance(value, np.int64):
+                standardized_data[key] = int(value)
+            elif isinstance(value, pd.Timestamp):
+                standardized_data[key] = value.to_pydatetime()
+            elif isinstance(value, (pd.Series, pd.DataFrame)):
+                standardized_data[key] = value.to_dict()
+            elif isinstance(value, np.ndarray):
+                standardized_data[key] = value.tolist()
+            else:
+                standardized_data[key] = value
+        return standardized_data
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -343,48 +269,6 @@ class RedisManager:
         except Exception as e:
             logger.error(f"Lỗi Redis get: {str(e)}")
             return None
-            
-    async def optimize_cache(self):
-        """Tối ưu bộ nhớ Redis bằng cách xóa cache cũ và không sử dụng"""
-        try:
-            # Lấy tất cả các key từ Redis
-            all_keys = await self.redis_client.keys("*")
-            current_time = datetime.now()
-            deleted_count = 0
-            
-            # Ưu tiên xóa các loại cache khác nhau
-            for key in all_keys:
-                try:
-                    key_str = key.decode('utf-8') if isinstance(key, bytes) else key
-                    
-                    # Không xóa dữ liệu người dùng và báo cáo
-                    if key_str.startswith(("user_", "report_history_")):
-                        continue
-                        
-                    # Xóa cache dữ liệu cũ (>1 ngày) và tin tức
-                    if (key_str.startswith("data_") and "1D" not in key_str) or key_str.startswith("news_"):
-                        await self.redis_client.delete(key)
-                        deleted_count += 1
-                    
-                    # Chỉ giữ lại cache cho các cổ phiếu VN30 và các chỉ số
-                    elif key_str.startswith("data_") and not any(index in key_str for index in ["VNINDEX", "VN30", "HNX30"]):
-                        # Kiểm tra TTL, nếu còn trên 1 giờ thì giữ lại
-                        ttl = await self.redis_client.ttl(key)
-                        if ttl < 3600:  # Dưới 1 giờ
-                            await self.redis_client.delete(key)
-                            deleted_count += 1
-                except Exception as e:
-                    logger.error(f"Lỗi khi xử lý key {key}: {str(e)}")
-                    continue
-                    
-            # Chạy garbage collector sau khi dọn dẹp
-            gc.collect()
-            
-            logger.info(f"Đã tối ưu Redis cache: xóa {deleted_count}/{len(all_keys)} key")
-            return deleted_count
-        except Exception as e:
-            logger.error(f"Lỗi tối ưu Redis cache: {str(e)}")
-            return 0
 
 redis_manager = RedisManager()
 
@@ -565,19 +449,9 @@ class DataLoader:
         timeframe_map = {'1d': '1D', '1w': '1W', '1mo': '1M'}
         timeframe = timeframe_map.get(timeframe.lower(), timeframe).upper()
         
-        # Tối ưu cache theo loại dữ liệu
-        is_popular = symbol.upper() in ['VNINDEX', 'VN30', 'HNX30', 'HNXINDEX', 'UPCOM']
-        is_intraday = timeframe not in ['1D', '1W', '1M']
+        expire = CACHE_EXPIRE_SHORT if timeframe == '1D' else CACHE_EXPIRE_MEDIUM if timeframe == '1W' else CACHE_EXPIRE_LONG
         
-        if is_popular:
-            expire = CACHE_EXPIRE_SHORT if is_intraday else CACHE_EXPIRE_MEDIUM
-        else:
-            expire = CACHE_EXPIRE_SHORT // 2 if is_intraday else CACHE_EXPIRE_SHORT
-        
-        # Giới hạn số nến để tránh quá tải
-        effective_num_candles = min(num_candles, 300)  # Giới hạn tối đa 300 nến
-        
-        cache_key = f"data_{self.source}_{symbol}_{timeframe}_{effective_num_candles}"
+        cache_key = f"data_{self.source}_{symbol}_{timeframe}_{num_candles}"
         cached_data = await redis_manager.get(cache_key)
         if cached_data is not None:
             return cached_data, "Dữ liệu từ cache, không kiểm tra outlier"
@@ -742,138 +616,62 @@ class DataLoader:
 
 # ---------- PHÂN TÍCH KỸ THUẬT ----------
 class TechnicalAnalyzer:
-    """
-    Lớp phân tích kỹ thuật với các phương pháp tính toán đã được tối ưu hóa
-    và áp dụng lưu trữ đệm (caching)
-    """
-    def __init__(self):
-        # Cache để lưu kết quả tính toán
-        self._cache = {}
-    
     @staticmethod
     def _calculate_common_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """Tính toán các chỉ báo kỹ thuật phổ biến"""
-        if df.empty:
-            return df
-            
-        result_df = df.copy()
-        
-        # Chuyển đổi sang dataframe TA-Lib
-        try:
-            # RSI (Relative Strength Index)
-            result_df['rsi_14'] = ta.momentum.RSIIndicator(
-                close=result_df['close'], window=14
-            ).rsi()
-            
-            # MACD (Moving Average Convergence Divergence)
-            macd = ta.trend.MACD(
-                close=result_df['close'], window_slow=26, window_fast=12, window_sign=9
-            )
-            result_df['macd'] = macd.macd()
-            result_df['macd_signal'] = macd.macd_signal()
-            result_df['macd_diff'] = macd.macd_diff()
-            
-            # Bollinger Bands
-            bollinger = ta.volatility.BollingerBands(
-                close=result_df['close'], window=20, window_dev=2
-            )
-            result_df['bb_upper'] = bollinger.bollinger_hband()
-            result_df['bb_lower'] = bollinger.bollinger_lband()
-            result_df['bb_mavg'] = bollinger.bollinger_mavg()
-            
-            # Stochastic Oscillator
-            stoch = ta.momentum.StochasticOscillator(
-                high=result_df['high'], low=result_df['low'], close=result_df['close'], window=14, smooth_window=3
-            )
-            result_df['stoch_k'] = stoch.stoch()
-            result_df['stoch_d'] = stoch.stoch_signal()
-            
-            # Moving Averages
-            result_df['sma_20'] = ta.trend.SMAIndicator(close=result_df['close'], window=20).sma_indicator()
-            result_df['sma_50'] = ta.trend.SMAIndicator(close=result_df['close'], window=50).sma_indicator()
-            result_df['sma_200'] = ta.trend.SMAIndicator(close=result_df['close'], window=200).sma_indicator()
-            result_df['ema_9'] = ta.trend.EMAIndicator(close=result_df['close'], window=9).ema_indicator()
-            
-            # ATR (Average True Range)
-            result_df['atr_14'] = ta.volatility.AverageTrueRange(
-                high=result_df['high'], low=result_df['low'], close=result_df['close'], window=14
-            ).average_true_range()
-            
-            # ADX (Average Directional Index)
-            adx = ta.trend.ADXIndicator(
-                high=result_df['high'], low=result_df['low'], close=result_df['close'], window=14
-            )
-            result_df['adx_14'] = adx.adx()
-            result_df['adx_pos'] = adx.adx_pos()
-            result_df['adx_neg'] = adx.adx_neg()
-            
-        except Exception as e:
-            logger.error(f"Lỗi khi tính toán chỉ báo kỹ thuật: {str(e)}")
-        
-        return result_df
-    
-    @lru_cache(maxsize=32)
-    def _cached_calculate_indicators(self, df_key, columns_hash):
-        """
-        Phiên bản cached của calculate_indicators
-        df_key: khóa đại diện cho dataframe
-        columns_hash: hash của các cột cần thiết để tránh cache sai
-        """
-        # Khôi phục dataframe từ cache, hoặc trả về None nếu không tìm thấy
-        if df_key in self._cache:
-            return self._cache[df_key]['indicators']
-        return None
-    
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Tính toán chỉ báo kỹ thuật với cache để tối ưu hiệu suất
-        """
         if df is None or df.empty:
+            raise ValueError("DataFrame rỗng, không thể tính toán chỉ báo")
+        if 'close' not in df.columns:
+            raise ValueError("Dữ liệu không có cột 'close' cần thiết để tính toán chỉ báo")
+        if len(df) < 20:
+            raise ValueError("Không đủ dữ liệu để tính toán SMA20 (cần ít nhất 20 nến)")
+        try:
+            df['sma20'] = trend.SMAIndicator(df['close'], window=20).sma_indicator()
+            df['sma50'] = trend.SMAIndicator(df['close'], window=50).sma_indicator()
+            df['sma200'] = trend.SMAIndicator(df['close'], window=200).sma_indicator() if len(df) >= 200 else np.nan
+            df['rsi'] = momentum.RSIIndicator(df['close'], window=14).rsi() if len(df) >= 14 else np.nan
+            macd = trend.MACD(df['close'])
+            df['macd'] = macd.macd()
+            df['signal'] = macd.macd_signal()
+            bb = volatility.BollingerBands(df['close'])
+            df['bb_high'] = bb.bollinger_hband()
+            df['bb_low'] = bb.bollinger_lband()
+            ichimoku = trend.IchimokuIndicator(df['high'], df['low'])
+            df['ichimoku_a'] = ichimoku.ichimoku_a()
+            df['ichimoku_b'] = ichimoku.ichimoku_b()
+            df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+            df['mfi'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
+            ichimoku_short = trend.IchimokuIndicator(df['high'], df['low'], window1=9, window2=26)
+            df['tenkan_sen'] = ichimoku_short.ichimoku_a()
+            ichimoku_medium = trend.IchimokuIndicator(df['high'], df['low'], window1=26, window2=52)
+            df['kijun_sen'] = ichimoku_medium.ichimoku_b()
+            df['chikou_span'] = df['close'].shift(-26) if len(df) > 26 else np.nan
+            high_price = df['high'].max()
+            low_price = df['low'].min()
+            diff = high_price - low_price
+            df['fib_0.0'] = high_price
+            df['fib_23.6'] = high_price - 0.236 * diff
+            df['fib_38.2'] = high_price - 0.382 * diff
+            df['fib_50.0'] = high_price - 0.5 * diff
+            df['fib_61.8'] = high_price - 0.618 * diff
+            df['fib_100.0'] = low_price
             return df
-        
-        # Tạo key cho dataframe dựa trên nội dung
-        required_cols = ['open', 'high', 'low', 'close', 'volume'] if 'volume' in df.columns else ['open', 'high', 'low', 'close']
-        cols_available = all(col in df.columns for col in required_cols)
-        
-        if not cols_available:
-            return df
-        
-        # Tạo hash cho dataframe để dùng làm key
-        df_hash = hash(tuple(map(tuple, df[required_cols].tail(5).values.tolist())))
-        columns_hash = hash(tuple(required_cols))
-        
-        # Kiểm tra cache
-        cached_result = self._cached_calculate_indicators(df_hash, columns_hash)
-        if cached_result is not None:
-            return cached_result
-        
-        # Nếu không có trong cache, tính toán và lưu vào cache
-        result = self._calculate_common_indicators(df)
-        self._cache[df_hash] = {
-            'indicators': result,
-            'timestamp': datetime.now()
-        }
-        
-        # Giới hạn kích thước cache
-        if len(self._cache) > 50:  # Giữ tối đa 50 kết quả
-            # Xóa các mục cũ nhất
-            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k]['timestamp'])
-            del self._cache[oldest_key]
-        
-        return result
-    
+        except Exception as e:
+            logger.error(f"Lỗi tính toán chỉ số kỹ thuật: {str(e)}")
+            raise
+
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self._calculate_common_indicators(df)
+
     def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
-        """
-        Tính toán chỉ báo kỹ thuật cho nhiều khung thời gian
-        dfs: dict với key là timeframe, value là dataframe
-        """
-        result = {}
+        indicators = {}
         for timeframe, df in dfs.items():
-            if df is not None and not df.empty:
-                result[timeframe] = self.calculate_indicators(df)
-            else:
-                result[timeframe] = df
-        return result
+            try:
+                df_processed = self._calculate_common_indicators(df)
+                indicators[timeframe] = df_processed.tail(1).to_dict(orient='records')[0]
+            except Exception as e:
+                logger.error(f"Lỗi tính toán cho khung {timeframe}: {str(e)}")
+                indicators[timeframe] = {}
+        return indicators
 
 # ---------- CHUẨN HÓA PIPELINE DỮ LIỆU ----------
 class DataPipeline:
@@ -1173,16 +971,7 @@ def evaluate_prophet_performance(df: pd.DataFrame, forecast: pd.DataFrame) -> fl
 def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, float):
     if df is None or df.empty:
         return "Dữ liệu rỗng", 0.0
-    
     df = df.copy()
-    
-    # Check which features are missing
-    missing_features = [f for f in features if f not in df.columns]
-    if missing_features:
-        logger.error(f"Missing features in DataFrame: {missing_features}")
-        logger.info(f"Available columns: {df.columns.tolist()}")
-        return "Thiếu chỉ báo kỹ thuật", 0.0
-    
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
     X = df[features].shift(1)
     y = df['target']
@@ -1217,24 +1006,7 @@ def train_prophet_model(df: pd.DataFrame) -> (Prophet, float):
 def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClassifier, float):
     if df is None or df.empty:
         raise ValueError("DataFrame rỗng, không thể huấn luyện XGBoost")
-    
     df = df.copy()
-    
-    # Kiểm tra và lấy features có sẵn
-    if not features:
-        features = prepare_features_for_xgboost(df)
-        if not features:
-            raise ValueError("Không tìm thấy đặc trưng kỹ thuật nào trong DataFrame")
-    
-    # Kiểm tra features có tồn tại trong DataFrame không
-    missing_features = [f for f in features if f not in df.columns]
-    if missing_features:
-        logger.warning(f"Thiếu features trong DataFrame khi huấn luyện XGBoost: {missing_features}")
-        # Chỉ sử dụng các features có sẵn
-        features = [f for f in features if f in df.columns]
-        if not features:
-            raise ValueError("Không có đặc trưng nào khớp với DataFrame")
-    
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
     X = df[features].shift(1)
     y = df['target']
@@ -1297,34 +1069,131 @@ class AIAnalyzer:
     def __init__(self):
         genai.configure(api_key=GEMINI_API_KEY)
         self.model = genai.GenerativeModel('gemini-1.5-pro')
-        # Khai báo bộ đếm API calls để theo dõi
-        self.api_calls_count = 0
-        self.last_reset_time = datetime.now()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def generate_content(self, prompt):
-        # Sử dụng semaphore để giới hạn số lượng API call đồng thời
-        async with api_semaphore:
-            # Theo dõi số lượng API calls
-            current_time = datetime.now()
-            if (current_time - self.last_reset_time).total_seconds() > 60:
-                # Reset bộ đếm mỗi phút
-                self.api_calls_count = 0
-                self.last_reset_time = current_time
-                
-            self.api_calls_count += 1
-            if self.api_calls_count > 20:  # Giới hạn 20 calls/phút
-                # Chờ đợi nếu vượt quá giới hạn
-                wait_time = 60 - (current_time - self.last_reset_time).total_seconds()
-                if wait_time > 0:
-                    logger.info(f"Đã đạt giới hạn API calls, chờ {wait_time:.1f}s trước khi tiếp tục")
-                    await asyncio.sleep(wait_time)
-                self.api_calls_count = 1
-                self.last_reset_time = datetime.now()
-                
-            logger.info(f"Thực hiện API call ({self.api_calls_count}/20 trong phút này)")
-            return await self.model.generate_content_async(prompt)
-    
+        return await self.model.generate_content_async(prompt)
+
+    async def load_report_history(self, symbol: str) -> list:
+        return await db.load_report_history(symbol)
+
+    async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
+        await db.save_report_history(symbol, report, close_today, close_yesterday)
+
+    def analyze_price_action(self, df: pd.DataFrame) -> str:
+        if len(df) < 6:
+            return "Không đủ dữ liệu để phân tích."
+        last_5_days = df['close'].tail(5)
+        changes = last_5_days.pct_change().dropna()
+        trend_summary = []
+        for i, change in enumerate(changes):
+            date = last_5_days.index[i+1].strftime('%Y-%m-%d')
+            if df.loc[last_5_days.index[i+1], 'is_outlier']:
+                outlier_note = " (⚠️ outlier)"
+            else:
+                outlier_note = ""
+            if change > 0:
+                trend_summary.append(f"{date}: Tăng {change*100:.2f}%{outlier_note}")
+            elif change < 0:
+                trend_summary.append(f"{date}: Giảm {-change*100:.2f}%{outlier_note}")
+            else:
+                trend_summary.append(f"{date}: Không đổi{outlier_note}")
+        consecutive_up = consecutive_down = 0
+        for change in changes[::-1]:
+            if change > 0:
+                consecutive_up += 1
+                consecutive_down = 0
+            elif change < 0:
+                consecutive_down += 1
+                consecutive_up = 0
+            else:
+                break
+        if consecutive_up >= 3:
+            summary = f"✅ Giá tăng {consecutive_up} phiên liên tiếp.\n"
+        elif consecutive_down >= 3:
+            summary = f"⚠️ Giá giảm {consecutive_down} phiên liên tiếp.\n"
+        else:
+            summary = "🔍 Xu hướng chưa rõ.\n"
+        summary += "\n".join(trend_summary)
+        return summary
+        
+    def calculate_support_resistance_levels(self, df: pd.DataFrame, num_levels: int = 3) -> dict:
+        """
+        Tự tính toán các mức hỗ trợ và kháng cự dựa trên phương pháp:
+        1. Xác định đỉnh và đáy trong dữ liệu lịch sử
+        2. Phân cụm các đỉnh và đáy gần nhau
+        3. Sắp xếp theo tần suất xuất hiện
+        """
+        if len(df) < 20:
+            return {"support_levels": [], "resistance_levels": []}
+            
+        # Tìm đỉnh và đáy cục bộ
+        n = 5  # Window size cho việc xác định đỉnh/đáy
+        df_ext = df.copy()
+        
+        # 1. Xác định đỉnh
+        df_ext['is_peak'] = False
+        for i in range(n, len(df_ext) - n):
+            if all(df_ext['high'].iloc[i] > df_ext['high'].iloc[i-j] for j in range(1, n+1)) and \
+               all(df_ext['high'].iloc[i] > df_ext['high'].iloc[i+j] for j in range(1, n+1)):
+                df_ext.loc[df_ext.index[i], 'is_peak'] = True
+        
+        # 2. Xác định đáy
+        df_ext['is_valley'] = False
+        for i in range(n, len(df_ext) - n):
+            if all(df_ext['low'].iloc[i] < df_ext['low'].iloc[i-j] for j in range(1, n+1)) and \
+               all(df_ext['low'].iloc[i] < df_ext['low'].iloc[i+j] for j in range(1, n+1)):
+                df_ext.loc[df_ext.index[i], 'is_valley'] = True
+        
+        # 3. Lấy giá trị đỉnh và đáy
+        peaks = df_ext[df_ext['is_peak']]['high'].tolist()
+        valleys = df_ext[df_ext['is_valley']]['low'].tolist()
+        
+        # 4. Phân cụm giá trị gần nhau (đơn giản hóa)
+        def cluster_prices(prices, threshold_pct=0.02):
+            if not prices:
+                return []
+            # Sắp xếp giá
+            sorted_prices = sorted(prices)
+            clusters = []
+            current_cluster = [sorted_prices[0]]
+            
+            for price in sorted_prices[1:]:
+                # Nếu giá hiện tại gần với trung bình cụm hiện tại
+                if price <= current_cluster[0] * (1 + threshold_pct):
+                    current_cluster.append(price)
+                else:
+                    # Tính trung bình cụm và thêm vào danh sách
+                    clusters.append(sum(current_cluster) / len(current_cluster))
+                    current_cluster = [price]
+            
+            # Thêm cụm cuối cùng
+            if current_cluster:
+                clusters.append(sum(current_cluster) / len(current_cluster))
+            
+            return clusters
+        
+        resistance_clusters = cluster_prices(peaks)
+        support_clusters = cluster_prices(valleys)
+        
+        # 5. Lấy N mức có tần suất xuất hiện cao nhất
+        current_price = df['close'].iloc[-1]
+        
+        # Lọc kháng cự phía trên giá hiện tại
+        resistance_levels = sorted([r for r in resistance_clusters if r > current_price])[:num_levels]
+        
+        # Lọc hỗ trợ phía dưới giá hiện tại
+        support_levels = sorted([s for s in support_clusters if s < current_price], reverse=True)[:num_levels]
+        
+        # Format kết quả
+        support_levels = [round(float(price), 2) for price in support_levels]
+        resistance_levels = [round(float(price), 2) for price in resistance_levels]
+        
+        return {
+            "support_levels": support_levels,
+            "resistance_levels": resistance_levels
+        }
+
     async def analyze_with_openrouter(self, technical_data):
         if not OPENROUTER_API_KEY:
             raise Exception("Chưa có OPENROUTER_API_KEY")
@@ -1333,22 +1202,17 @@ class AIAnalyzer:
         df = pd.DataFrame(technical_data["candlestick_data"])
         calculated_levels = self.calculate_support_resistance_levels(df)
         
-        # Chuyển đổi technical_data để tránh lỗi serialization DataFrame
-        serializable_data = {
-            "candlestick_data": technical_data["candlestick_data"]
-        }
-        if "technical_indicators" in technical_data:
-            if isinstance(technical_data["technical_indicators"], pd.DataFrame):
-                serializable_data["technical_indicators"] = technical_data["technical_indicators"].to_dict(orient="records")
-            else:
-                serializable_data["technical_indicators"] = technical_data["technical_indicators"]
-        
-        # Tối ưu prompt để giảm token
         prompt = (
-            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán. Nhận diện mẫu hình nến, "
-            "sóng Elliott, Wyckoff, và các vùng hỗ trợ/kháng cự từ dữ liệu sau:"
+            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán với 20 năm kinh nghiệm."
+            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến phổ biến"
+            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự với phương pháp sau:"
+            "\n\n1. Mức hỗ trợ: Xác định các mức giá thấp lặp lại nhiều lần và luôn bật lên, các đáy rõ ràng"
+            "\n2. Mức kháng cự: Xác định các mức giá cao lặp lại nhiều lần và thường bị bán mạnh, các đỉnh rõ ràng"
+            "\n3. Chọn các mức có tần suất kiểm tra cao (giá chạm nhiều lần)"
+            "\n4. Mức hỗ trợ phải thấp hơn giá hiện tại, mức kháng cự phải cao hơn giá hiện tại"
+            "\n5. Giá trị mức hỗ trợ và kháng cự phải tương đồng về độ lớn với giá hiện tại"
             f"\n\nGiá hiện tại: {df['close'].iloc[-1]:.2f}"
-            "\n\nChỉ trả về kết quả dạng JSON, không thêm giải thích:\n"
+            "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác và không bọc trong cặp dấu ```:\n"
             "{\n"
             "  \"support_levels\": [giá1, giá2, ...],\n"
             "  \"resistance_levels\": [giá1, giá2, ...],\n"
@@ -1357,7 +1221,7 @@ class AIAnalyzer:
             "    ...\n"
             "  ]\n"
             "}\n\n"
-            f"Dữ liệu:\n{json.dumps(serializable_data, ensure_ascii=False)}"
+            f"Dữ liệu:\n{json.dumps(technical_data, ensure_ascii=False, indent=2)}"
         )
 
         headers = {
@@ -1373,227 +1237,68 @@ class AIAnalyzer:
             "temperature": 0.2
         }
 
-        # Sử dụng semaphore để giới hạn API calls
-        async with api_semaphore:
-            async with aiohttp.ClientSession() as session:
-                async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as resp:
-                    text = await resp.text()
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as resp:
+                text = await resp.text()
+                try:
+                    result = json.loads(text)
+                    logger.info(f"OpenRouter response keys: {result.keys()}")
+                    content = result['choices'][0]['message']['content']
+                    
+                    # Xử lý khi nội dung được bọc trong ```json ... ```
+                    if content.startswith('```json') and content.endswith('```'):
+                        content = content[7:-3]  # Cắt bỏ ```json và ```
+                    
+                    # Xử lý khi nội dung là plain JSON
                     try:
-                        result = json.loads(text)
-                        logger.info(f"OpenRouter response keys: {result.keys()}")
-                        content = result['choices'][0]['message']['content']
+                        openrouter_response = json.loads(content)
                         
-                        # Xử lý khi nội dung được bọc trong ```json ... ```
-                        if content.startswith('```json') and content.endswith('```'):
-                            content = content[7:-3]  # Cắt bỏ ```json và ```
+                        # Kiểm tra và lọc mức hỗ trợ/kháng cự từ OpenRouter
+                        current_price = df['close'].iloc[-1]
                         
-                        # Xử lý khi nội dung là plain JSON
-                        try:
-                            openrouter_response = json.loads(content)
-                            
-                            # Kiểm tra và lọc mức hỗ trợ/kháng cự từ OpenRouter
-                            current_price = df['close'].iloc[-1]
-                            
-                            # Lọc mức hỗ trợ (phải thấp hơn giá hiện tại và là số hợp lệ)
-                            filtered_support = []
-                            openrouter_support = openrouter_response.get('support_levels', [])
-                            for level in openrouter_support:
-                                try:
-                                    level_value = float(level)
-                                    if level_value < current_price and level_value > 0:
-                                        filtered_support.append(round(level_value, 2))
-                                except (ValueError, TypeError):
-                                    continue
-                            
-                            # Lọc mức kháng cự (phải cao hơn giá hiện tại và là số hợp lệ)
-                            filtered_resistance = []
-                            openrouter_resistance = openrouter_response.get('resistance_levels', [])
-                            for level in openrouter_resistance:
-                                try:
-                                    level_value = float(level)
-                                    if level_value > current_price and level_value > 0:
-                                        filtered_resistance.append(round(level_value, 2))
-                                except (ValueError, TypeError):
-                                    continue
-                            
-                            # Nếu không có mức hỗ trợ/kháng cự hoặc không hợp lệ, sử dụng kết quả từ phương pháp tính toán
-                            if not filtered_support and calculated_levels['support_levels']:
-                                filtered_support = calculated_levels['support_levels']
-                            if not filtered_resistance and calculated_levels['resistance_levels']:
-                                filtered_resistance = calculated_levels['resistance_levels']
-                            
-                            # Trả về kết quả đã lọc
-                            return {
-                                "support_levels": filtered_support,
-                                "resistance_levels": filtered_resistance,
-                                "patterns": openrouter_response.get('patterns', [])
-                            }
-                        except json.JSONDecodeError:
-                            logger.error(f"Lỗi parse JSON từ nội dung: {content}")
-                            return calculated_levels
+                        # Lọc mức hỗ trợ (phải thấp hơn giá hiện tại và là số hợp lệ)
+                        filtered_support = []
+                        openrouter_support = openrouter_response.get('support_levels', [])
+                        for level in openrouter_support:
+                            try:
+                                level_value = float(level)
+                                if level_value < current_price and level_value > 0:
+                                    filtered_support.append(round(level_value, 2))
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # Lọc mức kháng cự (phải cao hơn giá hiện tại và là số hợp lệ)
+                        filtered_resistance = []
+                        openrouter_resistance = openrouter_response.get('resistance_levels', [])
+                        for level in openrouter_resistance:
+                            try:
+                                level_value = float(level)
+                                if level_value > current_price and level_value > 0:
+                                    filtered_resistance.append(round(level_value, 2))
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # Nếu không có mức hỗ trợ/kháng cự hoặc không hợp lệ, sử dụng kết quả từ phương pháp tính toán
+                        if not filtered_support and calculated_levels['support_levels']:
+                            filtered_support = calculated_levels['support_levels']
+                        if not filtered_resistance and calculated_levels['resistance_levels']:
+                            filtered_resistance = calculated_levels['resistance_levels']
+                        
+                        # Trả về kết quả đã lọc
+                        return {
+                            "support_levels": filtered_support,
+                            "resistance_levels": filtered_resistance,
+                            "patterns": openrouter_response.get('patterns', [])
+                        }
                     except json.JSONDecodeError:
-                        logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
+                        logger.error(f"Lỗi parse JSON từ nội dung: {content}")
                         return calculated_levels
-                    except KeyError as e:
-                        logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
-                        return calculated_levels
-
-    def analyze_price_action(self, df: pd.DataFrame) -> dict:
-        """
-        Phân tích price action của DataFrame
-        """
-        if df is None or df.empty or len(df) < 5:
-            return {"trend": "Không xác định", "volatility": "Không xác định", "volume": "Không xác định"}
-        
-        # Phân tích xu hướng
-        close_prices = df['close'].tail(10)
-        current_price = close_prices.iloc[-1]
-        price_5_days_ago = close_prices.iloc[-5] if len(close_prices) >= 5 else close_prices.iloc[0]
-        price_change_pct = (current_price - price_5_days_ago) / price_5_days_ago * 100
-        
-        if price_change_pct > 5:
-            trend = "Tăng mạnh"
-        elif price_change_pct > 2:
-            trend = "Tăng"
-        elif price_change_pct < -5:
-            trend = "Giảm mạnh"
-        elif price_change_pct < -2:
-            trend = "Giảm"
-        else:
-            trend = "Đi ngang"
-        
-        # Phân tích biến động
-        volatility = df['high'].tail(10) - df['low'].tail(10)
-        avg_volatility = volatility.mean() / current_price * 100
-        
-        if avg_volatility > 3:
-            volatility_text = "Cao"
-        elif avg_volatility > 1.5:
-            volatility_text = "Trung bình"
-        else:
-            volatility_text = "Thấp"
-        
-        # Phân tích khối lượng
-        if 'volume' in df.columns:
-            recent_volume = df['volume'].tail(5)
-            avg_volume = recent_volume.mean()
-            prev_avg_volume = df['volume'].iloc[-10:-5].mean() if len(df) >= 10 else avg_volume
-            
-            if avg_volume > prev_avg_volume * 1.5:
-                volume_text = "Tăng mạnh"
-            elif avg_volume > prev_avg_volume * 1.1:
-                volume_text = "Tăng"
-            elif avg_volume < prev_avg_volume * 0.5:
-                volume_text = "Giảm mạnh"
-            elif avg_volume < prev_avg_volume * 0.9:
-                volume_text = "Giảm"
-            else:
-                volume_text = "Ổn định"
-        else:
-            volume_text = "Không có dữ liệu"
-        
-        return {
-            "trend": trend,
-            "volatility": volatility_text,
-            "volume": volume_text,
-            "change_pct": round(price_change_pct, 2)
-        }
-    
-    def calculate_support_resistance_levels(self, df: pd.DataFrame) -> dict:
-        """
-        Tính toán các mức hỗ trợ và kháng cự
-        """
-        if df is None or df.empty or len(df) < 20:
-            return {"support_levels": [], "resistance_levels": []}
-        
-        # Lấy dữ liệu gần đây
-        recent_df = df.tail(100)
-        
-        # Tìm các đỉnh và đáy cục bộ
-        pivot_high = []
-        pivot_low = []
-        
-        # Phát hiện đỉnh (nến có high cao hơn 2 nến liền kề)
-        for i in range(2, len(recent_df) - 2):
-            if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i-1] and 
-                recent_df['high'].iloc[i] > recent_df['high'].iloc[i-2] and
-                recent_df['high'].iloc[i] > recent_df['high'].iloc[i+1] and
-                recent_df['high'].iloc[i] > recent_df['high'].iloc[i+2]):
-                pivot_high.append(recent_df['high'].iloc[i])
-                
-        # Phát hiện đáy (nến có low thấp hơn 2 nến liền kề)
-        for i in range(2, len(recent_df) - 2):
-            if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i-1] and 
-                recent_df['low'].iloc[i] < recent_df['low'].iloc[i-2] and
-                recent_df['low'].iloc[i] < recent_df['low'].iloc[i+1] and
-                recent_df['low'].iloc[i] < recent_df['low'].iloc[i+2]):
-                pivot_low.append(recent_df['low'].iloc[i])
-        
-        # Phân nhóm các mức gần nhau (trong khoảng 2%)
-        current_price = recent_df['close'].iloc[-1]
-        grouped_high = self._group_levels(pivot_high, current_price, threshold=0.02)
-        grouped_low = self._group_levels(pivot_low, current_price, threshold=0.02)
-        
-        # Lọc các mức so với giá hiện tại
-        support_levels = [level for level in grouped_low if level < current_price]
-        resistance_levels = [level for level in grouped_high if level > current_price]
-        
-        # Sắp xếp các mức từ gần đến xa so với giá hiện tại
-        support_levels.sort(reverse=True)
-        resistance_levels.sort()
-        
-        # Giới hạn số lượng mức
-        support_levels = support_levels[:3]
-        resistance_levels = resistance_levels[:3]
-        
-        # Làm tròn giá trị
-        support_levels = [round(level, 2) for level in support_levels]
-        resistance_levels = [round(level, 2) for level in resistance_levels]
-        
-        return {
-            "support_levels": support_levels,
-            "resistance_levels": resistance_levels
-        }
-    
-    def _group_levels(self, levels, current_price, threshold=0.02):
-        """
-        Nhóm các mức gần nhau thành một mức trung bình
-        """
-        if not levels:
-            return []
-        
-        levels.sort()
-        grouped = []
-        current_group = [levels[0]]
-        
-        for i in range(1, len(levels)):
-            # Nếu mức hiện tại gần với mức trước đó
-            if abs(levels[i] - levels[i-1]) / current_price < threshold:
-                current_group.append(levels[i])
-            else:
-                # Thêm trung bình của nhóm hiện tại và bắt đầu nhóm mới
-                grouped.append(sum(current_group) / len(current_group))
-                current_group = [levels[i]]
-        
-        # Thêm nhóm cuối cùng
-        if current_group:
-            grouped.append(sum(current_group) / len(current_group))
-        
-        return grouped
-    
-    async def load_report_history(self, symbol: str) -> list:
-        """
-        Lấy lịch sử báo cáo từ cơ sở dữ liệu
-        """
-        db_manager = DBManager()
-        return await db_manager.load_report_history(symbol)
-
-    async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
-        """
-        Lưu báo cáo vào lịch sử
-        """
-        db_manager = DBManager()
-        await db_manager.save_report_history(symbol, report, close_today, close_yesterday)
+                except json.JSONDecodeError:
+                    logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
+                    return calculated_levels
+                except KeyError as e:
+                    logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
+                    return calculated_levels
 
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
@@ -1619,15 +1324,8 @@ class AIAnalyzer:
             # Phân tích với OpenRouter
             technical_data = {
                 "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
-                "technical_indicators": {}
+                "technical_indicators": indicators['1D']
             }
-
-            # Chuyển đổi DataFrame thành dict để tránh lỗi serialization
-            if isinstance(indicators['1D'], pd.DataFrame):
-                technical_data["technical_indicators"] = indicators['1D'].to_dict(orient="records")[0] if not indicators['1D'].empty else {}
-            else:
-                technical_data["technical_indicators"] = indicators['1D']
-
             openrouter_result = await self.analyze_with_openrouter(technical_data)
             support_levels = openrouter_result.get('support_levels', [])
             resistance_levels = openrouter_result.get('resistance_levels', [])
@@ -1647,22 +1345,17 @@ class AIAnalyzer:
             forecast_summary += f"- Ngày tiếp theo ({next_day_pred['ds'].strftime('%d/%m/%Y')}): {next_day_pred['yhat']:.2f}\n"
             forecast_summary += f"- Sau 7 ngày ({day7_pred['ds'].strftime('%d/%m/%Y')}): {day7_pred['yhat']:.2f}\n"
 
-            # Sửa danh sách features để khớp với tên cột thực tế
-            features = prepare_features_for_xgboost(df_1d.copy())
-            if not features:
-                xgb_summary = "**XGBoost**: Không đủ dữ liệu chỉ báo kỹ thuật\n"
-                xgb_signal, xgb_perf = "Không xác định", 0.0
+            features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
+            xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
+            if isinstance(xgb_signal, int):
+                xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
             else:
-                xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
-                if isinstance(xgb_signal, int):
-                    xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
-                else:
-                    xgb_text = xgb_signal
-                
-                if is_index(symbol):
-                    xgb_summary = f"**XGBoost dự đoán xu hướng tiếp theo** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
-                else:
-                    xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
+                xgb_text = xgb_signal
+            
+            if is_index(symbol):
+                xgb_summary = f"**XGBoost dự đoán xu hướng tiếp theo** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
+            else:
+                xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
 
             outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
 
@@ -1720,7 +1413,7 @@ Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CH�
 1. Đánh giá tổng quan thị trường. So sánh chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của CHỈ SỐ.
 3. Đánh giá các mô hình, mẫu hình, sóng (nếu có) chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự cho CHỈ SỐ. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định vùng hỗ trợ/kháng cự cho CHỈ SỐ (căn cứ). Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất chiến lược cho nhà đầu tư: nên theo xu hướng thị trường hay đi ngược, mức độ thận trọng.
 6. Đánh giá rủi ro thị trường hiện tại.
 7. Đưa ra nhận định tổng thể về xu hướng thị trường.
@@ -1778,7 +1471,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các mô hình, mẫu hình, sóng (nếu có), chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định hỗ trợ/kháng cự (căn cứ). Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
 7. Đưa ra nhận định.
@@ -1819,7 +1512,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🚀 **V18.11 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
+        "🚀 **V18.9 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
         "📊 **Lệnh**:\n"
         "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
         "- /getid - Lấy ID.\n"
@@ -1838,94 +1531,45 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError("Nhập mã chứng khoán (e.g., VNINDEX, SSI).")
         symbol = args[0].upper()
         num_candles = int(args[1]) if len(args) > 1 else DEFAULT_CANDLES
-        
-        # Giới hạn số nến để tránh quá tải
         if num_candles < 20:
-            num_candles = 20
-        elif num_candles > 500:
-            num_candles = 500
+            raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
+        if num_candles > 500:
+            raise ValueError("Tối đa 500 nến!")
         
-        # Gửi thông báo đang xử lý
-        progress_message = await update.message.reply_text("⏳ Đang tải dữ liệu...")
-            
-        # Kiểm tra có trong cache không
-        cache_key = f"report_{symbol}_{num_candles}"
-        cached_report = await redis_manager.get(cache_key)
-        
-        if cached_report:
-            await progress_message.edit_text(f"📊 **Phân tích {symbol}**\n\n{cached_report}")
-            logger.info(f"Sử dụng phân tích từ cache cho {symbol}")
-            return
-            
-        # Gửi tin nhắn cập nhật tiến trình
-        await progress_message.edit_text("⏳ Đang phân tích dữ liệu...")
-        
-        # Xử lý nhiệm vụ phân tích trong background
-        asyncio.create_task(refresh_report_cache(symbol, num_candles))
-        
-        # Báo cáo đang được tạo trong background
-        await progress_message.edit_text(f"🔄 Đang tạo báo cáo chi tiết cho {symbol}...\nSẽ mất khoảng 30-60 giây. Bot sẽ gửi khi hoàn tất.")
-        
-        # Chờ báo cáo được tạo (tối đa 60 giây)
-        start_time = time.time()
-        while time.time() - start_time < 60:
-            await asyncio.sleep(5)  # Kiểm tra mỗi 5 giây
-            cached_report = await redis_manager.get(cache_key)
-            if cached_report:
-                await update.message.reply_text(f"📊 **Phân tích {symbol}**\n\n{cached_report}")
-                return
-        
-        # Nếu quá 60s mà chưa có báo cáo
-        await update.message.reply_text(f"⏳ Báo cáo cho {symbol} đang được tạo và sẽ sẵn sàng trong ít phút.\nVui lòng thử lại sau.")
-    
-    except Exception as e:
-        logger.error(f"Lỗi lệnh analyze: {str(e)}")
-        error_message = str(e)
-        if "Nhập mã chứng khoán" in error_message:
-            await update.message.reply_text(f"❌ {error_message}")
-        else:
-            await update.message.reply_text(f"❌ Lỗi phân tích: {error_message}")
-
-async def refresh_report_cache(symbol: str, num_candles: int):
-    """Làm mới cache báo cáo trong nền để người dùng tiếp theo có dữ liệu mới"""
-    try:
-        logger.info(f"Bắt đầu làm mới cache báo cáo cho {symbol}")
-        
-        # Sử dụng pipeline chuẩn hóa để chuẩn bị dữ liệu
+        # Sử dụng pipeline chuẩn hóa
         data_pipeline = DataPipeline()
         ai_analyzer = AIAnalyzer()
         
-        # Sử dụng timeframe phù hợp cho mỗi loại phân tích
-        timeframes = ['1D']
-        if not is_index(symbol):
-            timeframes = ['1D', '1W']
-            
         # Chuẩn bị dữ liệu với pipeline
-        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=timeframes, num_candles=num_candles)
+        await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol}...")
+        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=['1D', '1W', '1M'], num_candles=num_candles)
+        
+        if pipeline_result['errors']:
+            error_message = f"⚠️ Một số lỗi xảy ra trong quá trình chuẩn bị dữ liệu:\n"
+            error_message += "\n".join(pipeline_result['errors'])
+            await update.message.reply_text(error_message)
         
         if not pipeline_result['dataframes']:
-            logger.error(f"Không thể làm mới cache cho {symbol}: không có dữ liệu")
-            return
+            raise ValueError(f"Không thể tải dữ liệu cho {symbol}")
         
-        # Tạo báo cáo mới
+        # Tạo báo cáo với AI
+        await update.message.reply_text(f"⏳ Đang phân tích {symbol} với AI...")
         report = await ai_analyzer.generate_report(
             pipeline_result['dataframes'], 
             symbol, 
             pipeline_result['fundamental_data'], 
             pipeline_result['outlier_reports']
         )
-        
-        # Lưu vào cache
-        cache_expire = CACHE_EXPIRE_SHORT // 2 if not is_index(symbol) else CACHE_EXPIRE_SHORT
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=cache_expire)
-        
-        logger.info(f"Đã làm mới cache báo cáo cho {symbol} thành công")
-        
-        # Giải phóng bộ nhớ
-        gc.collect()
-        
+        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
+
+        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
+        formatted_report += f"<pre>{html.escape(report)}</pre>"
+        await update.message.reply_text(formatted_report, parse_mode='HTML')
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
     except Exception as e:
-        logger.error(f"Lỗi làm mới cache báo cáo cho {symbol}: {str(e)}")
+        logger.error(f"Lỗi trong analyze_command: {str(e)}")
+        await update.message.reply_text(f"❌ Lỗi không xác định: {str(e)}")
 
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -1946,208 +1590,14 @@ async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"ℹ️ {user_id} đã được duyệt")
 
 # ---------- MAIN & DEPLOY ----------
-async def keep_alive():
-    """Giữ cho ứng dụng không bị ngủ trên Render"""
-    app_url = os.getenv("RENDER_EXTERNAL_URL", "")
-    if not app_url:
-        logger.warning("RENDER_EXTERNAL_URL không được cấu hình, bỏ qua keep_alive")
-        return
-    
-    # Đảm bảo URL kết thúc không có dấu / để thêm đường dẫn ping
-    if app_url.endswith('/'):
-        app_url = app_url[:-1]
-    
-    # Sử dụng endpoint ping để kiểm tra tình trạng server
-    ping_url = f"{app_url}/ping"
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Thử ping endpoint chuyên dụng
-            async with session.get(ping_url, timeout=10) as response:
-                if response.status == 200:
-                    text = await response.text()
-                    if text == "pong":
-                        logger.info("Keep alive ping thành công: pong response nhận được")
-                        return
-                    else:
-                        logger.warning(f"Keep alive ping nhận được response không mong đợi: {text}")
-                else:
-                    logger.warning(f"Keep alive ping trả về mã lỗi: {response.status}")
-            
-            # Thử ping root URL nếu ping endpoint không hoạt động
-            root_url = app_url
-            async with session.get(root_url, timeout=10) as root_response:
-                if root_response.status == 200:
-                    logger.info("Keep alive ping đến URL gốc thành công")
-                else:
-                    logger.warning(f"Keep alive ping đến URL gốc cũng thất bại: {root_response.status}")
-    except Exception as e:
-        logger.error(f"Keep alive ping thất bại: {str(e)}")
-        # Thử với URL thay thế
-        try:
-            service_name = os.getenv("RENDER_SERVICE_NAME", "")
-            if service_name:
-                alt_url = f"https://{service_name}.onrender.com/ping"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(alt_url, timeout=10) as response:
-                        if response.status == 200:
-                            logger.info(f"Keep alive ping đến URL thay thế thành công: {alt_url}")
-                        else:
-                            logger.warning(f"Keep alive ping đến URL thay thế trả về mã lỗi: {response.status}")
-        except Exception as e2:
-            logger.error(f"Keep alive ping đến URL thay thế thất bại: {str(e2)}")
-
-async def send_telegram_document(file_path, caption):
-    """Gửi file qua Telegram API"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
-        
-        # Kiểm tra file tồn tại
-        if not os.path.exists(file_path):
-            logger.error(f"File không tồn tại: {file_path}")
-            return False
-            
-        # Chuẩn bị form data
-        async with aiohttp.ClientSession() as session:
-            form = aiohttp.FormData()
-            form.add_field('chat_id', ADMIN_ID)
-            form.add_field('caption', caption)
-            
-            # Thêm file
-            with open(file_path, 'rb') as file:
-                form.add_field('document', file, 
-                               filename=os.path.basename(file_path),
-                               content_type='application/json')
-            
-            # Gửi request
-            async with session.post(url, data=form) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    if result.get('ok'):
-                        logger.info(f"Đã gửi file {file_path} đến Telegram thành công")
-                        return True
-                    else:
-                        logger.error(f"Lỗi API Telegram: {result}")
-                else:
-                    logger.error(f"Lỗi HTTP khi gửi file: {response.status}")
-                    
-        return False
-    except Exception as e:
-        logger.error(f"Lỗi gửi file qua Telegram: {str(e)}")
-        return False
-
-async def backup_database():
-    """Sao lưu dữ liệu quan trọng và gửi qua Telegram thay vì lưu cục bộ"""
-    try:
-        # Tạo thư mục tạm để lưu file backup
-        temp_dir = "temp_backups"
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # Sao lưu danh sách người dùng
-        async with SessionLocal() as session:
-            users_query = await session.execute(select(ApprovedUser))
-            users_data = [
-                {
-                    "user_id": user.user_id, 
-                    "approved_at": user.approved_at.isoformat()
-                } 
-                for user in users_query.scalars().all()
-            ]
-            
-            # Sao lưu báo cáo gần nhất
-            reports_query = await session.execute(
-                select(ReportHistory).order_by(ReportHistory.id.desc()).limit(20)
-            )
-            reports_data = [
-                {
-                    "id": report.id,
-                    "symbol": report.symbol,
-                    "date": report.date,
-                    "close_today": report.close_today,
-                    "close_yesterday": report.close_yesterday,
-                    "timestamp": report.timestamp.isoformat()
-                }
-                for report in reports_query.scalars().all()
-            ]
-            
-            # Sao lưu thông tin model đã train
-            models_query = await session.execute(
-                select(TrainedModel).order_by(TrainedModel.id.desc())
-            )
-            models_data = [
-                {
-                    "id": model.id,
-                    "symbol": model.symbol,
-                    "model_type": model.model_type,
-                    "created_at": model.created_at.isoformat(),
-                    "performance": model.performance
-                }
-                for model in models_query.scalars().all()
-            ]
-        
-        # Lưu vào tệp tạm thời
-        current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_data = {
-            "users": users_data,
-            "reports": reports_data,
-            "models": models_data,
-            "timestamp": datetime.now().isoformat(),
-            "app_version": "18.9"
-        }
-        
-        backup_file = os.path.join(temp_dir, f"backup_{current_time}.json")
-        with open(backup_file, "w", encoding="utf-8") as f:
-            json.dump(backup_data, f, ensure_ascii=False, indent=2)
-        
-        # Gửi file qua Telegram
-        caption = f"🔄 Backup dữ liệu {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
-        caption += f"👥 Users: {len(users_data)}\n"
-        caption += f"📊 Reports: {len(reports_data)}\n"
-        caption += f"🤖 Models: {len(models_data)}"
-        
-        sent = await send_telegram_document(backup_file, caption)
-        
-        if sent:
-            logger.info(f"Đã sao lưu dữ liệu và gửi qua Telegram thành công")
-        else:
-            logger.error("Không thể gửi backup qua Telegram")
-        
-        # Xóa file tạm sau khi gửi
-        try:
-            os.remove(backup_file)
-            logger.info(f"Đã xóa file tạm: {backup_file}")
-        except Exception as e:
-            logger.warning(f"Không thể xóa file tạm {backup_file}: {str(e)}")
-        
-        return sent
-    except Exception as e:
-        logger.error(f"Lỗi sao lưu dữ liệu: {str(e)}")
-        return False
-
 async def main():
-    # Khởi tạo DB 
     await init_db()
 
-    # Thiết lập semaphore cho API call
-    global api_semaphore
-    api_semaphore = asyncio.Semaphore(3)  # Giới hạn tối đa 3 API call đồng thời
-
-    # Khởi tạo scheduler với các tác vụ định kỳ
     scheduler = AsyncIOScheduler()
-    
-    # Tác vụ định kỳ - giảm tần suất để giảm tải
-    scheduler.add_job(auto_train_models, 'cron', hour=3, minute=0)  # Dời sang 3h sáng
-    scheduler.add_job(keep_alive, 'interval', minutes=14)  # Giữ nguyên để tránh Render sleep (15 phút)
-    scheduler.add_job(backup_database, 'cron', hour=2, minute=0)  # Dời sang 2h sáng
-    scheduler.add_job(redis_manager.optimize_cache, 'interval', hours=12)  # Giảm tần suất xuống 12h/lần
-    
-    # Thêm tác vụ giải phóng bộ nhớ định kỳ
-    scheduler.add_job(lambda: gc.collect(), 'interval', hours=1)
-    
+    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
     scheduler.start()
-    logger.info("Scheduler đã khởi động với các tác vụ định kỳ.")
+    logger.info("Auto training scheduler đã khởi động.")
 
-    # Cài đặt bot
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyze", analyze_command))
@@ -2155,301 +1605,15 @@ async def main():
     app.add_handler(CommandHandler("approve", approve_user))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
     logger.info("🤖 Bot khởi động!")
-    
-    # Tối ưu bộ nhớ trước khi chạy server
-    gc.collect()
-    
-    # Thiết lập webhook với hỗ trợ endpoint ping cho keep_alive
-    from aiohttp import web
-    
-    # Tạo ứng dụng web AIOHTTP
-    web_app = web.Application(middlewares=[web.normalize_path_middleware()])
-    
-    # Xử lý ping request
-    async def handle_ping(request):
-        return web.Response(text="pong")
-    
-    # Xử lý webhook từ Telegram - sửa lại để chấp nhận mọi request từ Telegram
-    async def handle_webhook(request):
-        try:
-            update_data = await request.json()
-            # Ghi log để debug nhưng chỉ log cấu trúc, không log hết nội dung
-            if 'message' in update_data and 'text' in update_data['message']:
-                logger.info(f"Received webhook: {update_data['message'].get('text', '')[:20]}...")
-            else:
-                logger.info(f"Received webhook data type: {list(update_data.keys())}")
-                
-            update = Update.de_json(update_data, app.bot)
-            await app.process_update(update)
-            return web.Response(text="OK")
-        except Exception as e:
-            logger.error(f"Error processing webhook: {str(e)}")
-            return web.Response(text=f"Error: {str(e)}", status=500)
-    
-    # Thêm routes vào ứng dụng web - sửa lại để tương thích với cấu hình Telegram
-    web_app.add_routes([
-        web.get('/ping', handle_ping),
-        web.post(f'/{TELEGRAM_TOKEN}', handle_webhook),
-    ])
-    
-    # Cài đặt webhook với cơ chế tự phục hồi
+
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
     WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-    logger.info(f"Setting webhook URL to: {WEBHOOK_URL}")
-    
-    async def setup_webhook():
-        retry_count = 0
-        max_retries = 5
-        while retry_count < max_retries:
-            try:
-                webhook_info = await app.bot.get_webhook_info()
-                logger.info(f"Current webhook: {webhook_info.url}")
-                if webhook_info.url != WEBHOOK_URL:
-                    await app.bot.set_webhook(url=WEBHOOK_URL)
-                    logger.info(f"Webhook đã được thiết lập thành công: {WEBHOOK_URL}")
-                else:
-                    logger.info(f"Webhook đã được thiết lập trước đó: {WEBHOOK_URL}")
-                return
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"Lỗi thiết lập webhook (thử lần {retry_count}): {str(e)}")
-                await asyncio.sleep(5)
-    
-    # Khởi tạo webhook
-    await setup_webhook()
-    
-    # Khởi động AIOHTTP web server (thay thế cho Flask)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    
-    await site.start()
-    logger.info(f"Server khởi động trên cổng {PORT}")
-    
-    # Giữ cho ứng dụng tiếp tục chạy
-    while True:
-        await asyncio.sleep(3600)  # Ngủ 1 giờ
-
-class StockData(BaseModel):
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: int
-    date: datetime
-
-    @field_validator('high')
-    def high_must_be_greater_than_low(cls, v, info):
-        values = info.data
-        if 'low' in values and v < values['low']:
-            raise ValueError('High must be greater than low')
-        return v
-
-    @field_validator('close')
-    def close_must_be_within_range(cls, v, info):
-        values = info.data
-        if 'low' in values and 'high' in values and not (values['low'] <= v <= values['high']):
-            raise ValueError('Close must be within the range of low and high')
-        return v
-
-    @field_validator('volume')
-    def volume_must_be_non_negative(cls, v):
-        if v < 0:
-            raise ValueError('Volume must be non-negative')
-        return v
-
-# Example usage
-# stock_data = StockData(open=100.0, high=105.0, low=99.0, close=102.0, volume=1000, date=datetime.now())
-
-def profile_function(func):
-    """
-    Decorator để profile một hàm và ghi ra thông tin về hiệu suất
-    """
-    def wrapper(*args, **kwargs):
-        profiler = cProfile.Profile()
-        profiler.enable()
-        result = func(*args, **kwargs)
-        profiler.disable()
-        
-        # Tạo báo cáo
-        s = StringIO()
-        stats = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
-        stats.print_stats(20)  # In ra 20 hàm tiêu tốn thời gian nhất
-        
-        logger.debug(f"Profiling results for {func.__name__}:\n{s.getvalue()}")
-        return result
-    return wrapper
-
-# Áp dụng cache để lưu trữ kết quả tính toán các chỉ báo kỹ thuật
-from functools import lru_cache
-
-@lru_cache(maxsize=128)
-def cached_technical_calculation(df_key, indicator_name):
-    """
-    Hàm này sẽ lưu trữ kết quả tính toán các chỉ báo kỹ thuật
-    df_key: một key duy nhất đại diện cho dataframe (ví dụ: symbol+timeframe+hash)
-    indicator_name: tên của chỉ báo kỹ thuật
-    """
-    # Thực hiện tính toán chỉ báo dựa trên key
-    # Đây chỉ là hàm giúp cache kết quả
-    return None
-
-# Tối ưu hóa việc huấn luyện mô hình
-async def optimized_train_models_for_symbol(symbol: str):
-    """
-    Phiên bản tối ưu của train_models_for_symbol với khả năng phân tích hiệu suất
-    và các tối ưu hóa về bộ nhớ và CPU
-    """
-    try:
-        logger.info(f"Bắt đầu huấn luyện mô hình cho {symbol}")
-        
-        # Tải dữ liệu
-        data_loader = DataLoader()
-        df, status = await data_loader.load_data(symbol, 'daily', 1000)
-        
-        if df is None or df.empty:
-            logger.error(f"Không thể tải dữ liệu cho {symbol}")
-            return
-        
-        # Tiền xử lý dữ liệu tối ưu hóa
-        df = optimize_dataframe_memory(df)
-        
-        # Huấn luyện các mô hình và đo hiệu suất
-        model_db_manager = ModelDBManager()
-        
-        # Huấn luyện mô hình Prophet
-        start_time = time.time()
-        prophet_model, prophet_performance = train_prophet_model(df.copy())
-        prophet_time = time.time() - start_time
-        logger.info(f"Huấn luyện mô hình Prophet cho {symbol} hoàn tất trong {prophet_time:.2f}s, hiệu suất: {prophet_performance:.4f}")
-        
-        # Lưu mô hình
-        if prophet_model:
-            prophet_model_binary = pickle.dumps(prophet_model)
-            await model_db_manager.store_trained_model(symbol, "prophet", prophet_model_binary, prophet_performance)
-        
-        # Chuẩn bị dữ liệu cho XGBoost 
-        features = prepare_features_for_xgboost(df)
-        
-        # Huấn luyện mô hình XGBoost
-        start_time = time.time()
-        xgb_model, xgb_performance = train_xgboost_model(df.copy(), features)
-        xgb_time = time.time() - start_time
-        logger.info(f"Huấn luyện mô hình XGBoost cho {symbol} hoàn tất trong {xgb_time:.2f}s, hiệu suất: {xgb_performance:.4f}")
-        
-        # Lưu mô hình
-        if xgb_model:
-            xgb_model_binary = pickle.dumps(xgb_model)
-            await model_db_manager.store_trained_model(symbol, "xgboost", xgb_model_binary, xgb_performance)
-        
-        # Giải phóng bộ nhớ
-        del df, prophet_model, xgb_model
-        gc.collect()
-        
-        return True
-    except Exception as e:
-        logger.error(f"Lỗi khi huấn luyện mô hình cho {symbol}: {str(e)}")
-        return False
-
-def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tối ưu hóa bộ nhớ sử dụng cho DataFrame bằng cách chuyển đổi kiểu dữ liệu
-    """
-    # Tạo một bản sao để tránh ảnh hưởng đến dữ liệu gốc
-    result = df.copy()
-    
-    # Tối ưu kiểu dữ liệu số nguyên
-    for col in result.select_dtypes(include=['int']):
-        # Chuyển đổi sang các kiểu int nhỏ hơn nếu có thể
-        c_min = result[col].min()
-        c_max = result[col].max()
-        
-        if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-            result[col] = result[col].astype(np.int8)
-        elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-            result[col] = result[col].astype(np.int16)
-        elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-            result[col] = result[col].astype(np.int32)
-    
-    # Tối ưu kiểu dữ liệu số thực
-    for col in result.select_dtypes(include=['float']):
-        # Chuyển đổi sang các kiểu float nhỏ hơn nếu có thể
-        result[col] = result[col].astype(np.float32)
-    
-    # Tối ưu kiểu dữ liệu object
-    for col in result.select_dtypes(include=['object']):
-        # Nếu là cột chứa danh mục có số lượng giá trị nhỏ, chuyển sang categorical
-        if result[col].nunique() < 50:  # Ngưỡng 50 danh mục
-            result[col] = result[col].astype('category')
-    
-    return result
-
-def prepare_features_for_xgboost(df: pd.DataFrame) -> list:
-    """Return a list of technical indicator features that exist in the DataFrame"""
-    all_possible_features = [
-        'sma_20', 'sma20', 'sma_50', 'sma50', 'sma_200', 'sma200',
-        'rsi_14', 'rsi', 'macd', 'macd_signal', 'signal',
-        'bb_upper', 'bb_high', 'bb_lower', 'bb_low', 'bb_mavg',
-        'adx_14', 'adx', 'ema_9', 'ema9', 'atr_14', 'atr',
-        'stoch_k', 'stoch_d', 'ichimoku_a', 'ichimoku_b'
-    ]
-    
-    # Check which features are available in the DataFrame
-    available_features = [f for f in all_possible_features if f in df.columns]
-    
-    if not available_features:
-        logger.warning(f"No technical features found in DataFrame. Available columns: {df.columns.tolist()}")
-        return []
-    
-    # Ensure we have a reasonable set of features
-    essential_features = []
-    
-    # Try to find SMA features
-    for pair in [('sma_20', 'sma20'), ('sma_50', 'sma50'), ('sma_200', 'sma200')]:
-        if pair[0] in df.columns:
-            essential_features.append(pair[0])
-        elif pair[1] in df.columns:
-            essential_features.append(pair[1])
-    
-    # Try to find RSI
-    if 'rsi_14' in df.columns:
-        essential_features.append('rsi_14')
-    elif 'rsi' in df.columns:
-        essential_features.append('rsi')
-    
-    # Add any available features up to a reasonable number
-    additional_features = [f for f in available_features if f not in essential_features]
-    selected_features = essential_features + additional_features[:8-len(essential_features)]
-    
-    logger.info(f"Selected features for XGBoost: {selected_features}")
-    return selected_features
-
-# Tối ưu hóa quá trình dự đoán
-def optimized_predict_xgboost_signal(df: pd.DataFrame, features: list, model) -> (int, float):
-    """
-    Phiên bản tối ưu của hàm dự đoán tín hiệu XGBoost
-    """
-    # Lấy dữ liệu mới nhất
-    X = df[features].iloc[-1:].values
-    
-    # Kiểm tra NaN và thay thế
-    if np.isnan(X).any():
-        # Thay thế NaN bằng giá trị trung bình của cột
-        col_means = np.nanmean(df[features].values, axis=0)
-        for i in range(X.shape[1]):
-            if np.isnan(X[0, i]):
-                X[0, i] = col_means[i]
-    
-    # Dự đoán
-    prediction = model.predict_proba(X)[0]
-    signal = 1 if prediction[1] > 0.5 else (-1 if prediction[1] < 0.3 else 0)
-    confidence = prediction[1] if signal == 1 else (1 - prediction[1] if signal == -1 else 0.5)
-    
-    return signal, confidence
-
-# Thay thế hàm train_models_for_symbol gốc bằng phiên bản tối ưu
-async def train_models_for_symbol(symbol: str):
-    return await optimized_train_models_for_symbol(symbol)
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL,
+        url_path=TELEGRAM_TOKEN
+    )
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "test":
