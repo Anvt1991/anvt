@@ -57,6 +57,8 @@ import cProfile
 import pstats
 from io import StringIO
 
+from functools import lru_cache
+
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
