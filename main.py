@@ -1173,7 +1173,16 @@ def evaluate_prophet_performance(df: pd.DataFrame, forecast: pd.DataFrame) -> fl
 def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, float):
     if df is None or df.empty:
         return "Dữ liệu rỗng", 0.0
+    
     df = df.copy()
+    
+    # Check which features are missing
+    missing_features = [f for f in features if f not in df.columns]
+    if missing_features:
+        logger.error(f"Missing features in DataFrame: {missing_features}")
+        logger.info(f"Available columns: {df.columns.tolist()}")
+        return "Thiếu chỉ báo kỹ thuật", 0.0
+    
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
     X = df[features].shift(1)
     y = df['target']
@@ -1208,7 +1217,24 @@ def train_prophet_model(df: pd.DataFrame) -> (Prophet, float):
 def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClassifier, float):
     if df is None or df.empty:
         raise ValueError("DataFrame rỗng, không thể huấn luyện XGBoost")
+    
     df = df.copy()
+    
+    # Kiểm tra và lấy features có sẵn
+    if not features:
+        features = prepare_features_for_xgboost(df)
+        if not features:
+            raise ValueError("Không tìm thấy đặc trưng kỹ thuật nào trong DataFrame")
+    
+    # Kiểm tra features có tồn tại trong DataFrame không
+    missing_features = [f for f in features if f not in df.columns]
+    if missing_features:
+        logger.warning(f"Thiếu features trong DataFrame khi huấn luyện XGBoost: {missing_features}")
+        # Chỉ sử dụng các features có sẵn
+        features = [f for f in features if f in df.columns]
+        if not features:
+            raise ValueError("Không có đặc trưng nào khớp với DataFrame")
+    
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
     X = df[features].shift(1)
     y = df['target']
@@ -1621,17 +1647,22 @@ class AIAnalyzer:
             forecast_summary += f"- Ngày tiếp theo ({next_day_pred['ds'].strftime('%d/%m/%Y')}): {next_day_pred['yhat']:.2f}\n"
             forecast_summary += f"- Sau 7 ngày ({day7_pred['ds'].strftime('%d/%m/%Y')}): {day7_pred['yhat']:.2f}\n"
 
-            features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-            xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
-            if isinstance(xgb_signal, int):
-                xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
+            # Sửa danh sách features để khớp với tên cột thực tế
+            features = prepare_features_for_xgboost(df_1d.copy())
+            if not features:
+                xgb_summary = "**XGBoost**: Không đủ dữ liệu chỉ báo kỹ thuật\n"
+                xgb_signal, xgb_perf = "Không xác định", 0.0
             else:
-                xgb_text = xgb_signal
-            
-            if is_index(symbol):
-                xgb_summary = f"**XGBoost dự đoán xu hướng tiếp theo** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
-            else:
-                xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
+                xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
+                if isinstance(xgb_signal, int):
+                    xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
+                else:
+                    xgb_text = xgb_signal
+                
+                if is_index(symbol):
+                    xgb_summary = f"**XGBoost dự đoán xu hướng tiếp theo** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
+                else:
+                    xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
 
             outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
 
@@ -1821,7 +1852,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cached_report:
             await update.message.reply_text(f"📊 Báo cáo từ cache cho {symbol}:")
             formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
-            formatted_report += f"<pre>{html.escape(cached_report)}</pre>"
+            formatted_report += f"<pre>{html.escape(cached_report['report'] if isinstance(cached_report, dict) else cached_report)}</pre>"
             await update.message.reply_text(formatted_report, parse_mode='HTML')
             
             # Tạo một task để làm mới cache trong nền nếu báo cáo đã cũ (>30 phút)
@@ -1961,17 +1992,52 @@ async def keep_alive():
     """Giữ cho ứng dụng không bị ngủ trên Render"""
     app_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if not app_url:
+        logger.warning("RENDER_EXTERNAL_URL không được cấu hình, bỏ qua keep_alive")
         return
-        
+    
+    # Đảm bảo URL kết thúc không có dấu / để thêm đường dẫn ping
+    if app_url.endswith('/'):
+        app_url = app_url[:-1]
+    
+    # Sử dụng endpoint ping để kiểm tra tình trạng server
+    ping_url = f"{app_url}/ping"
+    
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(app_url, timeout=10) as response:
+            # Thử ping endpoint chuyên dụng
+            async with session.get(ping_url, timeout=10) as response:
                 if response.status == 200:
-                    logger.info("Keep alive ping thành công")
+                    text = await response.text()
+                    if text == "pong":
+                        logger.info("Keep alive ping thành công: pong response nhận được")
+                        return
+                    else:
+                        logger.warning(f"Keep alive ping nhận được response không mong đợi: {text}")
                 else:
                     logger.warning(f"Keep alive ping trả về mã lỗi: {response.status}")
+            
+            # Thử ping root URL nếu ping endpoint không hoạt động
+            root_url = app_url
+            async with session.get(root_url, timeout=10) as root_response:
+                if root_response.status == 200:
+                    logger.info("Keep alive ping đến URL gốc thành công")
+                else:
+                    logger.warning(f"Keep alive ping đến URL gốc cũng thất bại: {root_response.status}")
     except Exception as e:
         logger.error(f"Keep alive ping thất bại: {str(e)}")
+        # Thử với URL thay thế
+        try:
+            service_name = os.getenv("RENDER_SERVICE_NAME", "")
+            if service_name:
+                alt_url = f"https://{service_name}.onrender.com/ping"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(alt_url, timeout=10) as response:
+                        if response.status == 200:
+                            logger.info(f"Keep alive ping đến URL thay thế thành công: {alt_url}")
+                        else:
+                            logger.warning(f"Keep alive ping đến URL thay thế trả về mã lỗi: {response.status}")
+        except Exception as e2:
+            logger.error(f"Keep alive ping đến URL thay thế thất bại: {str(e2)}")
 
 async def send_telegram_document(file_path, caption):
     """Gửi file qua Telegram API"""
@@ -2129,6 +2195,28 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
     logger.info("🤖 Bot khởi động!")
 
+    # Thiết lập webhook với hỗ trợ endpoint ping cho keep_alive
+    from aiohttp import web
+    
+    # Xử lý ping request
+    async def handle_ping(request):
+        return web.Response(text="pong")
+    
+    # Xử lý webhook từ Telegram
+    async def handle_webhook(request):
+        if request.match_info.get('token') == TELEGRAM_TOKEN:
+            update_data = await request.json()
+            update = Update.de_json(update_data, app.bot)
+            await app.process_update(update)
+            return web.Response(text="OK")
+        return web.Response(text="Unauthorized", status=403)
+    
+    # Cài đặt routes cho AIOHTTP server
+    routes = [
+        web.get('/ping', handle_ping),
+        web.post(f'/{TELEGRAM_TOKEN}', handle_webhook),
+    ]
+    
     # Cài đặt webhook với cơ chế tự phục hồi
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
     WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
@@ -2153,13 +2241,20 @@ async def main():
     # Khởi tạo webhook
     await setup_webhook()
     
-    # Khởi động webhook server
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=WEBHOOK_URL,
-        url_path=TELEGRAM_TOKEN
-    )
+    # Khởi động AIOHTTP web server (thay thế cho Flask)
+    runner = web.AppRunner(web.Application(middlewares=[web.normalize_path_middleware()]))
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    
+    # Thêm routes sau khi setup runner
+    runner.app.add_routes(routes)
+    
+    await site.start()
+    logger.info(f"Server khởi động trên cổng {PORT}")
+    
+    # Giữ cho ứng dụng tiếp tục chạy
+    while True:
+        await asyncio.sleep(3600)  # Ngủ 1 giờ
 
 class StockData(BaseModel):
     open: float
@@ -2316,26 +2411,44 @@ def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 def prepare_features_for_xgboost(df: pd.DataFrame) -> list:
-    """
-    Chuẩn bị và chọn lọc đặc trưng cho mô hình XGBoost
-    """
-    # Tính toán các chỉ báo kỹ thuật
-    analyzer = TechnicalAnalyzer()
-    df_with_indicators = analyzer.calculate_indicators(df)
-    
-    # Chọn lọc đặc trưng quan trọng để giảm kích thước mô hình và tăng tốc độ
-    # (Có thể sử dụng SelectKBest, PCA, hoặc các phương pháp khác)
-    
-    # Danh sách các đặc trưng quan trọng (ví dụ)
-    important_features = [
-        'rsi_14', 'macd', 'macd_signal', 'stoch_k', 'stoch_d', 
-        'ema_9', 'sma_20', 'sma_50', 'atr_14', 'adx_14'
+    """Return a list of technical indicator features that exist in the DataFrame"""
+    all_possible_features = [
+        'sma_20', 'sma20', 'sma_50', 'sma50', 'sma_200', 'sma200',
+        'rsi_14', 'rsi', 'macd', 'macd_signal', 'signal',
+        'bb_upper', 'bb_high', 'bb_lower', 'bb_low', 'bb_mavg',
+        'adx_14', 'adx', 'ema_9', 'ema9', 'atr_14', 'atr',
+        'stoch_k', 'stoch_d', 'ichimoku_a', 'ichimoku_b'
     ]
     
-    # Chỉ lấy các đặc trưng có trong DataFrame
-    available_features = [f for f in important_features if f in df_with_indicators.columns]
+    # Check which features are available in the DataFrame
+    available_features = [f for f in all_possible_features if f in df.columns]
     
-    return available_features
+    if not available_features:
+        logger.warning(f"No technical features found in DataFrame. Available columns: {df.columns.tolist()}")
+        return []
+    
+    # Ensure we have a reasonable set of features
+    essential_features = []
+    
+    # Try to find SMA features
+    for pair in [('sma_20', 'sma20'), ('sma_50', 'sma50'), ('sma_200', 'sma200')]:
+        if pair[0] in df.columns:
+            essential_features.append(pair[0])
+        elif pair[1] in df.columns:
+            essential_features.append(pair[1])
+    
+    # Try to find RSI
+    if 'rsi_14' in df.columns:
+        essential_features.append('rsi_14')
+    elif 'rsi' in df.columns:
+        essential_features.append('rsi')
+    
+    # Add any available features up to a reasonable number
+    additional_features = [f for f in available_features if f not in essential_features]
+    selected_features = essential_features + additional_features[:8-len(essential_features)]
+    
+    logger.info(f"Selected features for XGBoost: {selected_features}")
+    return selected_features
 
 # Tối ưu hóa quá trình dự đoán
 def optimized_predict_xgboost_signal(df: pd.DataFrame, features: list, model) -> (int, float):
