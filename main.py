@@ -1841,97 +1841,61 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Giới hạn số nến để tránh quá tải
         if num_candles < 20:
-            raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
-        if num_candles > 300:
-            num_candles = 300
-            await update.message.reply_text("⚠️ Số nến đã được giới hạn tối đa 300 để tránh quá tải.")
+            num_candles = 20
+        elif num_candles > 500:
+            num_candles = 500
         
-        # Kiểm tra cache trước
+        # Gửi thông báo đang xử lý
+        progress_message = await update.message.reply_text("⏳ Đang tải dữ liệu...")
+            
+        # Kiểm tra có trong cache không
         cache_key = f"report_{symbol}_{num_candles}"
         cached_report = await redis_manager.get(cache_key)
+        
         if cached_report:
-            await update.message.reply_text(f"📊 Báo cáo từ cache cho {symbol}:")
-            formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
-            formatted_report += f"<pre>{html.escape(cached_report['report'] if isinstance(cached_report, dict) else cached_report)}</pre>"
-            await update.message.reply_text(formatted_report, parse_mode='HTML')
-            
-            # Tạo một task để làm mới cache trong nền nếu báo cáo đã cũ (>30 phút)
-            if isinstance(cached_report, dict) and cached_report.get('timestamp'):
-                cache_time = datetime.fromisoformat(cached_report.get('timestamp'))
-                if (datetime.now() - cache_time).total_seconds() > 1800:  # 30 phút
-                    asyncio.create_task(refresh_report_cache(symbol, num_candles))
+            await progress_message.edit_text(f"📊 **Phân tích {symbol}**\n\n{cached_report}")
+            logger.info(f"Sử dụng phân tích từ cache cho {symbol}")
             return
             
-        # Sử dụng pipeline chuẩn hóa
-        data_pipeline = DataPipeline()
-        ai_analyzer = AIAnalyzer()
+        # Gửi tin nhắn cập nhật tiến trình
+        await progress_message.edit_text("⏳ Đang phân tích dữ liệu...")
         
-        # Gửi thông báo trạng thái tải dữ liệu
-        status_message = await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol}...")
+        # Xử lý nhiệm vụ phân tích trong background
+        asyncio.create_task(refresh_report_cache(symbol, num_candles))
         
-        # Sử dụng timeframe phù hợp cho mỗi loại phân tích
-        timeframes = ['1D']
-        if not is_index(symbol):  # Chỉ tải nhiều khung thời gian cho cổ phiếu
-            timeframes = ['1D', '1W']  # Giảm bớt khung thời gian (không tải 1M)
-            
-        # Chuẩn bị dữ liệu với pipeline
-        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=timeframes, num_candles=num_candles)
+        # Báo cáo đang được tạo trong background
+        await progress_message.edit_text(f"🔄 Đang tạo báo cáo chi tiết cho {symbol}...\nSẽ mất khoảng 30-60 giây. Bot sẽ gửi khi hoàn tất.")
         
-        # Cập nhật trạng thái
-        await status_message.edit_text(f"⏳ Dữ liệu đã sẵn sàng. Đang phân tích {symbol}...")
+        # Chờ báo cáo được tạo (tối đa 60 giây)
+        start_time = time.time()
+        while time.time() - start_time < 60:
+            await asyncio.sleep(5)  # Kiểm tra mỗi 5 giây
+            cached_report = await redis_manager.get(cache_key)
+            if cached_report:
+                await update.message.reply_text(f"📊 **Phân tích {symbol}**\n\n{cached_report}")
+                return
         
-        if pipeline_result['errors']:
-            error_message = f"⚠️ Một số lỗi xảy ra trong quá trình chuẩn bị dữ liệu:\n"
-            error_message += "\n".join(pipeline_result['errors'])
-            await update.message.reply_text(error_message)
-        
-        if not pipeline_result['dataframes']:
-            raise ValueError(f"Không thể tải dữ liệu cho {symbol}")
-        
-        # Tạo báo cáo với AI
-        report = await ai_analyzer.generate_report(
-            pipeline_result['dataframes'], 
-            symbol, 
-            pipeline_result['fundamental_data'], 
-            pipeline_result['outlier_reports']
-        )
-        
-        # Thêm timestamp vào cache để biết thời gian tạo báo cáo
-        report_cache = {
-            "report": report,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # Lưu vào cache với thời gian ngắn hơn
-        cache_expire = CACHE_EXPIRE_SHORT // 2 if not is_index(symbol) else CACHE_EXPIRE_SHORT
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report_cache, expire=cache_expire)
-
-        # Cập nhật trạng thái hoàn thành
-        await status_message.delete()
-        
-        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
-        formatted_report += f"<pre>{html.escape(report)}</pre>"
-        await update.message.reply_text(formatted_report, parse_mode='HTML')
-        
-        # Giải phóng bộ nhớ sau khi hoàn thành
-        gc.collect()
-        
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
+        # Nếu quá 60s mà chưa có báo cáo
+        await update.message.reply_text(f"⏳ Báo cáo cho {symbol} đang được tạo và sẽ sẵn sàng trong ít phút.\nVui lòng thử lại sau.")
+    
     except Exception as e:
-        logger.error(f"Lỗi trong analyze_command: {str(e)}")
-        await update.message.reply_text(f"❌ Lỗi không xác định: {str(e)}")
+        logger.error(f"Lỗi lệnh analyze: {str(e)}")
+        error_message = str(e)
+        if "Nhập mã chứng khoán" in error_message:
+            await update.message.reply_text(f"❌ {error_message}")
+        else:
+            await update.message.reply_text(f"❌ Lỗi phân tích: {error_message}")
 
 async def refresh_report_cache(symbol: str, num_candles: int):
     """Làm mới cache báo cáo trong nền để người dùng tiếp theo có dữ liệu mới"""
     try:
-        logger.info(f"Đang làm mới cache báo cáo cho {symbol} trong nền")
+        logger.info(f"Bắt đầu làm mới cache báo cáo cho {symbol}")
         
-        # Tạo mới dữ liệu
+        # Sử dụng pipeline chuẩn hóa để chuẩn bị dữ liệu
         data_pipeline = DataPipeline()
         ai_analyzer = AIAnalyzer()
         
-        # Sử dụng timeframe phù hợp
+        # Sử dụng timeframe phù hợp cho mỗi loại phân tích
         timeframes = ['1D']
         if not is_index(symbol):
             timeframes = ['1D', '1W']
@@ -1951,15 +1915,9 @@ async def refresh_report_cache(symbol: str, num_candles: int):
             pipeline_result['outlier_reports']
         )
         
-        # Thêm timestamp vào cache
-        report_cache = {
-            "report": report,
-            "timestamp": datetime.now().isoformat()
-        }
-        
         # Lưu vào cache
         cache_expire = CACHE_EXPIRE_SHORT // 2 if not is_index(symbol) else CACHE_EXPIRE_SHORT
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report_cache, expire=cache_expire)
+        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=cache_expire)
         
         logger.info(f"Đã làm mới cache báo cáo cho {symbol} thành công")
         
@@ -2177,11 +2135,14 @@ async def main():
     # Khởi tạo scheduler với các tác vụ định kỳ
     scheduler = AsyncIOScheduler()
     
-    # Tác vụ định kỳ
-    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
-    scheduler.add_job(keep_alive, 'interval', minutes=14)  # Ping trước khi Render sleep (15 phút)
-    scheduler.add_job(backup_database, 'cron', hour=1, minute=0)  # Sao lưu hàng ngày lúc 1:00
-    scheduler.add_job(redis_manager.optimize_cache, 'interval', hours=6)  # Tối ưu Redis cache mỗi 6 giờ
+    # Tác vụ định kỳ - giảm tần suất để giảm tải
+    scheduler.add_job(auto_train_models, 'cron', hour=3, minute=0)  # Dời sang 3h sáng
+    scheduler.add_job(keep_alive, 'interval', minutes=14)  # Giữ nguyên để tránh Render sleep (15 phút)
+    scheduler.add_job(backup_database, 'cron', hour=2, minute=0)  # Dời sang 2h sáng
+    scheduler.add_job(redis_manager.optimize_cache, 'interval', hours=12)  # Giảm tần suất xuống 12h/lần
+    
+    # Thêm tác vụ giải phóng bộ nhớ định kỳ
+    scheduler.add_job(lambda: gc.collect(), 'interval', hours=1)
     
     scheduler.start()
     logger.info("Scheduler đã khởi động với các tác vụ định kỳ.")
@@ -2194,27 +2155,38 @@ async def main():
     app.add_handler(CommandHandler("approve", approve_user))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
     logger.info("🤖 Bot khởi động!")
-
+    
+    # Tối ưu bộ nhớ trước khi chạy server
+    gc.collect()
+    
     # Thiết lập webhook với hỗ trợ endpoint ping cho keep_alive
     from aiohttp import web
+    
+    # Tạo ứng dụng web AIOHTTP
+    web_app = web.Application(middlewares=[web.normalize_path_middleware()])
     
     # Xử lý ping request
     async def handle_ping(request):
         return web.Response(text="pong")
     
-    # Xử lý webhook từ Telegram
+    # Xử lý webhook từ Telegram - sửa lại để chấp nhận mọi request từ Telegram
     async def handle_webhook(request):
-        if request.match_info.get('token') == TELEGRAM_TOKEN:
+        try:
             update_data = await request.json()
+            # Ghi log để debug nhưng chỉ log cấu trúc, không log hết nội dung
+            if 'message' in update_data and 'text' in update_data['message']:
+                logger.info(f"Received webhook: {update_data['message'].get('text', '')[:20]}...")
+            else:
+                logger.info(f"Received webhook data type: {list(update_data.keys())}")
+                
             update = Update.de_json(update_data, app.bot)
             await app.process_update(update)
             return web.Response(text="OK")
-        return web.Response(text="Unauthorized", status=403)
+        except Exception as e:
+            logger.error(f"Error processing webhook: {str(e)}")
+            return web.Response(text=f"Error: {str(e)}", status=500)
     
-    # Tạo ứng dụng web AIOHTTP
-    web_app = web.Application(middlewares=[web.normalize_path_middleware()])
-    
-    # Thêm routes vào ứng dụng web
+    # Thêm routes vào ứng dụng web - sửa lại để tương thích với cấu hình Telegram
     web_app.add_routes([
         web.get('/ping', handle_ping),
         web.post(f'/{TELEGRAM_TOKEN}', handle_webhook),
@@ -2223,6 +2195,7 @@ async def main():
     # Cài đặt webhook với cơ chế tự phục hồi
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
     WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
+    logger.info(f"Setting webhook URL to: {WEBHOOK_URL}")
     
     async def setup_webhook():
         retry_count = 0
@@ -2230,6 +2203,7 @@ async def main():
         while retry_count < max_retries:
             try:
                 webhook_info = await app.bot.get_webhook_info()
+                logger.info(f"Current webhook: {webhook_info.url}")
                 if webhook_info.url != WEBHOOK_URL:
                     await app.bot.set_webhook(url=WEBHOOK_URL)
                     logger.info(f"Webhook đã được thiết lập thành công: {WEBHOOK_URL}")
