@@ -856,7 +856,7 @@ class AIAnalyzer:
             "X-Title": "Stock Analysis Bot"
         }
         payload = {
-            "model": "anthropic/claude-3-haiku",
+            "model": "deepseek/deepseek-chat-v3-0324:free",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 2048,
             "temperature": 0.2
