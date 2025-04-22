@@ -44,6 +44,7 @@ from sklearn.metrics import accuracy_score
 from prophet import Prophet
 
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import holidays
 import html
 
@@ -52,12 +53,11 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 import aiohttp
 import json
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 import cProfile
 import pstats
 from io import StringIO
-
-from functools import lru_cache
+import ta
 
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
@@ -1401,6 +1401,156 @@ class AIAnalyzer:
                         logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
                         return calculated_levels
 
+    def analyze_price_action(self, df: pd.DataFrame) -> dict:
+        """
+        Phân tích price action của DataFrame
+        """
+        if df is None or df.empty or len(df) < 5:
+            return {"trend": "Không xác định", "volatility": "Không xác định", "volume": "Không xác định"}
+        
+        # Phân tích xu hướng
+        close_prices = df['close'].tail(10)
+        current_price = close_prices.iloc[-1]
+        price_5_days_ago = close_prices.iloc[-5] if len(close_prices) >= 5 else close_prices.iloc[0]
+        price_change_pct = (current_price - price_5_days_ago) / price_5_days_ago * 100
+        
+        if price_change_pct > 5:
+            trend = "Tăng mạnh"
+        elif price_change_pct > 2:
+            trend = "Tăng"
+        elif price_change_pct < -5:
+            trend = "Giảm mạnh"
+        elif price_change_pct < -2:
+            trend = "Giảm"
+        else:
+            trend = "Đi ngang"
+        
+        # Phân tích biến động
+        volatility = df['high'].tail(10) - df['low'].tail(10)
+        avg_volatility = volatility.mean() / current_price * 100
+        
+        if avg_volatility > 3:
+            volatility_text = "Cao"
+        elif avg_volatility > 1.5:
+            volatility_text = "Trung bình"
+        else:
+            volatility_text = "Thấp"
+        
+        # Phân tích khối lượng
+        if 'volume' in df.columns:
+            recent_volume = df['volume'].tail(5)
+            avg_volume = recent_volume.mean()
+            prev_avg_volume = df['volume'].iloc[-10:-5].mean() if len(df) >= 10 else avg_volume
+            
+            if avg_volume > prev_avg_volume * 1.5:
+                volume_text = "Tăng mạnh"
+            elif avg_volume > prev_avg_volume * 1.1:
+                volume_text = "Tăng"
+            elif avg_volume < prev_avg_volume * 0.5:
+                volume_text = "Giảm mạnh"
+            elif avg_volume < prev_avg_volume * 0.9:
+                volume_text = "Giảm"
+            else:
+                volume_text = "Ổn định"
+        else:
+            volume_text = "Không có dữ liệu"
+        
+        return {
+            "trend": trend,
+            "volatility": volatility_text,
+            "volume": volume_text,
+            "change_pct": round(price_change_pct, 2)
+        }
+    
+    def calculate_support_resistance_levels(self, df: pd.DataFrame) -> dict:
+        """
+        Tính toán các mức hỗ trợ và kháng cự
+        """
+        if df is None or df.empty or len(df) < 20:
+            return {"support_levels": [], "resistance_levels": []}
+        
+        # Lấy dữ liệu gần đây
+        recent_df = df.tail(100)
+        
+        # Tìm các đỉnh và đáy cục bộ
+        pivot_high = []
+        pivot_low = []
+        
+        # Phát hiện đỉnh (nến có high cao hơn 2 nến liền kề)
+        for i in range(2, len(recent_df) - 2):
+            if (recent_df['high'].iloc[i] > recent_df['high'].iloc[i-1] and 
+                recent_df['high'].iloc[i] > recent_df['high'].iloc[i-2] and
+                recent_df['high'].iloc[i] > recent_df['high'].iloc[i+1] and
+                recent_df['high'].iloc[i] > recent_df['high'].iloc[i+2]):
+                pivot_high.append(recent_df['high'].iloc[i])
+                
+        # Phát hiện đáy (nến có low thấp hơn 2 nến liền kề)
+        for i in range(2, len(recent_df) - 2):
+            if (recent_df['low'].iloc[i] < recent_df['low'].iloc[i-1] and 
+                recent_df['low'].iloc[i] < recent_df['low'].iloc[i-2] and
+                recent_df['low'].iloc[i] < recent_df['low'].iloc[i+1] and
+                recent_df['low'].iloc[i] < recent_df['low'].iloc[i+2]):
+                pivot_low.append(recent_df['low'].iloc[i])
+        
+        # Phân nhóm các mức gần nhau (trong khoảng 2%)
+        current_price = recent_df['close'].iloc[-1]
+        grouped_high = self._group_levels(pivot_high, current_price, threshold=0.02)
+        grouped_low = self._group_levels(pivot_low, current_price, threshold=0.02)
+        
+        # Lọc các mức so với giá hiện tại
+        support_levels = [level for level in grouped_low if level < current_price]
+        resistance_levels = [level for level in grouped_high if level > current_price]
+        
+        # Sắp xếp các mức từ gần đến xa so với giá hiện tại
+        support_levels.sort(reverse=True)
+        resistance_levels.sort()
+        
+        # Giới hạn số lượng mức
+        support_levels = support_levels[:3]
+        resistance_levels = resistance_levels[:3]
+        
+        # Làm tròn giá trị
+        support_levels = [round(level, 2) for level in support_levels]
+        resistance_levels = [round(level, 2) for level in resistance_levels]
+        
+        return {
+            "support_levels": support_levels,
+            "resistance_levels": resistance_levels
+        }
+    
+    def _group_levels(self, levels, current_price, threshold=0.02):
+        """
+        Nhóm các mức gần nhau thành một mức trung bình
+        """
+        if not levels:
+            return []
+        
+        levels.sort()
+        grouped = []
+        current_group = [levels[0]]
+        
+        for i in range(1, len(levels)):
+            # Nếu mức hiện tại gần với mức trước đó
+            if abs(levels[i] - levels[i-1]) / current_price < threshold:
+                current_group.append(levels[i])
+            else:
+                # Thêm trung bình của nhóm hiện tại và bắt đầu nhóm mới
+                grouped.append(sum(current_group) / len(current_group))
+                current_group = [levels[i]]
+        
+        # Thêm nhóm cuối cùng
+        if current_group:
+            grouped.append(sum(current_group) / len(current_group))
+        
+        return grouped
+    
+    async def load_report_history(self, symbol: str) -> list:
+        """
+        Lấy lịch sử báo cáo từ cơ sở dữ liệu
+        """
+        db_manager = DBManager()
+        return await db_manager.load_report_history(symbol)
+
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
             tech_analyzer = TechnicalAnalyzer()
@@ -1994,19 +2144,21 @@ class StockData(BaseModel):
     volume: int
     date: datetime
 
-    @validator('high')
-    def high_must_be_greater_than_low(cls, v, values):
+    @field_validator('high')
+    def high_must_be_greater_than_low(cls, v, info):
+        values = info.data
         if 'low' in values and v < values['low']:
             raise ValueError('High must be greater than low')
         return v
 
-    @validator('close')
-    def close_must_be_within_range(cls, v, values):
+    @field_validator('close')
+    def close_must_be_within_range(cls, v, info):
+        values = info.data
         if 'low' in values and 'high' in values and not (values['low'] <= v <= values['high']):
             raise ValueError('Close must be within the range of low and high')
         return v
 
-    @validator('volume')
+    @field_validator('volume')
     def volume_must_be_non_negative(cls, v):
         if v < 0:
             raise ValueError('Volume must be non-negative')
