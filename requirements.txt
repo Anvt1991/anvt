@@ -45,6 +45,7 @@ memory-profiler  # Tùy chọn, dùng cho profile hiệu suất
 line_profiler  # Tùy chọn, dùng cho profile hiệu suất
 orjson  # Thư viện JSON hiệu suất cao
 
+plotly
 
 
 
