@@ -1314,10 +1314,13 @@ class AIAnalyzer:
             past_report = ""
             if history:
                 last = history[-1]
-                past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
+                if is_index(symbol):
+                    past_result = "đúng" if ((close_today > last["close_today"] and "tăng" in last["report"].lower()) or
+                                           (close_today < last["close_today"] and "giảm" in last["report"].lower())) else "sai"
+                else:
+                    past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
                 past_report = f"📜 **Báo cáo trước** ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
-            fundamental_report = deep_fundamental_analysis(fundamental_data)
-
+            
             # Phân tích với OpenRouter
             technical_data = {
                 "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
@@ -1348,7 +1351,11 @@ class AIAnalyzer:
                 xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
             else:
                 xgb_text = xgb_signal
-            xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
+            
+            if is_index(symbol):
+                xgb_summary = f"**XGBoost dự đoán xu hướng tiếp theo** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
+            else:
+                xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
 
             outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
 
@@ -1357,13 +1364,77 @@ class AIAnalyzer:
             calc_support_str = ", ".join([f"{level:.2f}" for level in calculated_levels['support_levels']])
             calc_resistance_str = ", ".join([f"{level:.2f}" for level in calculated_levels['resistance_levels']])
 
-            prompt = f"""
-Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
+            # Tạo prompt khác nhau cho chỉ số và cổ phiếu
+            if is_index(symbol):
+                # Phân tích cho chỉ số
+                fundamental_report = f"📊 **{symbol} là chỉ số, không phải cổ phiếu**\n"
+                
+                prompt = f"""
+Bạn là chuyên gia phân tích kỹ thuật, phân tích thị trường chứng khoán Việt Nam với 30 năm kinh nghiệm. 
+Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CHỈ SỐ, KHÔNG PHẢI CỔ PHIẾU):
 
 **Thông tin cơ bản:**
 - Ngày: {datetime.now().strftime('%d/%m/%Y')}
 - Giá hôm qua: {close_yesterday:.2f}
-- Giá hôm nay: {close_today:.2f}
+- Giá hôm nay: {close_today:.2f} ({((close_today-close_yesterday)/close_yesterday*100):.2f}%)
+
+**Diễn biến chỉ số:**
+{price_action}
+
+**Lịch sử dự đoán:**
+{past_report}
+
+**Chất lượng dữ liệu:**
+{outlier_text}
+
+**Chỉ số kỹ thuật:**
+"""
+                for tf, ind in indicators.items():
+                    prompt += f"\n--- {tf} ---\n"
+                    prompt += f"- Close: {ind.get('close', 0):.2f}\n"
+                    prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
+                    prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
+                    prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
+                    prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
+                    prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
+                    prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
+
+                prompt += f"\n**Tin tức thị trường:**\n{news_text}\n"
+                prompt += f"\n**Phân tích mức hỗ trợ/kháng cự của chỉ số:**\n"
+                prompt += f"- Mức hỗ trợ: {', '.join(map(str, support_levels))}\n"
+                prompt += f"- Mức kháng cự: {', '.join(map(str, resistance_levels))}\n"
+                prompt += f"- Mức hỗ trợ từ phân tích đồ thị: {calc_support_str}\n"  
+                prompt += f"- Mức kháng cự từ phân tích đồ thị: {calc_resistance_str}\n"
+                prompt += f"- Mẫu hình đồ thị: {', '.join([p.get('name', 'Unknown') for p in patterns])}\n"
+                prompt += f"\n{xgb_summary}\n"
+                prompt += f"{forecast_summary}\n"
+                prompt += """
+**Yêu cầu:**
+1. Đánh giá tổng quan thị trường. So sánh chỉ số phiên hiện tại và phiên trước đó.
+2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của CHỈ SỐ.
+3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
+4. Xác định hỗ trợ/kháng cự cho CHỈ SỐ. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+5. Đề xuất chiến lược cho nhà đầu tư: nên theo xu hướng thị trường hay đi ngược, mức độ thận trọng.
+6. Đánh giá rủi ro thị trường hiện tại.
+7. Đưa ra nhận định tổng thể về xu hướng thị trường.
+8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
+
+**Hướng dẫn bổ sung:**
+- QUAN TRỌNG: Đây là phân tích cho CHỈ SỐ, KHÔNG PHẢI CỔ PHIẾU. Không đưa ra khuyến nghị mua/bán chỉ số.
+- Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
+- Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
+"""
+            else:
+                # Phân tích cho cổ phiếu
+                fundamental_report = deep_fundamental_analysis(fundamental_data)
+                
+                prompt = f"""
+Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho cổ phiếu {symbol}:
+
+**Thông tin cơ bản:**
+- Ngày: {datetime.now().strftime('%d/%m/%Y')}
+- Giá hôm qua: {close_yesterday:.2f}
+- Giá hôm nay: {close_today:.2f} ({((close_today-close_yesterday)/close_yesterday*100):.2f}%)
 
 **Hành động giá:**
 {price_action}
@@ -1376,31 +1447,31 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 
 **Chỉ số kỹ thuật:**
 """
-            for tf, ind in indicators.items():
-                prompt += f"\n--- {tf} ---\n"
-                prompt += f"- Close: {ind.get('close', 0):.2f}\n"
-                prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
-                prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
-                prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
-                prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
-                prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
-                prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
-            prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
-            prompt += f"\n**Tin tức:**\n{news_text}\n"
-            prompt += f"\n**Phân tích mức hỗ trợ/kháng cự:**\n"
-            prompt += f"- Mức hỗ trợ đã lọc: {', '.join(map(str, support_levels))}\n"
-            prompt += f"- Mức kháng cự đã lọc: {', '.join(map(str, resistance_levels))}\n"
-            prompt += f"- Mức hỗ trợ từ phân tích đồ thị: {calc_support_str}\n"  
-            prompt += f"- Mức kháng cự từ phân tích đồ thị: {calc_resistance_str}\n"
-            prompt += f"- Mẫu hình nến: {', '.join([p.get('name', 'Unknown') for p in patterns])}\n"
-            prompt += f"\n{xgb_summary}\n"
-            prompt += f"{forecast_summary}\n"
-            prompt += """
+                for tf, ind in indicators.items():
+                    prompt += f"\n--- {tf} ---\n"
+                    prompt += f"- Close: {ind.get('close', 0):.2f}\n"
+                    prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
+                    prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
+                    prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
+                    prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
+                    prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
+                    prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
+                prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
+                prompt += f"\n**Tin tức:**\n{news_text}\n"
+                prompt += f"\n**Phân tích mức hỗ trợ/kháng cự:**\n"
+                prompt += f"- Mức hỗ trợ: {', '.join(map(str, support_levels))}\n"
+                prompt += f"- Mức kháng cự: {', '.join(map(str, resistance_levels))}\n"
+                prompt += f"- Mức hỗ trợ từ phân tích đồ thị: {calc_support_str}\n"  
+                prompt += f"- Mức kháng cự từ phân tích đồ thị: {calc_resistance_str}\n"
+                prompt += f"- Mẫu hình nến: {', '.join([p.get('name', 'Unknown') for p in patterns])}\n"
+                prompt += f"\n{xgb_summary}\n"
+                prompt += f"{forecast_summary}\n"
+                prompt += """
 **Yêu cầu:**
 1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự từ OpenRouter và phân tích đồ thị. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
 7. Đưa ra nhận định.
@@ -1409,8 +1480,8 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 **Hướng dẫn bổ sung:**
 - Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
 - Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
-- Chú ý: VNINDEX, VN30 là chỉ số, không phải cổ phiếu.
 """
+
             response = await self.generate_content(prompt)
             report = response.text
             await self.save_report_history(symbol, report, close_today, close_yesterday)
