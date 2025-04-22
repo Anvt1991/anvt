@@ -2,10 +2,20 @@
 # -*- coding: utf-8 -*-
 
 """
-Bot Chứng Khoán Toàn Diện Phiên Bản V18.8 (Nâng cấp):
-- Tích hợp AI OpenRouter cho phân tích mẫu hình, sóng, và nến nhật.
-- Sử dụng mô hình anthropic/claude-3-haiku.
-- Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng.
+Bot Chứng Khoán Toàn Diện Phiên Bản V18.7 (Nâng cấp):
+- Tải dữ liệu chứng khoán qua VNStock/Yahoo Finance với cache Redis (async).
+- Hợp nhất, chuẩn hóa dữ liệu, bổ sung khung thời gian (1w, 1mo), phát hiện bất thường.
+- Phân tích kỹ thuật đa khung thời gian (SMA, RSI, MACD, ...).
+- Thu thập tin tức từ nhiều nguồn RSS (async, sửa lỗi coroutine).
+- Phân tích cơ bản nâng cao, phân biệt cổ phiếu/chỉ số.
+- Dự báo giá (Prophet) và tín hiệu giao dịch (XGBoost) làm đầu vào cho Gemini AI.
+- Báo cáo phân tích bằng Gemini AI, lưu lịch sử vào PostgreSQL (async).
+- Tích hợp Telegram với các lệnh: /start, /analyze, /getid, /approve.
+- Auto training mô hình theo lịch định kỳ (mỗi ngày 2h sáng).
+- Tối ưu deploy trên Render với webhook, xử lý async hoàn toàn.
+- Nâng cấp: Tối ưu lỗi, cache động, kiểm soát dữ liệu, cải thiện mô hình, báo cáo đẹp hơn.
+- Cải tiến: Tách bạch raw data ↔ cleaned data ↔ indicator data, sử dụng raw data cho price action, cleaned data cho indicators, cache versioning, timezone consistency, unit tests.
+- Sửa lỗi: Loại bỏ timezone trong ds column cho Prophet forecasting.
 """
 
 import os
@@ -47,16 +57,12 @@ import html
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-import aiohttp
-import json
-
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-REDIS_URL = os.getenv("REDIS_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")          # ví dụ: postgres://user:pass@hostname:port/dbname
+REDIS_URL = os.getenv("REDIS_URL")                # ví dụ: redis://:pass@hostname:port/0
 ADMIN_ID = os.getenv("ADMIN_ID", "1225226589")
 PORT = int(os.environ.get("PORT", 10000))
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
@@ -65,10 +71,10 @@ RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME", "")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CACHE_EXPIRE_SHORT = 1800
-CACHE_EXPIRE_MEDIUM = 3600
-CACHE_EXPIRE_LONG = 86400
-NEWS_CACHE_EXPIRE = 900
+CACHE_EXPIRE_SHORT = 1800         # 30 phút cho dữ liệu ngắn hạn
+CACHE_EXPIRE_MEDIUM = 3600        # 1 giờ cho dữ liệu trung hạn
+CACHE_EXPIRE_LONG = 86400         # 1 ngày cho dữ liệu dài hạn
+NEWS_CACHE_EXPIRE = 900           # 15 phút cho tin tức
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 
@@ -134,10 +140,10 @@ class TrainedModel(Base):
     __tablename__ = 'trained_models'
     id = Column(Integer, primary_key=True)
     symbol = Column(String, nullable=False)
-    model_type = Column(String, nullable=False)
+    model_type = Column(String, nullable=False)   # 'prophet' hoặc 'xgboost'
     model_blob = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
-    performance = Column(Float, nullable=True)
+    performance = Column(Float, nullable=True)    # Thêm để lưu hiệu suất mô hình
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
@@ -641,8 +647,9 @@ def deep_fundamental_analysis(fundamental_data: dict) -> str:
 def prepare_data_for_prophet(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         raise ValueError("DataFrame rỗng, không thể dự báo")
+    # Convert timezone-aware index to timezone-naive for Prophet
     df_reset = df.reset_index()
-    df_reset['date'] = df_reset['date'].dt.tz_localize(None)
+    df_reset['date'] = df_reset['date'].dt.tz_localize(None)  # Remove timezone
     df_reset = df_reset.rename(columns={'date': 'ds', 'close': 'y'})
     return df_reset[['ds', 'y']]
 
@@ -653,6 +660,7 @@ def get_vietnam_holidays(years) -> pd.DataFrame:
         for date, name in vn_holidays.items():
             holiday_list.append({'ds': pd.to_datetime(date), 'holiday': name})
     holiday_df = pd.DataFrame(holiday_list)
+    # Ensure holiday dates are timezone-naive
     holiday_df['ds'] = holiday_df['ds'].dt.tz_localize(None)
     return holiday_df
 
@@ -678,7 +686,7 @@ def evaluate_prophet_performance(df: pd.DataFrame, forecast: pd.DataFrame) -> fl
     if len(actual) < 1 or len(predicted) < 1:
         return 0.0
     mse = np.mean((actual - predicted) ** 2)
-    return 1 / (1 + mse)
+    return 1 / (1 + mse)  # Higher is better, bounded between 0 and 1
 
 def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, float):
     if df is None or df.empty:
@@ -829,53 +837,6 @@ class AIAnalyzer:
         summary += "\n".join(trend_summary)
         return summary
 
-    async def analyze_with_openrouter(self, technical_data):
-        if not OPENROUTER_API_KEY:
-            raise Exception("Chưa có OPENROUTER_API_KEY")
-
-        prompt = (
-            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán."
-            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing,"
-            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự."
-            "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác:\n"
-            "{\n"
-            "  \"support_levels\": [giá1, giá2],\n"
-            "  \"resistance_levels\": [giá1, giá2],\n"
-            "  \"patterns\": [\n"
-            "    {\"name\": \"tên mẫu hình\", \"description\": \"giải thích ngắn\"},\n"
-            "    ...\n"
-            "  ]\n"
-            "}\n\n"
-            f"Dữ liệu:\n{json.dumps(technical_data, ensure_ascii=False, indent=2)}"
-        )
-
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://yourapp.com",
-            "X-Title": "Stock Analysis Bot"
-        }
-        payload = {
-            "model": "deepseek/deepseek-chat-v3-0324:free",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2048,
-            "temperature": 0.2
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as resp:
-                text = await resp.text()
-                try:
-                    result = json.loads(text)
-                    content = result['choices'][0]['message']['content']
-                    return json.loads(content)
-                except json.JSONDecodeError:
-                    logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                    return {}
-                except KeyError:
-                    logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
-                    return {}
-
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
             tech_analyzer = TechnicalAnalyzer()
@@ -893,16 +854,6 @@ class AIAnalyzer:
                 past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
                 past_report = f"📜 **Báo cáo trước** ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
             fundamental_report = deep_fundamental_analysis(fundamental_data)
-
-            # Phân tích với OpenRouter
-            technical_data = {
-                "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
-                "technical_indicators": indicators['1D']
-            }
-            openrouter_result = await self.analyze_with_openrouter(technical_data)
-            support_levels = openrouter_result.get('support_levels', [])
-            resistance_levels = openrouter_result.get('resistance_levels', [])
-            patterns = openrouter_result.get('patterns', [])
 
             forecast, prophet_model = forecast_with_prophet(df_1d, periods=7)
             prophet_perf = evaluate_prophet_performance(df_1d, forecast)
@@ -958,26 +909,27 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
                 prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
             prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
             prompt += f"\n**Tin tức:**\n{news_text}\n"
-            prompt += f"\n**Phân tích từ OpenRouter:**\n"
-            prompt += f"- Hỗ trợ: {', '.join(map(str, support_levels))}\n"
-            prompt += f"- Kháng cự: {', '.join(map(str, resistance_levels))}\n"
-            prompt += f"- Mẫu hình: {', '.join([p['name'] for p in patterns])}\n"
             prompt += f"\n{xgb_summary}\n"
             prompt += f"{forecast_summary}\n"
             prompt += """
 **Yêu cầu:**
-1. So sánh giá/ chỉ số phiên hiện tại và phiên trước đó.
+1. So sánh giá phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
-3. Đánh giá các mẫu hình, mô hình, sóng, chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự từ OpenRouter hoặc tính toán. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
+4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất MUA/BÁN/NẮM GIỮ với % tin cậy, điểm vào, cắt lỗ, chốt lời. Phương án đi vốn, phân bổ tỷ trọng cụ thể.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
-7. Kết hợp tin tức, phân tích kỹ thuật, cơ bản và kết quả từ OpenRouter để đưa ra nhận định.
-8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
+7. Kết hợp tin tức, phân tích kỹ thuật và cơ bản để đưa ra nhận định.
+8. Trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
 
 **Hướng dẫn bổ sung:**
+- Không cần theo form cố định. Sử dụng định dạng markdown để phân vùng nội dung rõ ràng.
 - Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
+- Nếu có lịch sử báo cáo, đánh giá xem dự đoán trước đúng hay sai để điều chỉnh nhận định.
+- Phát hiện tín hiệu đảo chiều (RSI > 70 hoặc < 30, MACD cắt tín hiệu, giá chạm Bollinger Bands, Ichimoku signals).
+- Tin tức có thể là yếu tố xác nhận hoặc phủ định xu hướng kỹ thuật và cơ bản.
 - Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
+- Nếu thiếu dữ liệu, hãy nói "Không đủ thông tin để kết luận".
 - Chú ý: VNINDEX, VN30 là chỉ số, không phải cổ phiếu.
 """
             response = await self.generate_content(prompt)
@@ -1010,7 +962,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🚀 **V18.8 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
+        "🚀 **V18.7 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
         "📊 **Lệnh**:\n"
         "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
         "- /getid - Lấy ID.\n"
