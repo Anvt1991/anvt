@@ -4,7 +4,7 @@
 """
 Bot Chứng Khoán Toàn Diện Phiên Bản V18.9 (Nâng cấp):
 - Tích hợp AI OpenRouter cho phân tích mẫu hình, sóng, và nến nhật.
-- Sử dụng mô hình anthropic/claude-3-haiku.
+- Sử dụng mô hình deepseek/deepseek-chat-v3-0324:free.
 - Chuẩn hóa dữ liệu và pipeline xử lý.
 - Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng.
 """
@@ -1144,7 +1144,7 @@ class AIAnalyzer:
             "X-Title": "Stock Analysis Bot"
         }
         payload = {
-            "model": "anthropic/claude-3-haiku",
+            "model": "deepseek/deepseek-chat-v3-0324:free",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1024,
             "temperature": 0.2
@@ -1257,7 +1257,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 1. So sánh giá/ chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự từ OpenRouter. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định hỗ trợ/kháng cự từ OpenRouter hoặc tính toán. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất MUA/BÁN/NẮM GIỮ với % tin cậy, điểm vào, cắt lỗ, chốt lời. Phương án đi vốn, phân bổ tỷ trọng cụ thể.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
 7. Kết hợp tin tức, phân tích kỹ thuật, cơ bản và kết quả từ OpenRouter để đưa ra nhận định.
