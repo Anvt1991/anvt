@@ -1116,15 +1116,102 @@ class AIAnalyzer:
             summary = "🔍 Xu hướng chưa rõ.\n"
         summary += "\n".join(trend_summary)
         return summary
+        
+    def calculate_support_resistance_levels(self, df: pd.DataFrame, num_levels: int = 3) -> dict:
+        """
+        Tự tính toán các mức hỗ trợ và kháng cự dựa trên phương pháp:
+        1. Xác định đỉnh và đáy trong dữ liệu lịch sử
+        2. Phân cụm các đỉnh và đáy gần nhau
+        3. Sắp xếp theo tần suất xuất hiện
+        """
+        if len(df) < 20:
+            return {"support_levels": [], "resistance_levels": []}
+            
+        # Tìm đỉnh và đáy cục bộ
+        n = 5  # Window size cho việc xác định đỉnh/đáy
+        df_ext = df.copy()
+        
+        # 1. Xác định đỉnh
+        df_ext['is_peak'] = False
+        for i in range(n, len(df_ext) - n):
+            if all(df_ext['high'].iloc[i] > df_ext['high'].iloc[i-j] for j in range(1, n+1)) and \
+               all(df_ext['high'].iloc[i] > df_ext['high'].iloc[i+j] for j in range(1, n+1)):
+                df_ext.loc[df_ext.index[i], 'is_peak'] = True
+        
+        # 2. Xác định đáy
+        df_ext['is_valley'] = False
+        for i in range(n, len(df_ext) - n):
+            if all(df_ext['low'].iloc[i] < df_ext['low'].iloc[i-j] for j in range(1, n+1)) and \
+               all(df_ext['low'].iloc[i] < df_ext['low'].iloc[i+j] for j in range(1, n+1)):
+                df_ext.loc[df_ext.index[i], 'is_valley'] = True
+        
+        # 3. Lấy giá trị đỉnh và đáy
+        peaks = df_ext[df_ext['is_peak']]['high'].tolist()
+        valleys = df_ext[df_ext['is_valley']]['low'].tolist()
+        
+        # 4. Phân cụm giá trị gần nhau (đơn giản hóa)
+        def cluster_prices(prices, threshold_pct=0.02):
+            if not prices:
+                return []
+            # Sắp xếp giá
+            sorted_prices = sorted(prices)
+            clusters = []
+            current_cluster = [sorted_prices[0]]
+            
+            for price in sorted_prices[1:]:
+                # Nếu giá hiện tại gần với trung bình cụm hiện tại
+                if price <= current_cluster[0] * (1 + threshold_pct):
+                    current_cluster.append(price)
+                else:
+                    # Tính trung bình cụm và thêm vào danh sách
+                    clusters.append(sum(current_cluster) / len(current_cluster))
+                    current_cluster = [price]
+            
+            # Thêm cụm cuối cùng
+            if current_cluster:
+                clusters.append(sum(current_cluster) / len(current_cluster))
+            
+            return clusters
+        
+        resistance_clusters = cluster_prices(peaks)
+        support_clusters = cluster_prices(valleys)
+        
+        # 5. Lấy N mức có tần suất xuất hiện cao nhất
+        current_price = df['close'].iloc[-1]
+        
+        # Lọc kháng cự phía trên giá hiện tại
+        resistance_levels = sorted([r for r in resistance_clusters if r > current_price])[:num_levels]
+        
+        # Lọc hỗ trợ phía dưới giá hiện tại
+        support_levels = sorted([s for s in support_clusters if s < current_price], reverse=True)[:num_levels]
+        
+        # Format kết quả
+        support_levels = [round(float(price), 2) for price in support_levels]
+        resistance_levels = [round(float(price), 2) for price in resistance_levels]
+        
+        return {
+            "support_levels": support_levels,
+            "resistance_levels": resistance_levels
+        }
 
     async def analyze_with_openrouter(self, technical_data):
         if not OPENROUTER_API_KEY:
             raise Exception("Chưa có OPENROUTER_API_KEY")
 
+        # Tính toán mức hỗ trợ/kháng cự từ dữ liệu candlestick
+        df = pd.DataFrame(technical_data["candlestick_data"])
+        calculated_levels = self.calculate_support_resistance_levels(df)
+        
         prompt = (
-            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán."
+            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán với 20 năm kinh nghiệm."
             " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing,"
-            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự."
+            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự với phương pháp sau:"
+            "\n\n1. Mức hỗ trợ: Xác định các mức giá thấp lặp lại nhiều lần và luôn bật lên, các đáy rõ ràng"
+            "\n2. Mức kháng cự: Xác định các mức giá cao lặp lại nhiều lần và thường bị bán mạnh, các đỉnh rõ ràng"
+            "\n3. Chọn các mức có tần suất kiểm tra cao (giá chạm nhiều lần)"
+            "\n4. Mức hỗ trợ phải thấp hơn giá hiện tại, mức kháng cự phải cao hơn giá hiện tại"
+            "\n5. Giá trị mức hỗ trợ và kháng cự phải tương đồng về độ lớn với giá hiện tại"
+            f"\n\nGiá hiện tại: {df['close'].iloc[-1]:.2f}"
             "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác và không bọc trong cặp dấu ```:\n"
             "{\n"
             "  \"support_levels\": [giá1, giá2, ...],\n"
@@ -1164,28 +1251,54 @@ class AIAnalyzer:
                     
                     # Xử lý khi nội dung là plain JSON
                     try:
-                        return json.loads(content)
+                        openrouter_response = json.loads(content)
+                        
+                        # Kiểm tra và lọc mức hỗ trợ/kháng cự từ OpenRouter
+                        current_price = df['close'].iloc[-1]
+                        
+                        # Lọc mức hỗ trợ (phải thấp hơn giá hiện tại và là số hợp lệ)
+                        filtered_support = []
+                        openrouter_support = openrouter_response.get('support_levels', [])
+                        for level in openrouter_support:
+                            try:
+                                level_value = float(level)
+                                if level_value < current_price and level_value > 0:
+                                    filtered_support.append(round(level_value, 2))
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # Lọc mức kháng cự (phải cao hơn giá hiện tại và là số hợp lệ)
+                        filtered_resistance = []
+                        openrouter_resistance = openrouter_response.get('resistance_levels', [])
+                        for level in openrouter_resistance:
+                            try:
+                                level_value = float(level)
+                                if level_value > current_price and level_value > 0:
+                                    filtered_resistance.append(round(level_value, 2))
+                            except (ValueError, TypeError):
+                                continue
+                        
+                        # Nếu không có mức hỗ trợ/kháng cự hoặc không hợp lệ, sử dụng kết quả từ phương pháp tính toán
+                        if not filtered_support and calculated_levels['support_levels']:
+                            filtered_support = calculated_levels['support_levels']
+                        if not filtered_resistance and calculated_levels['resistance_levels']:
+                            filtered_resistance = calculated_levels['resistance_levels']
+                        
+                        # Trả về kết quả đã lọc
+                        return {
+                            "support_levels": filtered_support,
+                            "resistance_levels": filtered_resistance,
+                            "patterns": openrouter_response.get('patterns', [])
+                        }
                     except json.JSONDecodeError:
                         logger.error(f"Lỗi parse JSON từ nội dung: {content}")
-                        return {
-                            "support_levels": [],
-                            "resistance_levels": [],
-                            "patterns": []
-                        }
+                        return calculated_levels
                 except json.JSONDecodeError:
                     logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                    return {
-                        "support_levels": [],
-                        "resistance_levels": [],
-                        "patterns": []
-                    }
+                    return calculated_levels
                 except KeyError as e:
                     logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
-                    return {
-                        "support_levels": [],
-                        "resistance_levels": [],
-                        "patterns": []
-                    }
+                    return calculated_levels
 
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
@@ -1239,6 +1352,11 @@ class AIAnalyzer:
 
             outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
 
+            # Tự tính toán thêm mức hỗ trợ/kháng cự để đối chiếu
+            calculated_levels = self.calculate_support_resistance_levels(df_1d)
+            calc_support_str = ", ".join([f"{level:.2f}" for level in calculated_levels['support_levels']])
+            calc_resistance_str = ", ".join([f"{level:.2f}" for level in calculated_levels['resistance_levels']])
+
             prompt = f"""
 Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
 
@@ -1269,10 +1387,12 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
                 prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
             prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
             prompt += f"\n**Tin tức:**\n{news_text}\n"
-            prompt += f"\n**Phân tích từ OpenRouter:**\n"
-            prompt += f"- Hỗ trợ: {', '.join(map(str, support_levels))}\n"
-            prompt += f"- Kháng cự: {', '.join(map(str, resistance_levels))}\n"
-            prompt += f"- Mẫu hình: {', '.join([p['name'] for p in patterns])}\n"
+            prompt += f"\n**Phân tích mức hỗ trợ/kháng cự:**\n"
+            prompt += f"- Mức hỗ trợ đã lọc: {', '.join(map(str, support_levels))}\n"
+            prompt += f"- Mức kháng cự đã lọc: {', '.join(map(str, resistance_levels))}\n"
+            prompt += f"- Mức hỗ trợ từ phân tích đồ thị: {calc_support_str}\n"  
+            prompt += f"- Mức kháng cự từ phân tích đồ thị: {calc_resistance_str}\n"
+            prompt += f"- Mẫu hình nến: {', '.join([p.get('name', 'Unknown') for p in patterns])}\n"
             prompt += f"\n{xgb_summary}\n"
             prompt += f"{forecast_summary}\n"
             prompt += """
@@ -1280,7 +1400,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự từ OpenRouter hoặc tính toán. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+4. Xác định hỗ trợ/kháng cự từ OpenRouter và phân tích đồ thị. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
 6. Đánh giá rủi ro và tỷ lệ risk/reward.
 7. Đưa ra nhận định.
