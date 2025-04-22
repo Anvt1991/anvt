@@ -2211,11 +2211,14 @@ async def main():
             return web.Response(text="OK")
         return web.Response(text="Unauthorized", status=403)
     
-    # Cài đặt routes cho AIOHTTP server
-    routes = [
+    # Tạo ứng dụng web AIOHTTP
+    web_app = web.Application(middlewares=[web.normalize_path_middleware()])
+    
+    # Thêm routes vào ứng dụng web
+    web_app.add_routes([
         web.get('/ping', handle_ping),
         web.post(f'/{TELEGRAM_TOKEN}', handle_webhook),
-    ]
+    ])
     
     # Cài đặt webhook với cơ chế tự phục hồi
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
@@ -2242,12 +2245,9 @@ async def main():
     await setup_webhook()
     
     # Khởi động AIOHTTP web server (thay thế cho Flask)
-    runner = web.AppRunner(web.Application(middlewares=[web.normalize_path_middleware()]))
+    runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
-    
-    # Thêm routes sau khi setup runner
-    runner.app.add_routes(routes)
     
     await site.start()
     logger.info(f"Server khởi động trên cổng {PORT}")
