@@ -1307,6 +1307,16 @@ class AIAnalyzer:
         df = pd.DataFrame(technical_data["candlestick_data"])
         calculated_levels = self.calculate_support_resistance_levels(df)
         
+        # Chuyển đổi technical_data để tránh lỗi serialization DataFrame
+        serializable_data = {
+            "candlestick_data": technical_data["candlestick_data"]
+        }
+        if "technical_indicators" in technical_data:
+            if isinstance(technical_data["technical_indicators"], pd.DataFrame):
+                serializable_data["technical_indicators"] = technical_data["technical_indicators"].to_dict(orient="records")
+            else:
+                serializable_data["technical_indicators"] = technical_data["technical_indicators"]
+        
         # Tối ưu prompt để giảm token
         prompt = (
             "Bạn là chuyên gia phân tích kỹ thuật chứng khoán. Nhận diện mẫu hình nến, "
@@ -1321,7 +1331,7 @@ class AIAnalyzer:
             "    ...\n"
             "  ]\n"
             "}\n\n"
-            f"Dữ liệu:\n{json.dumps(technical_data, ensure_ascii=False)}"
+            f"Dữ liệu:\n{json.dumps(serializable_data, ensure_ascii=False)}"
         )
 
         headers = {
@@ -1552,6 +1562,13 @@ class AIAnalyzer:
         db_manager = DBManager()
         return await db_manager.load_report_history(symbol)
 
+    async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
+        """
+        Lưu báo cáo vào lịch sử
+        """
+        db_manager = DBManager()
+        await db_manager.save_report_history(symbol, report, close_today, close_yesterday)
+
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
             tech_analyzer = TechnicalAnalyzer()
@@ -1576,8 +1593,15 @@ class AIAnalyzer:
             # Phân tích với OpenRouter
             technical_data = {
                 "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
-                "technical_indicators": indicators['1D']
+                "technical_indicators": {}
             }
+
+            # Chuyển đổi DataFrame thành dict để tránh lỗi serialization
+            if isinstance(indicators['1D'], pd.DataFrame):
+                technical_data["technical_indicators"] = indicators['1D'].to_dict(orient="records")[0] if not indicators['1D'].empty else {}
+            else:
+                technical_data["technical_indicators"] = indicators['1D']
+
             openrouter_result = await self.analyze_with_openrouter(technical_data)
             support_levels = openrouter_result.get('support_levels', [])
             resistance_levels = openrouter_result.get('resistance_levels', [])
