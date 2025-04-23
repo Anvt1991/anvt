@@ -41,7 +41,6 @@ import xgboost as xgb
 from sklearn.metrics import accuracy_score
 from prophet import Prophet
 
-import matplotlib.pyplot as plt
 import holidays
 import html
 
@@ -2412,6 +2411,9 @@ async def main():
         runner = web.AppRunner(web_app)
         await runner.setup()
         site = web.TCPSite(runner, '0.0.0.0', PORT)
+        
+        # Đảm bảo ứng dụng được khởi tạo đúng cách trước khi khởi động
+        await application.initialize()
         
         logger.info(f"🤖 Bot khởi động với webhook tại: {WEBHOOK_URL}")
         logger.info(f"Server lắng nghe tại: 0.0.0.0:{PORT}")
