@@ -1,80 +1,44 @@
-# Database
-sqlalchemy>=2.0.0
-sqlalchemy[asyncio]
-asyncpg>=0.27.0
+python-dotenv
+aiohttp
+tenacity
+asyncio
+feedparser
+pandas
+numpy
 
-# Redis
-aioredis>=2.0.1
+ta
+yfinance
+vnstock
 
-# Telegram
-python-telegram-bot>=20.2
+google-generativeai
+xgboost
+prophet
 
-# Data processing
-pandas>=1.5.3
-numpy>=1.24.2
-pytz>=2023.3
+matplotlib
 
-# Technical Analysis
-# ta-lib>=0.4.25  # Tùy chọn, khó cài đặt trên một số môi trường như Render
+SQLAlchemy>=1.4
+asyncpg
 
-# Machine Learning
-prophet>=1.1.3
-xgboost>=1.7.5
-scikit-learn>=1.2.2
-holidays>=0.25
+redis>=4.5.5,<5.0.0
 
-# Web & API
-httpx>=0.24.0
-feedparser>=6.0.10
-beautifulsoup4>=4.12.2
+python-telegram-bot[webhooks]>=20.3
 
-# Data Source
-yfinance>=0.2.31
-vnstock>=0.2.7
+scikit-learn
 
-# Async utilities
-tenacity>=8.2.2
-nest-asyncio>=1.5.6
+nest_asyncio
 
-# Config & environment
-python-dotenv>=1.0.0
+kaleido
 
-# Logging
-colorlog>=6.7.0
+psycopg2-binary
 
-# Testing
-pytest>=7.3.1
-pytest-asyncio>=0.21.0
+holiday
 
-# AI APIs
-openrouter>=0.3.0
-openai>=1.0.0
-
-# Task Scheduling & Background Tasks
 APScheduler>=3.7.0
 
-# Serialization
-pydantic>=2.0.0
-orjson>=3.9.0
+openrouter
 
-# Performance monitoring (tùy chọn)
-memory-profiler
-line_profiler
+statsmodels
 
-# Visualization
-plotly>=5.13.0
-kaleido>=0.2.1
-
-redis>=4.2.0
-
-# Chú ý:
-# - Đã loại bỏ redis thông thường và thay bằng aioredis để hỗ trợ async/await
-# - Đã thêm vnstock và yfinance để làm việc với thị trường Việt Nam
-# - Đã thêm phiên bản cụ thể cho holidays để tránh xung đột với Prophet
-# - Đã thêm openai để hỗ trợ cho openrouter
-# - Đã thêm kaleido để hỗ trợ xuất biểu đồ plotly
-# - TA-Lib đã được comment vì khó cài đặt trên một số môi trường như Render
-#   Bot sẽ tự động sử dụng pandas để thay thế nếu không có TA-Lib
 
 
 
