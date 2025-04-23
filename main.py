@@ -2263,7 +2263,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 **V18.9 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
         "📊 **Lệnh**:\n"
-        "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
+        "- /analyze [Mã] - Phân tích chứng khoán.\n"
+        "- /analyze [Mã] [Timeframe] - Phân tích theo khung thời gian.\n"
+        "- /analyze [Mã] [Số nến] - Phân tích với số nến chỉ định.\n"
+        "- /analyze [Mã] [Số nến] [Timeframe] - Phân tích theo số nến và khung thời gian.\n"
+        "- /analyze [Mã] [Timeframe] [Số nến] - Cú pháp khác.\n"
+        "  Các khung thời gian: " + ", ".join(DataValidator.VALID_TIMEFRAMES) + "\n"
         "- /getid - Lấy ID.\n"
         "- /approve [user_id] - Duyệt người dùng (admin).\n"
         "💡 **Bắt đầu nào!**"
@@ -2279,19 +2284,51 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not args:
             raise ValueError("Nhập mã chứng khoán (e.g., VNINDEX, SSI).")
         symbol = args[0].upper()
-        num_candles = int(args[1]) if len(args) > 1 else DEFAULT_CANDLES
-        if num_candles < 20:
-            raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
-        if num_candles > 500:
-            raise ValueError("Tối đa 500 nến!")
+        
+        # Mặc định
+        num_candles = DEFAULT_CANDLES
+        timeframes = ['1D']  # Mặc định chỉ phân tích 1 timeframe
+        
+        # Xử lý tham số: số nến và khung thời gian
+        if len(args) > 1:
+            if args[1].upper() in DataValidator.VALID_TIMEFRAMES:
+                timeframes = [args[1].upper()]
+            else:
+                try:
+                    num_candles = int(args[1])
+                    if num_candles < 20:
+                        raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
+                    if num_candles > 500:
+                        raise ValueError("Tối đa 500 nến!")
+                except ValueError:
+                    raise ValueError(f"Tham số thứ 2 phải là số nến hoặc khung thời gian hợp lệ: {', '.join(DataValidator.VALID_TIMEFRAMES)}")
+        
+        # Nếu có tham số thứ 3, xử lý timeframe hoặc số nến (tùy theo tham số thứ 2)
+        if len(args) > 2:
+            if args[1].upper() in DataValidator.VALID_TIMEFRAMES:
+                # Nếu tham số 2 là timeframe, tham số 3 phải là số nến
+                try:
+                    num_candles = int(args[2])
+                    if num_candles < 20:
+                        raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
+                    if num_candles > 500:
+                        raise ValueError("Tối đa 500 nến!")
+                except ValueError:
+                    raise ValueError("Tham số thứ 3 phải là số nến (20-500).")
+            else:
+                # Nếu tham số 2 là số nến, tham số 3 phải là timeframe
+                if args[2].upper() in DataValidator.VALID_TIMEFRAMES:
+                    timeframes = [args[2].upper()]
+                else:
+                    raise ValueError(f"Khung thời gian không hợp lệ. Các khung thời gian hợp lệ: {', '.join(DataValidator.VALID_TIMEFRAMES)}")
         
         # Sử dụng pipeline chuẩn hóa
         data_pipeline = DataPipeline()
         ai_analyzer = AIAnalyzer()
         
         # Chuẩn bị dữ liệu với pipeline
-        await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol}...")
-        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=['1D', '1W', '1M'], num_candles=num_candles)
+        await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol} (Timeframe: {timeframes[0]}, Nến: {num_candles})...")
+        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=timeframes, num_candles=num_candles)
         
         if pipeline_result['errors']:
             error_message = f"⚠️ Một số lỗi xảy ra trong quá trình chuẩn bị dữ liệu:\n"
@@ -2309,7 +2346,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pipeline_result['fundamental_data'], 
             pipeline_result['outlier_reports']
         )
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
+        await redis_manager.set(f"report_{symbol}_{num_candles}_{timeframes[0]}", report, expire=CACHE_EXPIRE_SHORT)
 
         formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
         formatted_report += f"<pre>{html.escape(report)}</pre>"
