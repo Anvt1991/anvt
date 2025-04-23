@@ -34,8 +34,8 @@ import feedparser
 
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship, ForeignKey
-from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime, ForeignKey, select, LargeBinary
 
 import xgboost as xgb
 from sklearn.metrics import accuracy_score
