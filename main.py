@@ -1635,13 +1635,19 @@ async def main():
         
         # Webhook handler
         async def webhook_handler(request):
-            if request.match_info.get('token') == TELEGRAM_TOKEN:
+            # Loại bỏ kiểm tra request.match_info.get('token') không chính xác
+            try:
                 request_body_bytes = await request.read()
                 await app.update_queue.put(
                     Update.de_json(json.loads(request_body_bytes), app.bot)
                 )
                 return web.Response()
-            return web.Response(status=403)
+            except json.JSONDecodeError:
+                logger.error("Lỗi decode JSON từ request webhook")
+                return web.Response(status=400) # Bad Request
+            except Exception as e:
+                logger.error(f"Lỗi xử lý webhook: {str(e)}")
+                return web.Response(status=500) # Internal Server Error
         
         # Đăng ký route
         webapp.router.add_post(f'/{TELEGRAM_TOKEN}', webhook_handler)
