@@ -568,7 +568,12 @@ async def migrate_database():
     async with SessionLocal() as session:
         try:
             # Kiểm tra version hiện tại
-            current_version = await SchemaVersion.get_current_version(session)
+            try:
+                current_version = await SchemaVersion.get_current_version(session)
+            except Exception:
+                # Nếu bảng schema_version chưa tồn tại
+                current_version = "0.0.0"
+            
             logger.info(f"Phiên bản database hiện tại: {current_version}")
             
             if current_version == CURRENT_VERSION:
@@ -578,6 +583,28 @@ async def migrate_database():
             # Migration từ version cũ (0.0.0) lên 1.0.0
             if current_version == "0.0.0":
                 logger.info("Đang nâng cấp database lên phiên bản 1.0.0...")
+                
+                # Kiểm tra và thêm các cột mới vào bảng trained_models nếu chưa có
+                async with engine.begin() as conn:
+                    # Kiểm tra xem các cột đã tồn tại chưa
+                    table_info = await conn.run_sync(lambda sync_conn: sync_conn.execute(
+                        "SELECT column_name FROM information_schema.columns WHERE table_name='trained_models'"
+                    ).fetchall())
+                    
+                    existing_columns = [col[0] for col in table_info]
+                    
+                    # Thêm các cột mới nếu chưa tồn tại
+                    if 'version' not in existing_columns:
+                        await conn.execute("ALTER TABLE trained_models ADD COLUMN version VARCHAR")
+                        logger.info("Đã thêm cột version vào bảng trained_models")
+                    
+                    if 'params' not in existing_columns:
+                        await conn.execute("ALTER TABLE trained_models ADD COLUMN params TEXT")
+                        logger.info("Đã thêm cột params vào bảng trained_models")
+                    
+                    if 'timeframe' not in existing_columns:
+                        await conn.execute("ALTER TABLE trained_models ADD COLUMN timeframe VARCHAR")
+                        logger.info("Đã thêm cột timeframe vào bảng trained_models")
                 
                 # Tạo bản ghi đầu tiên trong SchemaVersion
                 await SchemaVersion.update_version(session, "1.0.0", "Ban đầu: thêm bảng SchemaVersion, ModelPerformanceHistory")
