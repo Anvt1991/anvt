@@ -1,5 +1,5 @@
 git add .
-git commit -m "Cập nhật bot 18.11"
+git commit -m "Cập nhật bot 18.10"
 git push
 
 

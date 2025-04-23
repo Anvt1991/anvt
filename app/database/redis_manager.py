@@ -1,8 +1,12 @@
-import aioredis
 import pickle
 import logging
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential
+
+# Import aioredis với import cụ thể để tránh xung đột class TimeoutError
+import aioredis.client
+import aioredis.exceptions
+from aioredis import from_url
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +17,7 @@ class RedisManager:
         
     async def connect(self):
         try:
-            self.redis_client = await aioredis.from_url(self.redis_url)
+            self.redis_client = await from_url(self.redis_url)
             logger.info("Kết nối Redis thành công.")
         except Exception as e:
             logger.error(f"Lỗi kết nối Redis: {str(e)}")

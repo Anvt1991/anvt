@@ -23,12 +23,12 @@ class OpenRouterAnalyzer(BaseAIAnalyzer):
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
         self.semaphore = asyncio.Semaphore(3)  # Limit concurrent API calls
         
-        # Models available through OpenRouter
+        # Models available through OpenRouter (miễn phí)
         self.models = {
-            "default": "openai/gpt-3.5-turbo",
-            "premium": "anthropic/claude-3-opus",
-            "balanced": "anthropic/claude-3-sonnet",
-            "affordable": "google/palm-2"
+            "default": "deepseek/deepseek-chat-v3-0324:free",
+            "premium": "deepseek/deepseek-coder:free",
+            "balanced": "deepseek/deepseek-chat-v3-0324:free",
+            "affordable": "mistralai/mistral-7b-instruct:free"
         }
         
         self.headers = {
@@ -52,7 +52,7 @@ class OpenRouterAnalyzer(BaseAIAnalyzer):
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 2000
+                    "max_tokens": 1500  # Giảm token output để tối ưu sử dụng quotas
                 }
                 
                 async with httpx.AsyncClient(timeout=60.0) as client:
