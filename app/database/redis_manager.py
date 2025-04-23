@@ -3,8 +3,9 @@ import logging
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-# Import aioredis without importing exceptions to avoid TimeoutError conflict
-import aioredis.client
+# Sửa đổi cách nhập aioredis để tránh TimeoutError conflict
+# Thay vì import aioredis.client, chúng ta sẽ nhập trực tiếp Redis từ aioredis
+from aioredis import Redis
 from aioredis import from_url
 
 logger = logging.getLogger(__name__)
