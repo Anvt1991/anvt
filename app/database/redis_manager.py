@@ -3,10 +3,8 @@ import logging
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-# Sửa đổi cách nhập aioredis để tránh TimeoutError conflict
-# Thay vì import aioredis.client, chúng ta sẽ nhập trực tiếp Redis từ aioredis
-from aioredis import Redis
-from aioredis import from_url
+# Thay thế aioredis bằng redis.asyncio để tránh lỗi TimeoutError
+import redis.asyncio as redis
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +15,9 @@ class RedisManager:
         
     async def connect(self):
         try:
-            self.redis_client = await from_url(self.redis_url)
+            self.redis_client = redis.from_url(self.redis_url)
+            # Kiểm tra kết nối đến Redis
+            await self.redis_client.ping()
             logger.info("Kết nối Redis thành công.")
         except Exception as e:
             logger.error(f"Lỗi kết nối Redis: {str(e)}")

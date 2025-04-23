@@ -65,6 +65,8 @@ line_profiler
 plotly>=5.13.0
 kaleido>=0.2.1
 
+redis>=4.2.0
+
 # Chú ý:
 # - Đã loại bỏ redis thông thường và thay bằng aioredis để hỗ trợ async/await
 # - Đã thêm vnstock và yfinance để làm việc với thị trường Việt Nam
