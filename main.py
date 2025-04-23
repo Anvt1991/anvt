@@ -1593,11 +1593,21 @@ async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     await init_db()
 
+    # Khởi tạo Redis Manager
+    global redis_manager
+    redis_manager = RedisManager()
+
+    # Khởi tạo DB Manager
+    global db
+    db = DBManager()
+
+    # Khởi tạo scheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
     scheduler.start()
     logger.info("Auto training scheduler đã khởi động.")
 
+    # Khởi tạo bot application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyze", analyze_command))
@@ -1606,14 +1616,55 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
     logger.info("🤖 Bot khởi động!")
 
+    # Thiết lập webhook cho môi trường Render
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
     WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=WEBHOOK_URL,
-        url_path=TELEGRAM_TOKEN
-    )
+    
+    # Khởi động bot với webhook trong try-except để xử lý lỗi
+    try:
+        # Thiết lập webhook
+        await app.bot.set_webhook(url=WEBHOOK_URL)
+        
+        # Khởi động ứng dụng
+        await app.initialize()
+        await app.start()
+        
+        # Thiết lập web server để xử lý webhook
+        webapp = web.Application()
+        
+        # Webhook handler
+        async def webhook_handler(request):
+            if request.match_info.get('token') == TELEGRAM_TOKEN:
+                request_body_bytes = await request.read()
+                await app.update_queue.put(
+                    Update.de_json(json.loads(request_body_bytes), app.bot)
+                )
+                return web.Response()
+            return web.Response(status=403)
+        
+        # Đăng ký route
+        webapp.router.add_post(f'/{TELEGRAM_TOKEN}', webhook_handler)
+        
+        # Khởi động web server
+        runner = web.AppRunner(webapp)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', PORT)
+        
+        # Khởi động site
+        await site.start()
+        
+        logger.info(f"Webhook đã thiết lập tại {WEBHOOK_URL}")
+        logger.info(f"Bot đang lắng nghe trên 0.0.0.0:{PORT}")
+        
+        # Giữ ứng dụng chạy
+        shutdown_event = asyncio.Event()
+        await shutdown_event.wait()
+        
+    except Exception as e:
+        logger.error(f"Lỗi khi thiết lập webhook: {str(e)}")
+        # Quay lại chế độ polling nếu webhook thất bại
+        logger.info("Chuyển sang chế độ polling...")
+        await app.run_polling()
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "test":
