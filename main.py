@@ -2343,100 +2343,180 @@ async def main():
     logger.info("Khởi động bot...")
     
     # Khởi tạo database
-    await init_db()
+    try:
+        logger.info("Đang khởi tạo cơ sở dữ liệu...")
+        await init_db()
+        logger.info("Khởi tạo cơ sở dữ liệu thành công")
+    except Exception as e:
+        logger.error(f"Lỗi khởi tạo cơ sở dữ liệu: {str(e)}")
+        raise
     
     # Thực hiện migrate database nếu cần
-    await migrate_database()
+    try:
+        logger.info("Đang kiểm tra và cập nhật schema cơ sở dữ liệu...")
+        await migrate_database()
+        logger.info("Cập nhật schema cơ sở dữ liệu hoàn tất")
+    except Exception as e:
+        logger.error(f"Lỗi migration cơ sở dữ liệu: {str(e)}")
+        raise
     
     # Khởi động scheduler cho auto training
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
-    scheduler.start()
-    logger.info("Auto training scheduler đã khởi động.")
+    try:
+        logger.info("Đang khởi động scheduler auto training...")
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
+        scheduler.start()
+        logger.info("Auto training scheduler đã khởi động")
+    except Exception as e:
+        logger.error(f"Lỗi khởi động scheduler: {str(e)}")
+        # Không raise để bot vẫn chạy được dù lỗi scheduler
+    
+    # Khởi động webhook server và bot
+    try:
+        logger.info("Đang khởi động bot và webhook server...")
+        # Tạo global variables cho webhook URL
+        global WEBHOOK_URL, WEBHOOK_PATH, BASE_URL, application
+        BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
+        WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
+        WEBHOOK_PATH = f"/{TELEGRAM_TOKEN}"
+        logger.info(f"Webhook URL: {WEBHOOK_URL}")
+        
+        # Khởi tạo bot application
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # Thêm các handler xử lý lệnh
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("analyze", analyze_command))
+        application.add_handler(CommandHandler("getid", get_id))
+        application.add_handler(CommandHandler("approve", approve_user))
+        
+        # MessageHandler cho các tin nhắn không phải lệnh
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
+        
+        # Handler mặc định để đảm bảo bot luôn phản hồi
+        async def default_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            logger.info(f"Nhận tin nhắn không phù hợp với bất kỳ handler nào: {update.message.text if update.message else 'No message'}")
+            if update.message:
+                await update.message.reply_text("Xin chào! Bạn có thể sử dụng các lệnh: /start, /analyze, /getid")
+        
+        # Thêm handler mặc định để bot luôn phản hồi
+        application.add_handler(MessageHandler(filters.ALL, default_handler), group=999)
+        
+        # Thiết lập error handler
+        async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            logger.error(f"Exception while handling an update: {context.error}")
+            if update and update.effective_message:
+                await update.effective_message.reply_text("Xảy ra lỗi khi xử lý yêu cầu của bạn. Vui lòng thử lại sau.")
+        
+        application.add_error_handler(error_handler)
+        
+        # Log để debug
+        logger.info("Đã đăng ký tất cả các handler cho bot")
+        
+        # Khởi động webhook server
+        await start_webhook()
+    except Exception as e:
+        logger.error(f"Lỗi khởi động webhook server: {str(e)}")
+        raise
 
-    # Thiết lập Telegram bot với webhook tối ưu cho Render Cloud
-    BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
-    WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-    WEBHOOK_PATH = f"/{TELEGRAM_TOKEN}"
+# Tạo web server với aiohttp
+from aiohttp import web
 
-    # Khởi tạo bot application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("analyze", analyze_command))
-    application.add_handler(CommandHandler("getid", get_id))
-    application.add_handler(CommandHandler("approve", approve_user))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
-    
-    # Tạo ứng dụng web aiohttp
-    async def setup_webhook():
-        retry_count = 0
-        max_retries = 5
-        while retry_count < max_retries:
-            try:
-                webhook_info = await application.bot.get_webhook_info()
-                if webhook_info.url != WEBHOOK_URL:
-                    await application.bot.set_webhook(url=WEBHOOK_URL)
-                    logger.info(f"Webhook đã được thiết lập thành công: {WEBHOOK_URL}")
-                else:
-                    logger.info(f"Webhook đã được thiết lập trước đó: {WEBHOOK_URL}")
-                return
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"Lỗi thiết lập webhook (thử lần {retry_count}): {str(e)}")
-                await asyncio.sleep(5)
-    
-    # Tạo web server với aiohttp
-    from aiohttp import web
-    
-    async def webhook_handler(request):
-        # Đọc và xử lý update từ Telegram
-        update_data = await request.json()
-        await application.update_queue.put(update_data)
-        return web.Response(status=200)
-    
-    async def health_check(request):
-        # Route để kiểm tra trạng thái hoạt động của server
-        return web.Response(text='OK', status=200)
-    
-    async def start_webhook():
-        # Thiết lập webhook
-        await setup_webhook()
-        
-        # Khởi tạo ứng dụng web
-        web_app = web.Application()
-        web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
-        web_app.router.add_get('/health', health_check)
-        
-        # Khởi động web server
-        runner = web.AppRunner(web_app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', PORT)
-        
-        # Đảm bảo ứng dụng được khởi tạo đúng cách trước khi khởi động
-        await application.initialize()
-        
-        logger.info(f"🤖 Bot khởi động với webhook tại: {WEBHOOK_URL}")
-        logger.info(f"Server lắng nghe tại: 0.0.0.0:{PORT}")
-        
-        # Khởi động webhook processing
-        await application.start()
-        await site.start()
-        
-        # Giữ cho ứng dụng chạy liên tục
-        while True:
-            await asyncio.sleep(3600)  # Kiểm tra mỗi giờ
+async def setup_webhook():
+    retry_count = 0
+    max_retries = 5
+    while retry_count < max_retries:
+        try:
+            # Xóa webhook cũ trước khi thiết lập mới
+            await application.bot.delete_webhook()
             
-            # Kiểm tra và thiết lập lại webhook nếu cần
-            try:
-                webhook_info = await application.bot.get_webhook_info()
-                if not webhook_info.url or webhook_info.url != WEBHOOK_URL:
-                    logger.warning(f"Webhook không hoạt động hoặc không đúng. Thiết lập lại.")
-                    await application.bot.set_webhook(url=WEBHOOK_URL)
-            except Exception as e:
-                logger.error(f"Lỗi kiểm tra webhook: {str(e)}")
+            # Thiết lập webhook mới với các thông số cần thiết
+            webhook_info = await application.bot.get_webhook_info()
+            if webhook_info.url != WEBHOOK_URL:
+                # Thiết lập webhook với thông số đầy đủ
+                await application.bot.set_webhook(
+                    url=WEBHOOK_URL,
+                    allowed_updates=["message", "callback_query", "inline_query"], 
+                    drop_pending_updates=True,
+                    max_connections=40
+                )
+                logger.info(f"Webhook đã được thiết lập thành công: {WEBHOOK_URL}")
+            else:
+                logger.info(f"Webhook đã được thiết lập trước đó: {WEBHOOK_URL}")
+            
+            # Kiểm tra lại webhook sau khi thiết lập
+            new_webhook_info = await application.bot.get_webhook_info()
+            logger.info(f"Thông tin webhook: URL={new_webhook_info.url}, Pending updates={new_webhook_info.pending_update_count}")
+            
+            return
+        except Exception as e:
+            retry_count += 1
+            logger.error(f"Lỗi thiết lập webhook (thử lần {retry_count}): {str(e)}")
+            await asyncio.sleep(5)
+            
+    # Nếu tất cả các lần thử đều thất bại
+    logger.error("Không thể thiết lập webhook sau nhiều lần thử lại")
+
+async def webhook_handler(request):
+    # Đọc và xử lý update từ Telegram
+    update_data = await request.json()
+    try:
+        # Ghi log để debug
+        logger.info(f"Nhận webhook từ Telegram: {json.dumps(update_data)[:200]}...")
+        
+        # Tạo đối tượng Update từ dữ liệu JSON
+        update = Update.de_json(data=update_data, bot=application.bot)
+        
+        # Xử lý update async
+        await application.process_update(update)
+        
+        logger.info(f"Đã xử lý update từ user_id: {update.effective_user.id if update.effective_user else 'Unknown'}")
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Lỗi xử lý webhook: {str(e)}")
+        # Vẫn trả về 200 để Telegram không gửi lại update
+        return web.Response(status=200)
+
+async def health_check(request):
+    # Route để kiểm tra trạng thái hoạt động của server
+    return web.Response(text='OK', status=200)
+
+async def start_webhook():
+    # Thiết lập webhook
+    await setup_webhook()
     
-    # Khởi động webhook server
-    await start_webhook()
+    # Khởi tạo ứng dụng web
+    web_app = web.Application()
+    web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
+    web_app.router.add_get('/health', health_check)
+    
+    # Khởi động web server
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    
+    # Đảm bảo ứng dụng được khởi tạo đúng cách trước khi khởi động
+    await application.initialize()
+    
+    logger.info(f"🤖 Bot khởi động với webhook tại: {WEBHOOK_URL}")
+    logger.info(f"Server lắng nghe tại: 0.0.0.0:{PORT}")
+    
+    # Khởi động webhook processing
+    await application.start()
+    await site.start()
+    
+    # Giữ cho ứng dụng chạy liên tục
+    while True:
+        await asyncio.sleep(3600)  # Kiểm tra mỗi giờ
+        
+        # Kiểm tra và thiết lập lại webhook nếu cần
+        try:
+            webhook_info = await application.bot.get_webhook_info()
+            if not webhook_info.url or webhook_info.url != WEBHOOK_URL:
+                logger.warning(f"Webhook không hoạt động hoặc không đúng. Thiết lập lại.")
+                await application.bot.set_webhook(url=WEBHOOK_URL)
+        except Exception as e:
+            logger.error(f"Lỗi kiểm tra webhook: {str(e)}")
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "test":
