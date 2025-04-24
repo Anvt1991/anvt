@@ -837,13 +837,20 @@ def standardize_data_for_db(data: dict) -> dict:
 
 # ---------- HÀM HỖ TRỢ: LỌC NGÀY GIAO DỊCH -----------
 def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lọc lại ngày giao dịch cho data khung ngày (1D)
+    Chỉ loại bỏ cuối tuần và ngày lễ cho khung ngày
+    """
     if df.empty:
         return df
-    df = df[df.index.weekday < 5]
+    
+    # Chỉ lọc ngày giao dịch, giữ nguyên data trên khung tuần và tháng
+    df = df[df.index.weekday < 5]  # Loại bỏ T7, CN
     years = df.index.year.unique()
     vn_holidays = holidays.Vietnam(years=years)
     holiday_dates = set(vn_holidays.keys())
     df = df[~pd.to_datetime(df.index.date).isin(holiday_dates)]
+    
     return df
 
 # ---------- TẢI DỮ LIỆU (NÂNG CẤP) ----------
@@ -890,18 +897,30 @@ class DataLoader:
                     stock = Vnstock().stock(symbol=symbol, source='TCBS')
                     end_date = datetime.now().strftime('%Y-%m-%d')
                     
-                    # Calculate appropriate start date based on timeframe
+                    # Tính toán start_date phù hợp dựa vào timeframe
                     if timeframe in ['5m', '15m', '30m', '1h']:
                         # For intraday, we need to adjust the period to get enough data
                         start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
                     elif timeframe == '4h':
                         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+                    elif timeframe == '1W':
+                        # Cho weekly data, lấy dữ liệu gấp 3 lần số nến cần thiết để tránh thiếu dữ liệu
+                        start_date = (datetime.now() - timedelta(weeks=num_candles * 3)).strftime('%Y-%m-%d')
+                    elif timeframe == '1M':
+                        # Cho monthly data, lấy dữ liệu gấp 3 lần số nến cần thiết để tránh thiếu dữ liệu
+                        start_date = (datetime.now() - timedelta(days=num_candles * 90)).strftime('%Y-%m-%d')
                     else:
-                        # Daily or longer timeframes
-                        start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 3)).strftime('%Y-%m-%d')
+                        # Daily timeframe
+                        start_date = (datetime.now() - timedelta(days=num_candles * 3)).strftime('%Y-%m-%d')
                     
-                    # Fetch data with appropriate interval
-                    df = stock.quote.history(start=start_date, end=end_date, interval=timeframe)
+                    # Fetch data with appropriate interval - đảm bảo interval truyền vào chính xác
+                    # TCBS API hỗ trợ các interval: 1D, 1W, 1M
+                    tcbs_interval = timeframe
+                    if timeframe in ['5m', '15m', '30m', '1h', '4h']:
+                        # Intraday API có thể khác, kiểm tra tài liệu API của TCBS
+                        tcbs_interval = timeframe
+                    
+                    df = stock.quote.history(start=start_date, end=end_date, interval=tcbs_interval)
                     if df is None or df.empty or len(df) < 20:
                         raise ValueError(f"Không đủ dữ liệu cho {'chỉ số' if is_index(symbol) else 'mã'} {symbol} (timeframe: {timeframe})")
                     
@@ -916,6 +935,7 @@ class DataLoader:
                     if timeframe in ['5m', '15m', '30m', '1h', '4h']:
                         df = DataValidator.align_timestamp(df, timeframe)
                     
+                    # Đảm bảo múi giờ chính xác
                     df.index = df.index.tz_localize('Asia/Bangkok')
                     
                     # Xác thực dữ liệu
@@ -966,8 +986,8 @@ class DataLoader:
             else:
                 raise ValueError("Nguồn dữ liệu không hợp lệ")
 
-            # Filter trading days for daily and higher timeframes
-            if timeframe not in ['5m', '15m', '30m', '1h', '4h']:
+            # Filter trading days for daily timeframe only
+            if timeframe == '1D':
                 df = filter_trading_days(df)
                 
             # Detect and handle outliers
@@ -1872,16 +1892,28 @@ class AIAnalyzer:
                     logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
                     return calculated_levels
 
-    async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
+    async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict, primary_timeframe: str = '1D') -> str:
         try:
             tech_analyzer = TechnicalAnalyzer()
             indicators = tech_analyzer.calculate_multi_timeframe_indicators(dfs)
             news = await get_news(symbol=symbol)
             news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}\n📝 {n['summary']}" for n in news])
-            df_1d = dfs.get('1D')
-            close_today = df_1d['close'].iloc[-1]
-            close_yesterday = df_1d['close'].iloc[-2]
-            price_action = self.analyze_price_action(df_1d)
+            
+            # Sử dụng timeframe chính cho phân tích
+            df_primary = dfs.get(primary_timeframe)
+            if df_primary is None:
+                if '1D' in dfs:
+                    df_primary = dfs.get('1D')
+                    logger.warning(f"Không tìm thấy khung {primary_timeframe} cho {symbol}, sử dụng 1D thay thế")
+                else:
+                    # Lấy timeframe đầu tiên có sẵn
+                    primary_timeframe = list(dfs.keys())[0]
+                    df_primary = dfs.get(primary_timeframe)
+                    logger.warning(f"Không tìm thấy khung 1D cho {symbol}, sử dụng {primary_timeframe} thay thế")
+            
+            close_today = df_primary['close'].iloc[-1]
+            close_yesterday = df_primary['close'].iloc[-2]
+            price_action = self.analyze_price_action(df_primary)
             history = await self.load_report_history(symbol)
             past_report = ""
             if history:
@@ -1895,17 +1927,17 @@ class AIAnalyzer:
             
             # Phân tích với OpenRouter
             technical_data = {
-                "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
-                "technical_indicators": indicators['1D']
+                "candlestick_data": df_primary.tail(50).to_dict(orient="records"),
+                "technical_indicators": indicators.get(primary_timeframe, indicators.get('1D', {}))
             }
             openrouter_result = await self.analyze_with_openrouter(technical_data)
             support_levels = openrouter_result.get('support_levels', [])
             resistance_levels = openrouter_result.get('resistance_levels', [])
             patterns = openrouter_result.get('patterns', [])
 
-            forecast, prophet_model = forecast_with_prophet(df_1d, periods=7)
-            prophet_perf = evaluate_prophet_performance(df_1d, forecast)
-            future_forecast = forecast[forecast['ds'] > df_1d.index[-1].tz_localize(None)]
+            forecast, prophet_model = forecast_with_prophet(df_primary, periods=7)
+            prophet_perf = evaluate_prophet_performance(df_primary, forecast)
+            future_forecast = forecast[forecast['ds'] > df_primary.index[-1].tz_localize(None)]
             if not future_forecast.empty:
                 next_day_pred = future_forecast.iloc[0]
                 day7_pred = future_forecast.iloc[6] if len(future_forecast) >= 7 else future_forecast.iloc[-1]
@@ -1918,7 +1950,7 @@ class AIAnalyzer:
             forecast_summary += f"- Sau 7 ngày ({day7_pred['ds'].strftime('%d/%m/%Y')}): {day7_pred['yhat']:.2f}\n"
 
             features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-            xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
+            xgb_signal, xgb_perf = predict_xgboost_signal(df_primary.copy(), features)
             if isinstance(xgb_signal, int):
                 xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
             else:
@@ -1929,10 +1961,10 @@ class AIAnalyzer:
             else:
                 xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
 
-            outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
+            outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items() if tf in dfs])
 
             # Tự tính toán thêm mức hỗ trợ/kháng cự để đối chiếu
-            calculated_levels = self.calculate_support_resistance_levels(df_1d)
+            calculated_levels = self.calculate_support_resistance_levels(df_primary)
             calc_support_str = ", ".join([f"{level:.2f}" for level in calculated_levels['support_levels']])
             calc_resistance_str = ", ".join([f"{level:.2f}" for level in calculated_levels['resistance_levels']])
 
@@ -1947,6 +1979,7 @@ Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CH�
 
 **Thông tin cơ bản:**
 - Ngày: {datetime.now().strftime('%d/%m/%Y')}
+- Khung thời gian: {primary_timeframe}
 - Giá hôm qua: {close_yesterday:.2f}
 - Giá hôm nay: {close_today:.2f} ({((close_today-close_yesterday)/close_yesterday*100):.2f}%)
 
@@ -1961,15 +1994,17 @@ Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CH�
 
 **Chỉ số kỹ thuật:**
 """
+                # Chỉ phân tích các khung thời gian có sẵn
                 for tf, ind in indicators.items():
-                    prompt += f"\n--- {tf} ---\n"
-                    prompt += f"- Close: {ind.get('close', 0):.2f}\n"
-                    prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
-                    prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
-                    prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
-                    prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
-                    prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
-                    prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
+                    if tf in dfs:  # Chỉ hiển thị indicators cho các timeframe có trong dfs
+                        prompt += f"\n--- {tf} ---\n"
+                        prompt += f"- Close: {ind.get('close', 0):.2f}\n"
+                        prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
+                        prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
+                        prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
+                        prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
+                        prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
+                        prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
 
                 prompt += f"\n**Tin tức thị trường:**\n{news_text}\n"
                 prompt += f"\n**Phân tích mức hỗ trợ/kháng cự của chỉ số:**\n"
@@ -1983,7 +2018,7 @@ Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CH�
                 prompt += """
 **Yêu cầu:**
 1. Đánh giá tổng quan thị trường. So sánh chỉ số phiên hiện tại và phiên trước đó.
-2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của CHỈ SỐ.
+2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của CHỈ SỐ. Tập trung vào khung thời gian {primary_timeframe}.
 3. Đánh giá các mô hình, mẫu hình, sóng (nếu có) chỉ số kỹ thuật, động lực thị trường.
 4. Xác định hỗ trợ/kháng cự cho CHỈ SỐ. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất chiến lược cho nhà đầu tư: nên theo xu hướng thị trường hay đi ngược, mức độ thận trọng.
@@ -2005,6 +2040,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 
 **Thông tin cơ bản:**
 - Ngày: {datetime.now().strftime('%d/%m/%Y')}
+- Khung thời gian: {primary_timeframe}
 - Giá hôm qua: {close_yesterday:.2f}
 - Giá hôm nay: {close_today:.2f} ({((close_today-close_yesterday)/close_yesterday*100):.2f}%)
 
@@ -2019,15 +2055,17 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 
 **Chỉ số kỹ thuật:**
 """
+                # Chỉ phân tích các khung thời gian có sẵn
                 for tf, ind in indicators.items():
-                    prompt += f"\n--- {tf} ---\n"
-                    prompt += f"- Close: {ind.get('close', 0):.2f}\n"
-                    prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
-                    prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
-                    prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
-                    prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
-                    prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
-                    prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
+                    if tf in dfs:  # Chỉ hiển thị indicators cho các timeframe có trong dfs
+                        prompt += f"\n--- {tf} ---\n"
+                        prompt += f"- Close: {ind.get('close', 0):.2f}\n"
+                        prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
+                        prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
+                        prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
+                        prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
+                        prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
+                        prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
                 prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
                 prompt += f"\n**Tin tức:**\n{news_text}\n"
                 prompt += f"\n**Phân tích mức hỗ trợ/kháng cự:**\n"
@@ -2041,7 +2079,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
                 prompt += """
 **Yêu cầu:**
 1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
-2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
+2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn. Tập trung vào khung thời gian {primary_timeframe}.
 3. Đánh giá các mô hình, mẫu hình, sóng (nếu có), chỉ số kỹ thuật, động lực thị trường.
 4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
 5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
@@ -2078,18 +2116,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(user_id) == ADMIN_ID and not await db.is_user_approved(user_id):
         await db.add_approved_user(user_id)
         logger.info(f"Admin {user_id} tự động duyệt.")
-
+        
     if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            f"Xin chào! Bot đang chạy thử nghiệm.\n"
+            f"ID của bạn: {user_id}\n"
+            f"Vui lòng liên hệ admin để được cấp quyền sử dụng."
+        )
         await notify_admin_new_user(update, context)
         return
 
     await update.message.reply_text(
-        "🚀 **V18.9 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
-        "📊 **Lệnh**:\n"
-        "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
+        "🚀 **V19.0 - HỖ TRỢ ĐA KHUNG THỜI GIAN**\n\n"
+        "✅ Bạn đã có quyền sử dụng bot. Các lệnh hiện tại:\n\n"
+        "/analyze <mã chứng khoán> [<khung thời gian>] [<số nến>]: Phân tích kỹ thuật\n"
+        "- Ví dụ: /analyze VNM (phân tích mặc định khung D)\n"
+        "- Ví dụ: /analyze VNM D (phân tích khung ngày D)\n"
+        "- Ví dụ: /analyze VNM W (phân tích khung tuần W)\n"
+        "- Ví dụ: /analyze VNM M (phân tích khung tháng M)\n"
+        "- Ví dụ: /analyze VNM 100 (phân tích với 100 nến)\n"
+        "- Ví dụ: /analyze VNM W 50 (phân tích khung tuần với 50 nến)\n\n"
         "- /getid - Lấy ID.\n"
-        "- /approve [user_id] - Duyệt người dùng (admin).\n"
-        "💡 **Bắt đầu nào!**"
+        "- /approve [user_id] - Duyệt người dùng (admin).\n\n"
+        "🚀 Bot hỗ trợ phân tích đa khung thời gian D(daily), W(weekly), M(monthly)."
     )
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2102,19 +2151,48 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not args:
             raise ValueError("Nhập mã chứng khoán (e.g., VNINDEX, SSI).")
         symbol = args[0].upper()
-        num_candles = int(args[1]) if len(args) > 1 else DEFAULT_CANDLES
-        if num_candles < 20:
-            raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
-        if num_candles > 500:
-            raise ValueError("Tối đa 500 nến!")
+        
+        # Mặc định: phân tích khung ngày (D)
+        timeframe = '1D'
+        
+        # Xử lý thông số về khung thời gian và số nến
+        num_candles = DEFAULT_CANDLES
+        timeframes = ['1D', '1W', '1M']
+        
+        # Phân tích tham số đầu vào
+        for i in range(1, len(args)):
+            arg = args[i].upper()
+            # Nếu là khung thời gian
+            if arg in ['D', 'W', 'M', '1D', '1W', '1M']:
+                if arg == 'D': 
+                    timeframe = '1D'
+                elif arg == 'W': 
+                    timeframe = '1W'
+                elif arg == 'M': 
+                    timeframe = '1M'
+                else:
+                    timeframe = arg
+            # Nếu là số nến
+            elif arg.isdigit():
+                num_candles = int(arg)
+                if num_candles < 20:
+                    raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
+                if num_candles > 500:
+                    raise ValueError("Tối đa 500 nến!")
+                
+        # Dựa vào timeframe được chọn, chỉ phân tích khung thời gian đó
+        if timeframe == '1D':
+            timeframes = ['1D', '1W', '1M']  # Mặc định phân tích tất cả các khung
+        else:
+            timeframes = [timeframe]  # Chỉ phân tích khung thời gian được chọn
         
         # Sử dụng pipeline chuẩn hóa
         data_pipeline = DataPipeline()
         ai_analyzer = AIAnalyzer()
         
         # Chuẩn bị dữ liệu với pipeline
-        await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol}...")
-        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=['1D', '1W', '1M'], num_candles=num_candles)
+        await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol} (khung {timeframe})...")
+        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=timeframes, num_candles=num_candles)
         
         if pipeline_result['errors']:
             error_message = f"⚠️ Một số lỗi xảy ra trong quá trình chuẩn bị dữ liệu:\n"
@@ -2125,16 +2203,17 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError(f"Không thể tải dữ liệu cho {symbol}")
         
         # Tạo báo cáo với AI
-        await update.message.reply_text(f"⏳ Đang phân tích {symbol} với AI...")
+        await update.message.reply_text(f"⏳ Đang phân tích {symbol} (khung {timeframe}) với AI...")
         report = await ai_analyzer.generate_report(
             pipeline_result['dataframes'], 
             symbol, 
             pipeline_result['fundamental_data'], 
-            pipeline_result['outlier_reports']
+            pipeline_result['outlier_reports'],
+            primary_timeframe=timeframe
         )
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
+        await redis_manager.set(f"report_{symbol}_{timeframe}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
 
-        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
+        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol} (khung {timeframe})</b>\n\n"
         formatted_report += f"<pre>{html.escape(report)}</pre>"
         await update.message.reply_text(formatted_report, parse_mode='HTML')
     except ValueError as e:
