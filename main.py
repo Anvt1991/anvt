@@ -33,6 +33,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import hashlib
 import json
+import inspect
+from asyncio import isawaitable
 
 import pandas as pd
 import numpy as np
@@ -1306,7 +1308,7 @@ class DataPipeline:
             "fundamental_data_available": len(fundamental_data) > 0,
             "outlier_reports": self.outlier_reports.get(symbol, ""),
             "validation_reports": self.validation_reports.get(symbol, {}),
-            "status": "success" if not all(df.empty for df in dfs.values()) else "error"
+            "status": "success" if not all(df.empty if not isawaitable(df) else True for df in dfs.values()) else "error"
         }
         
         return dfs, fundamental_data, summary_report
