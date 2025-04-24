@@ -932,7 +932,10 @@ class DataLoader:
                 # Sử dụng VNStock cho cổ phiếu Việt Nam
                 async def fetch_vnstock():
                     if timeframe == '1D':
-                        return self.vnstock.stock_historical_data(
+                        # Import trực tiếp từ vnstock module
+                        from vnstock import stock_historical_data
+                        
+                        return stock_historical_data(
                             symbol=symbol, 
                             start_date=(datetime.now() - timedelta(days=num_candles*2)).strftime('%Y-%m-%d'),
                             end_date=datetime.now().strftime('%Y-%m-%d')
@@ -1062,9 +1065,12 @@ class DataLoader:
             result = {}
             try:
                 if not is_index(symbol):
+                    # Import các hàm trực tiếp từ vnstock
+                    from vnstock import company_overview, financial_ratio, income_statement, balance_sheet, cash_flow
+                    
                     # Company overview
                     try:
-                        overview = self.vnstock.company_overview(symbol)
+                        overview = company_overview(symbol=symbol)
                         # Sanitize data to ensure it's JSON-serializable and handle encoding issues
                         overview_sanitized = {}
                         for key, value in overview.items():
@@ -1080,7 +1086,7 @@ class DataLoader:
                     
                     # Financial ratios
                     try:
-                        ratios = self.vnstock.financial_ratio(symbol, 'yearly', 3)
+                        ratios = financial_ratio(symbol=symbol, report_type='yearly', report_range=3)
                         result['ratios'] = ratios
                     except Exception as e:
                         logger.error(f"Lỗi lấy financial_ratio cho {symbol}: {str(e)}")
@@ -1088,19 +1094,19 @@ class DataLoader:
                     
                     # Financial reports
                     try:
-                        result['income_statement'] = self.vnstock.income_statement(symbol, 'yearly', 3)
+                        result['income_statement'] = income_statement(symbol=symbol, report_type='yearly', report_range=3)
                     except Exception as e:
                         logger.error(f"Lỗi lấy income_statement cho {symbol}: {str(e)}")
                         result['income_statement'] = None
                         
                     try:
-                        result['balance_sheet'] = self.vnstock.balance_sheet(symbol, 'yearly', 3)
+                        result['balance_sheet'] = balance_sheet(symbol=symbol, report_type='yearly', report_range=3)
                     except Exception as e:
                         logger.error(f"Lỗi lấy balance_sheet cho {symbol}: {str(e)}")
                         result['balance_sheet'] = None
                         
                     try:
-                        result['cash_flow'] = self.vnstock.cash_flow(symbol, 'yearly', 3)
+                        result['cash_flow'] = cash_flow(symbol=symbol, report_type='yearly', report_range=3)
                     except Exception as e:
                         logger.error(f"Lỗi lấy cash_flow cho {symbol}: {str(e)}")
                         result['cash_flow'] = None
@@ -1302,13 +1308,30 @@ class DataPipeline:
         fundamental_data = await self.data_loader.get_fundamental_data(symbol)
         
         # Tạo báo cáo tổng hợp
+        # Kiểm tra dữ liệu một cách an toàn
+        has_data = False
+        for df_key, df in dfs.items():
+            # Nếu df là một coroutine, cần await nó trước
+            if isawaitable(df):
+                try:
+                    df = await df
+                    dfs[df_key] = df  # Cập nhật lại dictionary với giá trị đã await
+                except Exception as e:
+                    logger.error(f"Lỗi khi await coroutine cho {df_key}: {str(e)}")
+                    continue
+            
+            # Kiểm tra DataFrame có dữ liệu
+            if df is not None and hasattr(df, 'empty') and not df.empty:
+                has_data = True
+                break
+                
         summary_report = {
             "symbol": symbol,
             "timeframes_processed": list(dfs.keys()),
             "fundamental_data_available": len(fundamental_data) > 0,
             "outlier_reports": self.outlier_reports.get(symbol, ""),
             "validation_reports": self.validation_reports.get(symbol, {}),
-            "status": "success" if not all(df.empty if not isawaitable(df) else True for df in dfs.values()) else "error"
+            "status": "success" if has_data else "error"
         }
         
         return dfs, fundamental_data, summary_report
@@ -1919,9 +1942,13 @@ async def get_training_symbols() -> list:
         # Thu thập từ VNStock
         def fetch_vn30():
             try:
-                vnstock = Vnstock()
-                return vnstock.ticker_industry()
-            except:
+                # Import trực tiếp từ vnstock module
+                from vnstock import listing_companies
+                
+                # Sử dụng listing_companies thay vì ticker_industry
+                return listing_companies()
+            except Exception as e:
+                logger.error(f"Lỗi khi lấy danh sách công ty: {str(e)}")
                 return None
         
         industry_data = await run_in_thread(fetch_vn30)

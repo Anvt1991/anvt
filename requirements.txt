@@ -8,7 +8,7 @@ numpy
 
 ta
 yfinance
-vnstock
+vnstock>=0.2.0
 
 google-generativeai
 xgboost
