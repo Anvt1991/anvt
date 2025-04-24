@@ -89,11 +89,16 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("stock_bot.log", mode='a')
+        logging.StreamHandler(stream=sys.stdout),
+        logging.FileHandler("stock_bot.log", mode='a', encoding='utf-8')
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Ensure system can handle Unicode properly
+import sys
+sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace') if hasattr(sys.stdout, 'reconfigure') else None
+sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace') if hasattr(sys.stderr, 'reconfigure') else None
 
 # Cache expiration settings
 CACHE_EXPIRE_SHORT = 1800         # 30 phút cho dữ liệu ngắn hạn
@@ -161,7 +166,8 @@ class RedisManager:
                 socket_timeout=5.0,
                 socket_connect_timeout=5.0,
                 retry_on_timeout=True,
-                health_check_interval=30
+                health_check_interval=30,
+                encoding_errors="replace"  # Handle encoding errors gracefully
             )
             logger.info("Kết nối Redis thành công.")
         except Exception as e:
@@ -405,6 +411,13 @@ class DBManager:
     async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
         try:
             today = datetime.now().strftime("%Y-%m-%d")
+            
+            # Sanitize report text to ensure it's properly encoded
+            sanitized_report = report
+            if isinstance(report, str):
+                # Handle any potential encoding issues with Vietnamese text
+                sanitized_report = report.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+            
             async with self.Session() as session:
                 # Kiểm tra xem đã có báo cáo cho ngày hôm nay chưa
                 existing_report = await session.execute(
@@ -415,7 +428,7 @@ class DBManager:
                 
                 if existing_report:
                     # Cập nhật báo cáo hiện tại
-                    existing_report.report = report
+                    existing_report.report = sanitized_report
                     existing_report.close_today = close_today
                     existing_report.close_yesterday = close_yesterday
                     existing_report.timestamp = datetime.now()
@@ -424,7 +437,7 @@ class DBManager:
                     new_report = ReportHistory(
                         symbol=symbol,
                         date=today,
-                        report=report,
+                        report=sanitized_report,
                         close_today=close_today,
                         close_yesterday=close_yesterday
                     )
@@ -1048,15 +1061,47 @@ class DataLoader:
             try:
                 if not is_index(symbol):
                     # Company overview
-                    result['overview'] = self.vnstock.company_overview(symbol)
+                    try:
+                        overview = self.vnstock.company_overview(symbol)
+                        # Sanitize data to ensure it's JSON-serializable and handle encoding issues
+                        overview_sanitized = {}
+                        for key, value in overview.items():
+                            if isinstance(value, str):
+                                # Handle any potential encoding issues with Vietnamese text
+                                overview_sanitized[key] = value.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                            else:
+                                overview_sanitized[key] = value
+                        result['overview'] = overview_sanitized
+                    except Exception as e:
+                        logger.error(f"Lỗi lấy company_overview cho {symbol}: {str(e)}")
+                        result['overview'] = {'symbol': symbol, 'error': 'Failed to retrieve company overview'}
                     
                     # Financial ratios
-                    result['ratios'] = self.vnstock.financial_ratio(symbol, 'yearly', 3)
+                    try:
+                        ratios = self.vnstock.financial_ratio(symbol, 'yearly', 3)
+                        result['ratios'] = ratios
+                    except Exception as e:
+                        logger.error(f"Lỗi lấy financial_ratio cho {symbol}: {str(e)}")
+                        result['ratios'] = None
                     
                     # Financial reports
-                    result['income_statement'] = self.vnstock.income_statement(symbol, 'yearly', 3)
-                    result['balance_sheet'] = self.vnstock.balance_sheet(symbol, 'yearly', 3)
-                    result['cash_flow'] = self.vnstock.cash_flow(symbol, 'yearly', 3)
+                    try:
+                        result['income_statement'] = self.vnstock.income_statement(symbol, 'yearly', 3)
+                    except Exception as e:
+                        logger.error(f"Lỗi lấy income_statement cho {symbol}: {str(e)}")
+                        result['income_statement'] = None
+                        
+                    try:
+                        result['balance_sheet'] = self.vnstock.balance_sheet(symbol, 'yearly', 3)
+                    except Exception as e:
+                        logger.error(f"Lỗi lấy balance_sheet cho {symbol}: {str(e)}")
+                        result['balance_sheet'] = None
+                        
+                    try:
+                        result['cash_flow'] = self.vnstock.cash_flow(symbol, 'yearly', 3)
+                    except Exception as e:
+                        logger.error(f"Lỗi lấy cash_flow cho {symbol}: {str(e)}")
+                        result['cash_flow'] = None
                 else:
                     # For indices
                     result['overview'] = {'symbol': symbol, 'type': 'index'}
@@ -2164,15 +2209,21 @@ class AIAnalyzer:
             # Thêm cảnh báo nếu phát hiện dữ liệu bất thường
             outlier_report = outlier_reports.get(symbol, "")
             if outlier_report and "Phát hiện" in outlier_report:
+                # Sanitize outlier report text
+                outlier_report = outlier_report.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
                 report_parts.append(f"⚠️ *CẢNH BÁO DỮ LIỆU BẤT THƯỜNG*\n{outlier_report}\n")
             
             # Phân tích giá
             price_analysis = self.analyze_price_action(df_daily)
+            # Sanitize price analysis text
+            price_analysis = price_analysis.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
             report_parts.append(f"*PHÂN TÍCH GIÁ*\n{price_analysis}\n")
             
             # Phân tích cơ bản
             if fundamental_data:
                 fundamental_analysis = deep_fundamental_analysis(fundamental_data)
+                # Sanitize fundamental analysis text
+                fundamental_analysis = fundamental_analysis.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
                 report_parts.append(f"*PHÂN TÍCH CƠ BẢN*\n{fundamental_analysis}\n")
             
             # Tin tức
@@ -2181,7 +2232,9 @@ class AIAnalyzer:
                 if news_items:
                     news_section = "*TIN TỨC MỚI NHẤT*\n"
                     for item in news_items:
-                        news_section += f"• [{item['title']}]({item['link']})\n"
+                        # Sanitize news title
+                        title = item['title'].encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                        news_section += f"• [{title}]({item['link']})\n"
                     report_parts.append(f"{news_section}\n")
             except Exception as e:
                 logger.error(f"Lỗi lấy tin tức: {str(e)}")
@@ -2231,12 +2284,14 @@ class AIAnalyzer:
             except Exception as e:
                 logger.error(f"Lỗi tạo dự báo: {str(e)}")
             
+            # Kết hợp tất cả phần báo cáo và đảm bảo xử lý Unicode
+            final_report = '\n'.join(report_parts)
+            # Final sanitization of the entire report
+            final_report = final_report.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+            
             # Lưu báo cáo vào lịch sử
             if last_price is not None and prev_price is not None:
-                await self.save_report_history(symbol, '\n'.join(report_parts), last_price, prev_price)
-            
-            # Kết hợp tất cả phần báo cáo
-            final_report = '\n'.join(report_parts)
+                await self.save_report_history(symbol, final_report, last_price, prev_price)
             
             return final_report
         except Exception as e:

@@ -21,3 +21,11 @@ Traceback: (<class 'telegram.error.InvalidToken'>, InvalidToken('You must pass t
 2025-04-24 09:54:59,384 - __main__ - ERROR - Telegram token not set. Please set the TELEGRAM_TOKEN environment variable.
 2025-04-24 09:54:59,385 - __main__ - WARNING - Running in limited mode without Telegram bot integration.
 2025-04-24 09:54:59,385 - __main__ - INFO - Bot started successfully in limited mode (no Telegram integration)
+2025-04-24 10:08:03,355 - __main__ - INFO - Using default Redis URL: redis://localhost:6379/0
+2025-04-24 10:08:03,386 - __main__ - INFO - Using default SQLite database: sqlite+aiosqlite:///./stock_bot.db
+2025-04-24 10:08:03,474 - __main__ - INFO - Using default Redis URL: redis://localhost:6379/0
+2025-04-24 10:08:03,490 - __main__ - WARNING - Gemini API key not set. AI-powered features will not be available.
+2025-04-24 10:08:03,511 - __main__ - INFO - Database initialized successfully
+2025-04-24 10:08:03,512 - __main__ - ERROR - Telegram token not set. Please set the TELEGRAM_TOKEN environment variable.
+2025-04-24 10:08:03,512 - __main__ - WARNING - Running in limited mode without Telegram bot integration.
+2025-04-24 10:08:03,513 - __main__ - INFO - Bot started successfully in limited mode (no Telegram integration)
