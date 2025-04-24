@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import hashlib
 import json
 import inspect
-from asyncio import isawaitable
+from inspect import isawaitable
 
 import pandas as pd
 import numpy as np
