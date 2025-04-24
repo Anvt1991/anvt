@@ -2151,6 +2151,12 @@ class AIAnalyzer:
 
 # ---------- TELEGRAM COMMANDS ----------
 async def notify_admin_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if update is None (called from main function)
+    if update is None:
+        # Just log that we're starting the bot
+        logger.info("Bot started successfully")
+        return
+        
     user = update.message.from_user
     user_id = user.id
     if not await is_user_approved(user_id):
@@ -2349,7 +2355,7 @@ async def main():
         application.add_handler(CommandHandler("getid", get_id))
         application.add_handler(CommandHandler("approve", approve_user))
         
-        # Gửi thông báo tới quản trị viên
+        # Ghi log khởi động bot (passing None as update since this is initialization, not a user update)
         await notify_admin_new_user(None, application)
         
         # Chọn chế độ chạy
