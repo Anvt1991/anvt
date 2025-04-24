@@ -319,189 +319,29 @@ class RedisManager:
             return False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-import os
-import sys
-import io
-import logging
-import pickle
-import time
-import gc
-import warnings
-from functools import lru_cache, wraps
-from datetime import datetime, timedelta
-import asyncio
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-import hashlib
-import json
-
-import pandas as pd
-import numpy as np
-from dotenv import load_dotenv
-from telegram import Update, ParseMode
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-import yfinance as yf
-from vnstock import Vnstock
-import google.generativeai as genai
-
-from ta import trend, momentum, volatility
-from ta.volume import MFIIndicator
-import feedparser
-
-import redis.asyncio as redis
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary, Index, func
-from sqlalchemy.pool import QueuePool
-
-import xgboost as xgb
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.neighbors import LocalOutlierFactor
-from prophet import Prophet
-import matplotlib.pyplot as plt
-import holidays
-import html
-from aiohttp import web
-import unittest
-from sklearn.preprocessing import StandardScaler
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-# Suppress warnings
-warnings.filterwarnings('ignore')
-
-# ---------- CẤU HÌNH & LOGGING ----------
-load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")          # ví dụ: postgres://user:pass@hostname:port/dbname
-REDIS_URL = os.getenv("REDIS_URL")                # ví dụ: redis://:pass@hostname:port/0
-ADMIN_ID = os.getenv("ADMIN_ID", "1225226589")
-PORT = int(os.environ.get("PORT", 10000))
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
-RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME", "")
-
-# Thêm cache version để quản lý phiên bản cache
-CACHE_VERSION = "v1.0"
-
-# Tối ưu cấu hình logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("stock_bot.log", mode='a')
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Cache expiration settings
-CACHE_EXPIRE_SHORT = 1800         # 30 phút cho dữ liệu ngắn hạn
-CACHE_EXPIRE_MEDIUM = 3600        # 1 giờ cho dữ liệu trung hạn
-CACHE_EXPIRE_LONG = 86400         # 1 ngày cho dữ liệu dài hạn
-NEWS_CACHE_EXPIRE = 900           # 15 phút cho tin tức
-DEFAULT_CANDLES = 100
-DEFAULT_TIMEFRAME = '1D'
-
-# Tăng số lượng worker cho thread pool
-thread_executor = ThreadPoolExecutor(max_workers=10)
-# Thêm process pool cho các tác vụ nặng về CPU
-process_executor = ProcessPoolExecutor(max_workers=4)
-
-# Decorator để đo thời gian thực thi của hàm
-def measure_execution_time(func):
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = await func(*args, **kwargs)
-        end_time = time.time()
-        logger.debug(f"{func.__name__} executed in {end_time - start_time:.4f} seconds")
-        return result
-    return wrapper
-
-async def run_in_thread(func, *args, **kwargs):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(thread_executor, lambda: func(*args, **kwargs))
-
-async def run_in_process(func, *args, **kwargs):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(process_executor, lambda: func(*args, **kwargs))
-
-# Hàm tạo cache key với version
-def make_cache_key(prefix, params):
-    """Tạo cache key với version để quản lý phiên bản cache"""
-    if isinstance(params, dict):
-        # Sort keys để đảm bảo tính nhất quán
-        params_str = json.dumps(params, sort_keys=True)
-    else:
-        params_str = str(params)
-    
-    hash_key = hashlib.md5(params_str.encode()).hexdigest()
-    return f"{prefix}:{CACHE_VERSION}:{hash_key}"
-
-# ---------- KẾT NỐI REDIS (Async) ----------
-class RedisManager:
-    def __init__(self):
-        try:
-            self.redis_client = redis.from_url(
-                REDIS_URL,
-                encoding="utf-8",
-                decode_responses=False,
-                socket_timeout=5.0,
-                socket_connect_timeout=5.0,
-                retry_on_timeout=True,
-                health_check_interval=30
-            )
-            logger.info("Kết nối Redis thành công.")
-        except Exception as e:
-            logger.error(f"Lỗi kết nối Redis: {str(e)}")
-            raise
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def set(self, key, value, expire):
-        try:
-            serialized_value = pickle.dumps(value)
-            await self.redis_client.set(key, serialized_value, ex=expire)
-            return True
-        except Exception as e:
-            logger.error(f"Lỗi Redis set: {str(e)}")
-            return False
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def get(self, key):
-        try:
-            data = await self.redis_client.get(key)
-            if data:
-                return pickle.loads(data)
-            return None
-        except Exception as e:
-            logger.error(f"Lỗi Redis get: {str(e)}")
-            return None
-            
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def delete(self, key):
-        """Xóa một key khỏi cache"""
-        try:
-            await self.redis_client.delete(key)
-            return True
-        except Exception as e:
-            logger.error(f"Lỗi Redis delete: {str(e)}")
-            return False
-            
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def invalidate_by_pattern(self, pattern):
-        """Xóa tất cả các keys khớp với pattern"""
+        """Xóa tất cả các khóa khớp với mẫu"""
+        r = await self.get_connection()
+        if not r:
+            return False
+        
         try:
-            cursor = b'0'
-            while cursor:
-                cursor, keys = await self.redis_client.scan(cursor=cursor, match=pattern, count=100)
-                if keys:
-                    await self.redis_client.delete(*keys)
+            # Lấy tất cả khóa khớp với mẫu
+            keys = []
+            cur = b'0'
+            while cur:
+                cur, keys_part = await r.scan(cursor=cur, match=pattern, count=100)
+                keys.extend(keys_part)
+            
+            # Xóa các khóa
+            if keys:
+                await r.delete(*keys)
+                logger.info(f"Đã xóa {len(keys)} khóa cache cho mẫu {pattern}")
+            
+            await r.close()
             return True
         except Exception as e:
-            logger.error(f"Lỗi Redis invalidate pattern: {str(e)}")
+            logger.error(f"Lỗi Redis invalidate_by_pattern: {str(e)}")
             return False
 
 redis_manager = RedisManager()
@@ -1087,165 +927,65 @@ class DataLoader:
     
     @measure_execution_time
     async def load_data(self, symbol: str, timeframe: str = DEFAULT_TIMEFRAME, num_candles: int = DEFAULT_CANDLES) -> (pd.DataFrame, str):
-        """Tải dữ liệu chứng khoán với cache thông minh"""
-        # Standardize timeframe
-        timeframe = timeframe.upper()
-        
-        # Tạo cache key
-        cache_params = {
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'num_candles': num_candles
-        }
-        cache_key = make_cache_key('stock_data', cache_params)
-        
-        # Check cache
-        cached_data = await redis_manager.get(cache_key)
-        if cached_data is not None:
-            logger.info(f"Tải dữ liệu {symbol} ({timeframe}) từ cache")
-            df, outlier_report = cached_data
-            return df, outlier_report
-        
-        outlier_report = ""
         try:
-            # Load data from source
-            if is_index(symbol) or self.source == 'yahoo':
-                # Sử dụng Yahoo Finance cho chỉ số và khi source là yahoo
-                period_mapping = {
-                    '1D': '1d',
-                    '1W': '1wk',
-                    '1MO': '1mo'
-                }
-                period = period_mapping.get(timeframe, '1d')
-                interval_mapping = {
-                    '1D': '1d',
-                    '1W': '1wk', 
-                    '1MO': '1mo'
-                }
-                interval = interval_mapping.get(timeframe, '1d')
-                
-                # Điều chỉnh symbol cho Yahoo Finance
-                yahoo_symbol = symbol
-                if symbol.upper() == 'VNINDEX':
-                    yahoo_symbol = '^VNINDEX'
-                elif symbol.upper() == 'VN30':
-                    yahoo_symbol = '^VN30'
-                elif symbol.upper() == 'HNX':
-                    yahoo_symbol = '^HNX'
-                elif not symbol.startswith('^'):
-                    yahoo_symbol = f"{symbol}.VN"
-                
-                df = await self._download_yahoo_data(yahoo_symbol, num_candles, period, interval)
-            else:
-                # Sử dụng VNStock cho cổ phiếu Việt Nam
-                async def fetch_vnstock():
-                    if timeframe == '1D':
-                        return self.vnstock.stock_historical_data(
-                            symbol=symbol, 
-                            start_date=(datetime.now() - timedelta(days=num_candles*2)).strftime('%Y-%m-%d'),
-                            end_date=datetime.now().strftime('%Y-%m-%d')
-                        )
-                    else:
-                        raise ValueError(f"VNStock không hỗ trợ khung thời gian {timeframe}")
-                
-                df = await run_in_thread(fetch_vnstock)
-                
-                # Preprocessing for VNStock data
-                if not df.empty:
-                    df.columns = df.columns.str.lower()
-                    # Ensure correct column names
-                    column_mapping = {
-                        'time': 'date',
-                        'open': 'open',
-                        'high': 'high',
-                        'low': 'low',
-                        'close': 'close',
-                        'volume': 'volume'
-                    }
-                    df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
-                    
-                    # Ensure date column is datetime
-                    if 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                        df.set_index('date', inplace=True)
-                    
-                    # Take only the last num_candles
-                    df = df.iloc[-num_candles:]
+            # Try cache first
+            cache_key = make_cache_key(f"data:{symbol}:{timeframe}", {"num_candles": num_candles})
+            cached_data = await self.redis_manager.get(cache_key)
+            if cached_data:
+                logger.info(f"Cache hit for {symbol} {timeframe}")
+                return cached_data, "from_cache"
             
-            # Process the data
-            if not df.empty:
-                # Filter trading days
-                df = filter_trading_days(df)
-                
-                # Sort by date
-                df = df.sort_index()
-                
-                # Detect outliers
-                df, outlier_report = self.detect_outliers(df)
-                
-                # Handle NaN values
-                df = df.fillna(method='ffill').fillna(method='bfill')
-                
-                # Cache the result
-                cache_expiry = CACHE_EXPIRE_SHORT if timeframe == '1D' else CACHE_EXPIRE_MEDIUM
-                await redis_manager.set(cache_key, (df, outlier_report), cache_expiry)
-                
-                return df, outlier_report
+            # Load data based on source
+            if self.source == 'vnstock':
+                df = await self._download_vnstock_data(symbol, num_candles, timeframe)
             else:
-                return pd.DataFrame(), "Không có dữ liệu"
+                df = await self._download_yahoo_data(symbol, num_candles, timeframe)
+            
+            # Cache the data
+            await self.redis_manager.set(cache_key, df, CACHE_EXPIRE_MEDIUM)
+            return df, "from_source"
+            
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Network error loading data for {symbol}: {str(e)}")
+            return None, f"error: {str(e)}"
+        except ValueError as e:
+            logger.error(f"Invalid data format for {symbol}: {str(e)}")
+            return None, f"error: {str(e)}"
         except Exception as e:
-            logger.error(f"Lỗi tải dữ liệu {symbol} ({timeframe}): {str(e)}")
-            return pd.DataFrame(), f"Lỗi: {str(e)}"
-    
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
-    async def _download_yahoo_data(self, symbol: str, num_candles: int, period: str, interval: str) -> pd.DataFrame:
-        """Tải dữ liệu từ Yahoo Finance với xử lý lỗi tốt hơn"""
+            logger.error(f"Unexpected error loading data for {symbol}: {str(e)}")
+            return None, f"error: {str(e)}"
+
+    async def _download_vnstock_data(self, symbol: str, num_candles: int, timeframe: str) -> pd.DataFrame:
         try:
-            # Tính toán khoảng thời gian dựa trên số lượng nến và period
-            days_multiplier = {
-                '1d': 1,
-                '1wk': 7,
-                '1mo': 30
-            }
-            
-            # Thêm thời gian để đảm bảo có đủ dữ liệu sau khi lọc
-            buffer_multiplier = 1.5
-            days_to_fetch = int(num_candles * days_multiplier.get(period, 1) * buffer_multiplier)
-            
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days_to_fetch)
-            
-            # Format dates for yfinance
-            start_str = start_date.strftime('%Y-%m-%d')
-            end_str = end_date.strftime('%Y-%m-%d')
-            
-            # Fetch data from Yahoo Finance
-            def fetch_yf():
-                ticker = yf.Ticker(symbol)
-                df = ticker.history(start=start_str, end=end_str, interval=interval)
-                return df
-            
-            df = await run_in_thread(fetch_yf)
-            
-            if df.empty:
-                logger.warning(f"Yahoo Finance không trả về dữ liệu cho {symbol}")
-                return pd.DataFrame()
-            
-            # Clean and standardize columns
-            df.columns = df.columns.str.lower()
-            # Keep only OHLCV columns
-            required_cols = ['open', 'high', 'low', 'close', 'volume']
-            df = df[[col for col in required_cols if col in df.columns]]
-            
-            # Take only the last num_candles
-            df = df.tail(num_candles)
-            
+            vnstock = Vnstock()
+            df = await run_in_thread(vnstock.get_historical_data, symbol, timeframe, num_candles)
             return df
-            
-        except Exception as e:
-            logger.error(f"Lỗi tải dữ liệu Yahoo Finance cho {symbol}: {str(e)}")
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Network error downloading VNStock data for {symbol}: {str(e)}")
             raise
-    
+        except ValueError as e:
+            logger.error(f"Invalid VNStock data format for {symbol}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error downloading VNStock data for {symbol}: {str(e)}")
+            raise
+
+    async def _download_yahoo_data(self, symbol: str, num_candles: int, timeframe: str) -> pd.DataFrame:
+        try:
+            period = f"{num_candles}d"
+            interval = timeframe.lower()
+            df = await run_in_thread(yf.download, symbol, period=period, interval=interval)
+            return df
+        except (ConnectionError, TimeoutError) as e:
+            logger.error(f"Network error downloading Yahoo data for {symbol}: {str(e)}")
+            raise
+        except ValueError as e:
+            logger.error(f"Invalid Yahoo data format for {symbol}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error downloading Yahoo data for {symbol}: {str(e)}")
+            raise
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def fetch_fundamental_data_vnstock(self, symbol: str) -> dict:
         """Tải dữ liệu cơ bản từ VNStock"""
@@ -1534,61 +1274,32 @@ class TechnicalAnalyzer:
     
     @measure_execution_time
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Tính toán các chỉ báo kỹ thuật cho dataframe"""
-        if df.empty:
-            return df
-        
-        # Make a copy to avoid modifying the original dataframe
-        result_df = df.copy()
-        
-        # Calculate technical indicators
-        if 'close' in result_df.columns:
-            indicators = self._calculate_common_indicators(
-                result_df['close'].values, 
-                result_df['volume'].values if 'volume' in result_df.columns else None
-            )
-            
-            # Add indicators to dataframe
+        try:
+            # Calculate technical indicators
+            indicators = self._calculate_common_indicators(df['close'].values, df['volume'].values)
             for name, values in indicators.items():
-                result_df[name] = values
-            
-            # Calculate additional derived signals
-            result_df['golden_cross'] = (result_df['sma_50'] > result_df['sma_200']) & (result_df['sma_50'].shift(1) <= result_df['sma_200'].shift(1))
-            result_df['death_cross'] = (result_df['sma_50'] < result_df['sma_200']) & (result_df['sma_50'].shift(1) >= result_df['sma_200'].shift(1))
-            result_df['macd_cross_above'] = (result_df['macd_line'] > result_df['macd_signal']) & (result_df['macd_line'].shift(1) <= result_df['macd_signal'].shift(1))
-            result_df['macd_cross_below'] = (result_df['macd_line'] < result_df['macd_signal']) & (result_df['macd_line'].shift(1) >= result_df['macd_signal'].shift(1))
-            
-            # RSI overbought/oversold signals
-            result_df['rsi_overbought'] = result_df['rsi'] > 70
-            result_df['rsi_oversold'] = result_df['rsi'] < 30
-            
-            # Bollinger Band signals
-            result_df['bb_upper_breakout'] = result_df['close'] > result_df['bb_high']
-            result_df['bb_lower_breakout'] = result_df['close'] < result_df['bb_low']
-        
-        return result_df
+                df[name] = values
+            return df
+        except (ValueError, KeyError) as e:
+            logger.error(f"Error calculating indicators: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error calculating indicators: {str(e)}")
+            raise
     
     @measure_execution_time
-    def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
-        """Tính toán chỉ báo cho nhiều khung thời gian song song"""
-        results = {}
-        
-        async def calculate_for_df(timeframe, df):
-            if not df.empty:
-                return timeframe, self.calculate_indicators(df)
-            return timeframe, df
-        
-        # Sử dụng asyncio.gather để tính toán song song
-        async def process_all():
-            tasks = [calculate_for_df(timeframe, df) for timeframe, df in dfs.items()]
-            result_list = await asyncio.gather(*tasks)
-            return {timeframe: df for timeframe, df in result_list}
-        
-        # Chạy bất đồng bộ nhưng trong thread hiện tại
-        loop = asyncio.get_event_loop()
-        results = loop.run_until_complete(process_all())
-        
-        return results
+    async def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
+        try:
+            results = {}
+            for timeframe, df in dfs.items():
+                results[timeframe] = await run_in_thread(self.calculate_indicators, df)
+            return results
+        except (ValueError, KeyError) as e:
+            logger.error(f"Error calculating multi timeframe indicators: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error calculating multi timeframe indicators: {str(e)}")
+            raise
 
 # ---------- THU THẬP TIN TỨC (SỬA LỖI) ----------
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
@@ -2143,7 +1854,7 @@ async def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClass
                 df['ma10'] = df['close'].rolling(10).mean()
                 df['ma20'] = df['close'].rolling(20).mean()
                 df['rsi'] = 100 - (100 / (1 + (df['close'].diff(1).clip(lower=0).rolling(14).mean() / 
-                                              df['close'].diff(1).clip(upper=0).abs().rolling(14).mean())))
+                                          df['close'].diff(1).clip(upper=0).abs().rolling(14).mean())))
                 
                 # Thêm vào available_features
                 for col in ['ma5', 'ma10', 'ma20', 'rsi']:
@@ -2265,8 +1976,15 @@ async def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClass
         }
         
         return model_package, best_score
+        
+    except (ValueError, KeyError) as e:
+        logger.error(f"Lỗi xử lý dữ liệu cho XGBoost: {str(e)}")
+        return None, 0.0
+    except (ConnectionError, TimeoutError) as e:
+        logger.error(f"Lỗi kết nối khi train XGBoost: {str(e)}")
+        return None, 0.0
     except Exception as e:
-        logger.error(f"Lỗi train model XGBoost: {str(e)}", exc_info=True)
+        logger.error(f"Lỗi không xác định khi train XGBoost: {str(e)}", exc_info=True)
         return None, 0.0
 
 async def get_training_symbols() -> list:
