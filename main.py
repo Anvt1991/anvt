@@ -2639,6 +2639,9 @@ async def main():
         else:
             # Polling mode
             logger.info("Starting polling")
+            # Ensure the webhook is deleted before starting polling
+            logger.info("Deleting webhook before starting polling mode")
+            await application.bot.delete_webhook()
             await application.run_polling()
     except Exception as e:
         logger.error(f"Error in main function: {str(e)}")
