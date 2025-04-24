@@ -2478,7 +2478,7 @@ async def main():
             return
         
         # Mode bot: webhook hoặc polling
-        use_webhook = os.getenv('USE_WEBHOOK', 'False').lower() == 'true'
+        use_webhook = os.getenv('USE_WEBHOOK', 'True').lower() == 'true'
         mode = os.getenv('MODE', 'production').lower()
         port = int(os.getenv('PORT', 8443))
         
@@ -2548,101 +2548,96 @@ async def main():
         # Ghi log khởi động bot (passing None as update since this is initialization, not a user update)
         await notify_admin_new_user(None, application)
         
-        # Chọn chế độ chạy
-        if use_webhook:
-            # Webhook mode
-            webhook_url = os.getenv('WEBHOOK_URL', f'https://example.com:{port}/{TELEGRAM_TOKEN}')
-            webhook_listen = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
-            webhook_port = port
-            
-            logger.info(f"Starting webhook on {webhook_url}")
-            await application.bot.set_webhook(url=webhook_url)
-            
-            # Setup aiohttp webapp
-            app = web.Application()
-            
-            # Telegram webhook handler
-            async def telegram_webhook_handler(request):
-                if request.match_info.get('token') == TELEGRAM_TOKEN:
-                    try:
-                        request_body_json = await request.json()
-                        update = Update.de_json(request_body_json, application.bot)
-                        await application.process_update(update)
-                        return web.Response()
-                    except Exception as e:
-                        logger.error(f"Error in webhook handler: {str(e)}")
-                        return web.Response(status=500)
-                return web.Response(status=403)
-            
-            # Health check endpoint
-            async def health_check_handler(request):
-                # Kiểm tra Redis và DB để đảm bảo các thành phần hoạt động
-                try:
-                    # Kiểm tra Redis availability
-                    redis_health = False
-                    if redis_manager.redis_client is not None:
-                        redis_key = "health_check"
-                        await redis_manager.set(redis_key, True, 10)
-                        redis_value = await redis_manager.get(redis_key)
-                        redis_health = redis_value is True
-                    
-                    # Kiểm tra DB
-                    db_health = await db_manager.is_user_approved("admin")
-                    
-                    return web.json_response({
-                        "status": "healthy" if redis_health and db_health is not None else "degraded",
-                        "redis": "ok" if redis_health else "disabled" if redis_manager.redis_client is None else "error",
-                        "database": "ok" if db_health is not None else "error",
-                        "uptime": time.time() - START_TIME
-                    })
-                except Exception as e:
-                    logger.error(f"Health check error: {str(e)}")
-                    return web.json_response({
-                        "status": "error",
-                        "message": str(e)
-                    }, status=500)
-            
-            # Middleware để log các request
-            @web.middleware
-            async def logging_middleware(request, handler):
-                start_time = time.time()
-                try:
-                    response = await handler(request)
-                    end_time = time.time()
-                    logger.info(f"Request {request.method} {request.path} completed in {end_time - start_time:.3f}s with status {response.status}")
-                    return response
-                except Exception as e:
-                    end_time = time.time()
-                    logger.error(f"Request {request.method} {request.path} failed in {end_time - start_time:.3f}s: {str(e)}")
-                    raise
-            
-            # Áp dụng middleware
-            app.middlewares.append(logging_middleware)
-            
-            # Đăng ký các route
-            app.router.add_post(f'/{TELEGRAM_TOKEN}', telegram_webhook_handler)
-            app.router.add_get('/health', health_check_handler)
-            
-            # Bắt đầu server
-            runner = web.AppRunner(app)
-            await runner.setup()
-            site = web.TCPSite(runner, webhook_listen, webhook_port)
-            await site.start()
-            
-            # Giữ ứng dụng chạy
-            while True:
-                # Mỗi 3 giờ huấn luyện mô hình tự động nếu được bật
-                if os.getenv('AUTO_TRAIN', 'False').lower() == 'true':
-                    await auto_train_models()
-                    
-                await asyncio.sleep(3 * 60 * 60)  # 3 giờ
+        # Chọn chế độ chạy - luôn sử dụng webhook
+        # Webhook mode
+        if RENDER_EXTERNAL_URL:
+            webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
         else:
-            # Polling mode
-            logger.info("Starting polling")
-            # Ensure the webhook is deleted before starting polling
-            logger.info("Deleting webhook before starting polling mode")
-            await application.bot.delete_webhook()
-            await application.run_polling()
+            webhook_url = os.getenv('WEBHOOK_URL', f'https://example.com:{port}/{TELEGRAM_TOKEN}')
+        webhook_listen = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
+        webhook_port = port
+        
+        logger.info(f"Starting webhook on {webhook_url}")
+        await application.bot.set_webhook(url=webhook_url)
+        
+        # Setup aiohttp webapp
+        app = web.Application()
+        
+        # Telegram webhook handler
+        async def telegram_webhook_handler(request):
+            if request.match_info.get('token') == TELEGRAM_TOKEN:
+                try:
+                    request_body_json = await request.json()
+                    update = Update.de_json(request_body_json, application.bot)
+                    await application.process_update(update)
+                    return web.Response()
+                except Exception as e:
+                    logger.error(f"Error in webhook handler: {str(e)}")
+                    return web.Response(status=500)
+            return web.Response(status=403)
+        
+        # Health check endpoint
+        async def health_check_handler(request):
+            # Kiểm tra Redis và DB để đảm bảo các thành phần hoạt động
+            try:
+                # Kiểm tra Redis availability
+                redis_health = False
+                if redis_manager.redis_client is not None:
+                    redis_key = "health_check"
+                    await redis_manager.set(redis_key, True, 10)
+                    redis_value = await redis_manager.get(redis_key)
+                    redis_health = redis_value is True
+                
+                # Kiểm tra DB
+                db_health = await db_manager.is_user_approved("admin")
+                
+                return web.json_response({
+                    "status": "healthy" if redis_health and db_health is not None else "degraded",
+                    "redis": "ok" if redis_health else "disabled" if redis_manager.redis_client is None else "error",
+                    "database": "ok" if db_health is not None else "error",
+                    "uptime": time.time() - START_TIME
+                })
+            except Exception as e:
+                logger.error(f"Health check error: {str(e)}")
+                return web.json_response({
+                    "status": "error",
+                    "message": str(e)
+                }, status=500)
+        
+        # Middleware để log các request
+        @web.middleware
+        async def logging_middleware(request, handler):
+            start_time = time.time()
+            try:
+                response = await handler(request)
+                end_time = time.time()
+                logger.info(f"Request {request.method} {request.path} completed in {end_time - start_time:.3f}s with status {response.status}")
+                return response
+            except Exception as e:
+                end_time = time.time()
+                logger.error(f"Request {request.method} {request.path} failed in {end_time - start_time:.3f}s: {str(e)}")
+                raise
+        
+        # Áp dụng middleware
+        app.middlewares.append(logging_middleware)
+        
+        # Đăng ký các route
+        app.router.add_post(f'/{TELEGRAM_TOKEN}', telegram_webhook_handler)
+        app.router.add_get('/health', health_check_handler)
+        
+        # Bắt đầu server
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, webhook_listen, webhook_port)
+        await site.start()
+        
+        # Giữ ứng dụng chạy
+        while True:
+            # Mỗi 3 giờ huấn luyện mô hình tự động nếu được bật
+            if os.getenv('AUTO_TRAIN', 'False').lower() == 'true':
+                await auto_train_models()
+                
+            await asyncio.sleep(3 * 60 * 60)  # 3 giờ
     except Exception as e:
         logger.error(f"Error in main function: {str(e)}")
         raise
