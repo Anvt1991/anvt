@@ -2565,16 +2565,14 @@ async def main():
         
         # Telegram webhook handler
         async def telegram_webhook_handler(request):
-            if request.match_info.get('token') == TELEGRAM_TOKEN:
-                try:
-                    request_body_json = await request.json()
-                    update = Update.de_json(request_body_json, application.bot)
-                    await application.process_update(update)
-                    return web.Response()
-                except Exception as e:
-                    logger.error(f"Error in webhook handler: {str(e)}")
-                    return web.Response(status=500)
-            return web.Response(status=403)
+            try:
+                request_body_json = await request.json()
+                update = Update.de_json(request_body_json, application.bot)
+                await application.process_update(update)
+                return web.Response()
+            except Exception as e:
+                logger.error(f"Error in webhook handler: {str(e)}")
+                return web.Response(status=500)
         
         # Health check endpoint
         async def health_check_handler(request):
