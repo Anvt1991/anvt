@@ -1487,24 +1487,32 @@ class TechnicalAnalyzer:
         return result_df
     
     @measure_execution_time
-    def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
+    async def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
         """Tính toán chỉ báo cho nhiều khung thời gian song song"""
         results = {}
         
         async def calculate_for_df(timeframe, df):
-            if not df.empty:
+            # Đảm bảo không phải là coroutine
+            if isawaitable(df):
+                try:
+                    df = await df
+                except Exception as e:
+                    logger.error(f"Lỗi khi await DataFrame cho {timeframe}: {str(e)}")
+                    return timeframe, pd.DataFrame()
+            
+            # Kiểm tra DataFrame không rỗng
+            if df is not None and hasattr(df, 'empty') and not df.empty:
                 return timeframe, self.calculate_indicators(df)
-            return timeframe, df
+            return timeframe, pd.DataFrame()  # Trả về DataFrame rỗng trong trường hợp lỗi
         
-        # Sử dụng asyncio.gather để tính toán song song
-        async def process_all():
-            tasks = [calculate_for_df(timeframe, df) for timeframe, df in dfs.items()]
-            result_list = await asyncio.gather(*tasks)
-            return {timeframe: df for timeframe, df in result_list}
+        # Xử lý từng khung thời gian
+        tasks = []
+        for timeframe, df in dfs.items():
+            tasks.append(calculate_for_df(timeframe, df))
         
-        # Chạy bất đồng bộ nhưng trong thread hiện tại
-        loop = asyncio.get_event_loop()
-        results = loop.run_until_complete(process_all())
+        # Đợi tất cả các tác vụ hoàn thành
+        result_list = await asyncio.gather(*tasks)
+        results = {timeframe: df for timeframe, df in result_list}
         
         return results
 
@@ -2471,7 +2479,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         # Tính toán chỉ báo kỹ thuật
-        dfs_with_indicators = analyzer.calculate_multi_timeframe_indicators(dfs)
+        dfs_with_indicators = await analyzer.calculate_multi_timeframe_indicators(dfs)
         
         # Tạo báo cáo
         report = await ai_analyzer.generate_report(
@@ -2578,7 +2586,7 @@ async def main():
             # Kiểm thử sinh báo cáo AI
             logger.info("Đang kiểm thử sinh báo cáo AI...")
             dfs, fundamental_data, _ = await data_pipeline.get_fundamental_and_technical_data(symbol)
-            dfs_with_indicators = analyzer.calculate_multi_timeframe_indicators(dfs)
+            dfs_with_indicators = await analyzer.calculate_multi_timeframe_indicators(dfs)
             
             ai_analyzer = AIAnalyzer()
             report = await ai_analyzer.generate_report(
@@ -2674,6 +2682,14 @@ async def main():
                     "message": str(e)
                 }, status=500)
         
+        # Root path handler
+        async def root_handler(request):
+            return web.json_response({
+                "status": "ok",
+                "service": "Stock Bot API",
+                "version": "1.0.0"
+            })
+        
         # Middleware để log các request
         @web.middleware
         async def logging_middleware(request, handler):
@@ -2694,6 +2710,7 @@ async def main():
         # Đăng ký các route - use the webhook_path variable
         app.router.add_post(webhook_path, telegram_webhook_handler)
         app.router.add_get('/health', health_check_handler)
+        app.router.add_get('/', root_handler)
         
         # Bắt đầu server
         runner = web.AppRunner(app)
