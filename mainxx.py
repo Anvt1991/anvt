@@ -969,12 +969,16 @@ class DataLoader:
                     elif timeframe == '4h':
                         start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
                     elif timeframe == '1D':
-                        # Daily timeframe
-                        start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 3)).strftime('%Y-%m-%d')
+                        # Daily timeframe - Giới hạn số ngày để tránh lỗi
+                        days_to_fetch = min((num_candles + 50) * 3, 2000)  # Tối đa 2000 ngày (~5.5 năm)
+                        start_date = (datetime.now() - timedelta(days=days_to_fetch)).strftime('%Y-%m-%d')
                         df = stock.quote.history(start=start_date, end=end_date, interval=timeframe)
                     elif timeframe == '1W':
                         # Weekly timeframe - fetch more data and resample properly
-                        start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 7 * 3)).strftime('%Y-%m-%d')
+                        # Giới hạn số ngày để tránh lỗi
+                        max_weeks = min(num_candles + 20, 260)  # Tối đa 260 tuần (~5 năm)
+                        days_to_fetch = max_weeks * 7 * 2  # Thêm множитель để đảm bảo đủ dữ liệu
+                        start_date = (datetime.now() - timedelta(days=days_to_fetch)).strftime('%Y-%m-%d')
                         # Fetch daily data
                         df_daily = stock.quote.history(start=start_date, end=end_date, interval='1D')
                         if df_daily is None or df_daily.empty:
@@ -998,7 +1002,10 @@ class DataLoader:
                         df = df[df.index <= datetime.now()]
                     elif timeframe == '1M':
                         # Monthly timeframe - fetch more data and resample properly
-                        start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 31 * 3)).strftime('%Y-%m-%d')
+                        # Giới hạn số ngày để tránh lỗi
+                        max_months = min(num_candles + 12, 120)  # Tối đa 120 tháng (~10 năm)
+                        days_to_fetch = max_months * 31 * 1.5  # Thêm множитель để đảm bảo đủ dữ liệu
+                        start_date = (datetime.now() - timedelta(days=days_to_fetch)).strftime('%Y-%m-%d')
                         # Fetch daily data
                         df_daily = stock.quote.history(start=start_date, end=end_date, interval='1D')
                         if df_daily is None or df_daily.empty:
@@ -1022,7 +1029,8 @@ class DataLoader:
                         df = df[df.index <= datetime.now()]
                     else:
                         # Get enough data based on the number of candles needed
-                        start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 3)).strftime('%Y-%m-%d')
+                        days_to_fetch = min((num_candles + 50) * 3, 2000)  # Tối đa 2000 ngày
+                        start_date = (datetime.now() - timedelta(days=days_to_fetch)).strftime('%Y-%m-%d')
                         df = stock.quote.history(start=start_date, end=end_date, interval=timeframe)
                     
                     if df is None or df.empty or len(df) < 20:
@@ -2260,25 +2268,53 @@ async def notify_admin_new_user(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⏳ Chờ admin duyệt!")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message và hướng dẫn sử dụng bot"""
+    user = update.effective_user
     user_id = update.message.from_user.id
     logger.info(f"Start called: user_id={user_id}, ADMIN_ID={ADMIN_ID}")
-
-    if str(user_id) == ADMIN_ID and not await db.is_user_approved(user_id):
-        await db.add_approved_user(user_id)
+    
+    db_manager = DBManager()
+    
+    # Tự động phê duyệt admin
+    if str(user_id) == ADMIN_ID and not await db_manager.is_user_approved(user_id):
+        await db_manager.add_approved_user(user_id)
         logger.info(f"Admin {user_id} tự động duyệt.")
-
-    if not await is_user_approved(user_id):
+    
+    # Kiểm tra người dùng đã được phê duyệt
+    is_approved = await db_manager.is_user_approved(user_id)
+    
+    if not is_approved:
         await notify_admin_new_user(update, context)
         return
+    
+    welcome_message = f"""
+👋 Xin chào <b>{user.first_name}</b>!
 
-    await update.message.reply_text(
-        "🚀 **V18.9 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
-        "📊 **Lệnh**:\n"
-        "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
-        "- /getid - Lấy ID.\n"
-        "- /approve [user_id] - Duyệt người dùng (admin).\n"
-        "💡 **Bắt đầu nào!**"
-    )
+Tôi là bot phân tích chứng khoán với AI. Tôi có thể giúp bạn phân tích thị trường và cổ phiếu dựa trên dữ liệu kỹ thuật và phân tích cơ bản.
+
+<b>Các lệnh:</b>
+/analyze [mã] [số nến] [timeframe] - Phân tích mã chứng khoán hoặc chỉ số
+  • Ví dụ: <code>/analyze VNM</code> - Phân tích VNM
+  • Ví dụ: <code>/analyze VNINDEX 100</code> - Phân tích VNINDEX với 100 nến
+  • Ví dụ: <code>/analyze FPT 200 1D</code> - Phân tích FPT với 200 nến, khung thời gian ngày
+  • Ví dụ: <code>/analyze TCB 1W</code> - Phân tích TCB với khung thời gian tuần
+  • Timeframe: 1D (ngày), 1W (tuần), 1M (tháng)
+
+/id - Lấy ID của bạn
+"""
+
+    # Thêm lệnh admin nếu người dùng là admin
+    if str(user_id) == ADMIN_ID:
+        welcome_message += "\n<b>Lệnh Admin:</b>\n/approve [user_id] - Duyệt người dùng\n"
+
+    welcome_message += """
+<b>Chú thích:</b>
+• Các mô hình AI được huấn luyện hàng ngày
+• Dữ liệu thị trường được cập nhật liên tục
+• Bot phân tích đa khung thời gian và dữ liệu cơ bản
+"""
+
+    await update.message.reply_text(welcome_message, parse_mode='HTML')
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -2301,28 +2337,40 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         symbol = args[0].upper()
         
+        # Phân tích tham số
+        num_candles = DEFAULT_CANDLES
+        timeframe_arg = None
+        
+        # Phân tích tham số còn lại (số nến và/hoặc timeframe)
+        for i in range(1, len(args)):
+            arg = args[i].upper()
+            # Kiểm tra xem đây là timeframe hay số nến
+            if arg in ['1D', '1W', '1M']:
+                timeframe_arg = arg
+            else:
+                try:
+                    num_candles = int(arg)
+                except ValueError:
+                    await context.bot.edit_message_text(
+                        chat_id=update.effective_chat.id,
+                        message_id=waiting_msg.message_id,
+                        text=f"❌ Tham số không hợp lệ: {arg}. Sử dụng: /analyze <mã> [số nến] [1D/1W/1M]"
+                    )
+                    return
+        
         # Kiểm tra số lượng nến
-        try:
-            num_candles = int(args[1]) if len(args) > 1 else DEFAULT_CANDLES
-            if num_candles < 20:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=waiting_msg.message_id,
-                    text="❌ Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!"
-                )
-                return
-            if num_candles > 500:
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=waiting_msg.message_id,
-                    text="❌ Tối đa 500 nến!"
-                )
-                return
-        except ValueError:
+        if num_candles < 20:
             await context.bot.edit_message_text(
                 chat_id=update.effective_chat.id,
                 message_id=waiting_msg.message_id,
-                text="❌ Số lượng nến không hợp lệ. Vui lòng nhập số nguyên."
+                text="❌ Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!"
+            )
+            return
+        if num_candles > 500:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=waiting_msg.message_id,
+                text="❌ Tối đa 500 nến!"
             )
             return
         
@@ -2337,9 +2385,14 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=f"⏳ Đang chuẩn bị dữ liệu cho {symbol}..."
         )
         
+        # Xác định timeframes cần phân tích
+        timeframes = ['1D', '1W', '1M']  # Mặc định phân tích tất cả
+        if timeframe_arg:
+            timeframes = [timeframe_arg]  # Nếu người dùng chỉ định, chỉ phân tích timeframe đó
+            
         # Chuẩn bị dữ liệu với pipeline
         start_time = time_module.time()
-        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=['1D', '1W', '1M'], num_candles=num_candles)
+        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=timeframes, num_candles=num_candles)
         data_time = time_module.time() - start_time
         
         if pipeline_result['errors']:
@@ -2360,10 +2413,11 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Cập nhật tin nhắn chờ
+        timeframe_text = f"khung thời gian {', '.join(timeframes)}" if len(timeframes) > 0 else "tất cả khung thời gian"
         await context.bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=waiting_msg.message_id,
-            text=f"⏳ Đang phân tích {symbol} với AI..."
+            text=f"⏳ Đang phân tích {symbol} với {timeframe_text}..."
         )
         
         # Tạo báo cáo với AI
@@ -2377,9 +2431,12 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai_time = time_module.time() - start_time
         
         # Lưu báo cáo vào cache
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
+        cache_key = f"report_{symbol}_{num_candles}"
+        if timeframe_arg:
+            cache_key += f"_{timeframe_arg}"
+        await redis_manager.set(cache_key, report, expire=CACHE_EXPIRE_SHORT)
 
-        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
+        formatted_report = f"<b>📈 Báo cáo phân tích {symbol} ({', '.join(timeframes)})</b>\n\n"
         formatted_report += f"<pre>{html.escape(report)}</pre>"
         
         # Thông tin hiệu suất (chỉ hiển thị trong môi trường debug)
