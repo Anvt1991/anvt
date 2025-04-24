@@ -16,7 +16,8 @@ import json
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 import yfinance as yf
@@ -47,6 +48,8 @@ from sklearn.preprocessing import StandardScaler
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import aiohttp
+from aiohttp import ClientTimeout, RetryOptions
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -763,6 +766,136 @@ class DataValidator:
                     df_norm[f'{col}_zscore'] = 0
         
         return df_norm
+
+# ---------- HÀM HỖ TRỢ: LỌC NGÀY GIAO DỊCH -----------
+def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
+    """Lọc các ngày giao dịch, loại bỏ cuối tuần và ngày lễ Việt Nam"""
+    if df.empty:
+        return df
+        
+    # Tạo bản sao để tránh cảnh báo SettingWithCopyWarning
+    df = df.copy()
+    
+    # Chuyển index thành datetime nếu chưa
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+        else:
+            df.index = pd.to_datetime(df.index)
+    
+    # Lọc ra ngày trong tuần (1-5: Thứ Hai - Thứ Sáu)
+    df = df[df.index.dayofweek < 5]
+    
+    # Lọc bỏ các ngày nghỉ lễ Việt Nam
+    years = df.index.year.unique().tolist()
+    try:
+        vietnam_holidays = holidays.country_holidays('VN', years=years)
+    except (AttributeError, KeyError):
+        try:
+            vietnam_holidays = holidays.Vietnam(years=years)
+        except (AttributeError, KeyError):
+            # Fallback nếu không có gói holidays Vietnam
+            logger.warning("Không thể tạo lịch nghỉ lễ Việt Nam, bỏ qua lọc ngày lễ")
+            return df
+    
+    # Tạo mặt nạ để lọc các ngày không phải ngày lễ
+    holiday_mask = ~df.index.isin(vietnam_holidays)
+    df = df[holiday_mask]
+    
+    return df
+
+# ---------- TẢI DỮ LIỆU (NÂNG CẤP) ----------
+class DataLoader:
+    def __init__(self, source: str = 'vnstock'):
+        self.source = source
+        self.cache = RedisManager()
+        self.session = None
+        self._setup_session()
+        
+    def _setup_session(self):
+        """Setup aiohttp session with retry and timeout settings"""
+        timeout = aiohttp.ClientTimeout(total=30)
+        retry_options = RetryOptions(
+            attempts=3,
+            start_timeout=1.0,
+            factor=2.0,
+            max_timeout=10.0
+        )
+        self.session = aiohttp.ClientSession(
+            timeout=timeout,
+            retry_options=retry_options
+        )
+        
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def load_data(self, symbol: str, timeframe: str = DEFAULT_TIMEFRAME, num_candles: int = DEFAULT_CANDLES) -> (pd.DataFrame, str):
+        """Load data with caching and validation"""
+        cache_key = make_cache_key(f"data_{symbol}_{timeframe}", {"num_candles": num_candles})
+        
+        # Try cache first
+        cached_data = await self.cache.get(cache_key)
+        if cached_data:
+            df = pd.read_json(cached_data)
+            if self._validate_cached_data(df, num_candles):
+                return df, "cached"
+        
+        # Load fresh data
+        if self.source == 'vnstock':
+            df = await self._download_vnstock_data(symbol, num_candles, timeframe)
+        else:
+            df = await self._download_yahoo_data(symbol, num_candles, timeframe)
+            
+        # Validate and process data
+        df = self._process_data(df)
+        
+        # Cache the processed data
+        await self.cache.set(cache_key, df.to_json(), expire=3600)
+        
+        return df, "fresh"
+        
+    def _validate_cached_data(self, df: pd.DataFrame, num_candles: int) -> bool:
+        """Validate cached data"""
+        if len(df) < num_candles:
+            return False
+        if df.isnull().any().any():
+            return False
+        if not isinstance(df.index, pd.DatetimeIndex):
+            return False
+        return True
+        
+    def _process_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Process and clean data"""
+        df = df.copy()
+        
+        # Ensure datetime index
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+            
+        # Sort by date
+        df = df.sort_index()
+        
+        # Remove duplicates
+        df = df[~df.index.duplicated(keep='first')]
+        
+        # Fill missing values
+        df = df.fillna(method='ffill').fillna(method='bfill')
+        
+        # Remove outliers
+        df = self._remove_outliers(df)
+        
+        return df
+        
+    def _remove_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Remove outliers using IQR method"""
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                df[col] = df[col].clip(lower_bound, upper_bound)
+        return df
 
 # ---------- HÀM HỖ TRỢ: LỌC NGÀY GIAO DỊCH -----------
 def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
