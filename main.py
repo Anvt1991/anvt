@@ -75,6 +75,8 @@ warnings.filterwarnings('ignore')
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Use a fixed webhook secret token or generate one if needed
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "AnvietxoSecureWebhookToken2025")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")          # ví dụ: postgres://user:pass@hostname:port/dbname
 REDIS_URL = os.getenv("REDIS_URL")                # ví dụ: redis://:pass@hostname:port/0
@@ -2560,7 +2562,7 @@ async def main():
         webhook_port = port
         
         logger.info(f"Starting webhook on {webhook_url}")
-        await application.bot.set_webhook(url=webhook_url, secret_token=TELEGRAM_TOKEN)
+        await application.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET_TOKEN)
         
         # Setup aiohttp webapp
         app = web.Application()
@@ -2570,7 +2572,7 @@ async def main():
             try:
                 # Verify the Telegram secret token for security
                 secret_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-                if secret_header != TELEGRAM_TOKEN:
+                if secret_header != WEBHOOK_SECRET_TOKEN:
                     logger.warning(f"Unauthorized webhook request from {request.remote}")
                     return web.Response(status=403)
                     
