@@ -1991,52 +1991,19 @@ Hãy viết báo cáo chi tiết cho CHỈ SỐ {symbol} (LƯU Ý: ĐÂY LÀ CH�
 
 **Chất lượng dữ liệu:**
 {outlier_text}
-
-**Chỉ số kỹ thuật:**
-"""
-                # Chỉ phân tích các khung thời gian có sẵn
-                for tf, ind in indicators.items():
-                    if tf in dfs:  # Chỉ hiển thị indicators cho các timeframe có trong dfs
-                        prompt += f"\n--- {tf} ---\n"
-                        prompt += f"- Close: {ind.get('close', 0):.2f}\n"
-                        prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
-                        prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
-                        prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
-                        prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
-                        prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
-                        prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
-
-                prompt += f"\n**Tin tức thị trường:**\n{news_text}\n"
-                prompt += f"\n**Phân tích mức hỗ trợ/kháng cự của chỉ số:**\n"
-                prompt += f"- Mức hỗ trợ: {', '.join(map(str, support_levels))}\n"
-                prompt += f"- Mức kháng cự: {', '.join(map(str, resistance_levels))}\n"
-                prompt += f"- Mức hỗ trợ từ phân tích đồ thị: {calc_support_str}\n"  
-                prompt += f"- Mức kháng cự từ phân tích đồ thị: {calc_resistance_str}\n"
-                prompt += f"- Mẫu hình đồ thị: {', '.join([p.get('name', 'Unknown') for p in patterns])}\n"
-                prompt += f"\n{xgb_summary}\n"
-                prompt += f"{forecast_summary}\n"
-                prompt += """
-**Yêu cầu:**
-1. Đánh giá tổng quan thị trường. So sánh chỉ số phiên hiện tại và phiên trước đó.
-2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của CHỈ SỐ. Tập trung vào khung thời gian {primary_timeframe}.
-3. Đánh giá các mô hình, mẫu hình, sóng (nếu có) chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự cho CHỈ SỐ. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
-5. Đề xuất chiến lược cho nhà đầu tư: nên theo xu hướng thị trường hay đi ngược, mức độ thận trọng.
-6. Đánh giá rủi ro thị trường hiện tại.
-7. Đưa ra nhận định tổng thể về xu hướng thị trường.
-8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
-
-**Hướng dẫn bổ sung:**
-- QUAN TRỌNG: Đây là phân tích cho CHỈ SỐ, KHÔNG PHẢI CỔ PHIẾU. Không đưa ra khuyến nghị mua/bán chỉ số.
-- Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
-- Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
-"""
+```
             else:
                 # Phân tích cho cổ phiếu
-                fundamental_report = deep_fundamental_analysis(fundamental_data)
+                fundamental_report = f"📊 **Thông tin cơ bản:**\n"
+                for key, value in fundamental_data.items():
+                    if isinstance(value, (int, float)):
+                        fundamental_report += f"- {key}: {value:,.2f}\n"
+                    else:
+                        fundamental_report += f"- {key}: {value}\n"
                 
                 prompt = f"""
-Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho cổ phiếu {symbol}:
+Bạn là chuyên gia phân tích kỹ thuật, phân tích thị trường chứng khoán Việt Nam với 30 năm kinh nghiệm. 
+Hãy viết báo cáo chi tiết cho CỔ PHIẾU {symbol}:
 
 **Thông tin cơ bản:**
 - Ngày: {datetime.now().strftime('%d/%m/%Y')}
@@ -2044,7 +2011,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 - Giá hôm qua: {close_yesterday:.2f}
 - Giá hôm nay: {close_today:.2f} ({((close_today-close_yesterday)/close_yesterday*100):.2f}%)
 
-**Hành động giá:**
+**Diễn biến giá:**
 {price_action}
 
 **Lịch sử dự đoán:**
@@ -2052,44 +2019,36 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 
 **Chất lượng dữ liệu:**
 {outlier_text}
+```
 
-**Chỉ số kỹ thuật:**
-"""
-                # Chỉ phân tích các khung thời gian có sẵn
-                for tf, ind in indicators.items():
-                    if tf in dfs:  # Chỉ hiển thị indicators cho các timeframe có trong dfs
-                        prompt += f"\n--- {tf} ---\n"
-                        prompt += f"- Close: {ind.get('close', 0):.2f}\n"
-                        prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
-                        prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
-                        prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
-                        prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
-                        prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
-                        prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
-                prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
-                prompt += f"\n**Tin tức:**\n{news_text}\n"
-                prompt += f"\n**Phân tích mức hỗ trợ/kháng cự:**\n"
-                prompt += f"- Mức hỗ trợ: {', '.join(map(str, support_levels))}\n"
-                prompt += f"- Mức kháng cự: {', '.join(map(str, resistance_levels))}\n"
-                prompt += f"- Mức hỗ trợ từ phân tích đồ thị: {calc_support_str}\n"  
-                prompt += f"- Mức kháng cự từ phân tích đồ thị: {calc_resistance_str}\n"
-                prompt += f"- Mẫu hình nến: {', '.join([p.get('name', 'Unknown') for p in patterns])}\n"
-                prompt += f"\n{xgb_summary}\n"
-                prompt += f"{forecast_summary}\n"
-                prompt += """
-**Yêu cầu:**
-1. Đánh giá tổng quan. So sánh giá/chỉ số phiên hiện tại và phiên trước đó.
-2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn. Tập trung vào khung thời gian {primary_timeframe}.
-3. Đánh giá các mô hình, mẫu hình, sóng (nếu có), chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
-5. Đề xuất các chiến lược giao dịch phù hợp, với % tin cậy.
-6. Đánh giá rủi ro và tỷ lệ risk/reward.
-7. Đưa ra nhận định.
-8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
+            prompt += f"""
+**Dự báo giá:**
+{forecast_summary}
 
-**Hướng dẫn bổ sung:**
-- Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
-- Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
+**Dự đoán XGBoost:**
+{xgb_summary}
+
+**Mức hỗ trợ/kháng cự (OpenRouter):**
+- Hỗ trợ: {", ".join([f"{level:.2f}" for level in support_levels])}
+- Kháng cự: {", ".join([f"{level:.2f}" for level in resistance_levels])}
+
+**Mức hỗ trợ/kháng cự (Tự tính):**
+- Hỗ trợ: {calc_support_str}
+- Kháng cự: {calc_resistance_str}
+
+**Mẫu hình nến:**
+{", ".join([f"{p['name']} ({p['description']})" for p in patterns])}
+
+**Tin tức:**
+{news_text}
+
+**Thông tin cơ bản:**
+{fundamental_report}
+
+**Chỉ báo kỹ thuật:**
+{json.dumps(indicators.get(primary_timeframe, indicators.get('1D', {})), ensure_ascii=False, indent=2)}
+
+**Kết luận:**
 """
 
             response = await self.generate_content(prompt)
@@ -2097,441 +2056,26 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
             await self.save_report_history(symbol, report, close_today, close_yesterday)
             return report
         except Exception as e:
-            logger.error(f"Lỗi tạo báo cáo: {str(e)}")
-            return f"❌ Lỗi tạo báo cáo: {str(e)}"
-
-# ---------- TELEGRAM COMMANDS ----------
-async def notify_admin_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    user_id = user.id
-    if not await is_user_approved(user_id):
-        message = f"🔔 Người dùng mới:\nID: {user_id}\nUsername: {user.username}\nTên: {user.full_name}\nDuyệt: /approve {user_id}"
-        await context.bot.send_message(chat_id=ADMIN_ID, text=message)
-        await update.message.reply_text("⏳ Chờ admin duyệt!")
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    logger.info(f"Start called: user_id={user_id}, ADMIN_ID={ADMIN_ID}")
-
-    if str(user_id) == ADMIN_ID and not await db.is_user_approved(user_id):
-        await db.add_approved_user(user_id)
-        logger.info(f"Admin {user_id} tự động duyệt.")
-        
-    if not await is_user_approved(user_id):
-        await update.message.reply_text(
-            f"Xin chào! Bot đang chạy thử nghiệm.\n"
-            f"ID của bạn: {user_id}\n"
-            f"Vui lòng liên hệ admin để được cấp quyền sử dụng."
-        )
-        await notify_admin_new_user(update, context)
-        return
-
-    await update.message.reply_text(
-        "🚀 **V19.0 - HỖ TRỢ ĐA KHUNG THỜI GIAN**\n\n"
-        "✅ Bạn đã có quyền sử dụng bot. Các lệnh hiện tại:\n\n"
-        "/analyze <mã chứng khoán> [<khung thời gian>] [<số nến>]: Phân tích kỹ thuật\n"
-        "- Ví dụ: /analyze VNM (phân tích mặc định khung D)\n"
-        "- Ví dụ: /analyze VNM D (phân tích khung ngày D)\n"
-        "- Ví dụ: /analyze VNM W (phân tích khung tuần W)\n"
-        "- Ví dụ: /analyze VNM M (phân tích khung tháng M)\n"
-        "- Ví dụ: /analyze VNM 100 (phân tích với 100 nến)\n"
-        "- Ví dụ: /analyze VNM W 50 (phân tích khung tuần với 50 nến)\n\n"
-        "- /getid - Lấy ID.\n"
-        "- /approve [user_id] - Duyệt người dùng (admin).\n\n"
-        "🚀 Bot hỗ trợ phân tích đa khung thời gian D(daily), W(weekly), M(monthly)."
-    )
-
-async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not await is_user_approved(user_id):
-        await notify_admin_new_user(update, context)
-        return
-    try:
-        args = context.args
-        if not args:
-            raise ValueError("Nhập mã chứng khoán (e.g., VNINDEX, SSI).")
-        symbol = args[0].upper()
-        
-        # Mặc định: phân tích khung ngày (D)
-        timeframe = '1D'
-        
-        # Xử lý thông số về khung thời gian và số nến
-        num_candles = DEFAULT_CANDLES
-        timeframes = ['1D', '1W', '1M']
-        
-        # Phân tích tham số đầu vào
-        for i in range(1, len(args)):
-            arg = args[i].upper()
-            # Nếu là khung thời gian
-            if arg in ['D', 'W', 'M', '1D', '1W', '1M']:
-                if arg == 'D': 
-                    timeframe = '1D'
-                elif arg == 'W': 
-                    timeframe = '1W'
-                elif arg == 'M': 
-                    timeframe = '1M'
-                else:
-                    timeframe = arg
-            # Nếu là số nến
-            elif arg.isdigit():
-                num_candles = int(arg)
-                if num_candles < 20:
-                    raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
-                if num_candles > 500:
-                    raise ValueError("Tối đa 500 nến!")
-                
-        # Dựa vào timeframe được chọn, chỉ phân tích khung thời gian đó
-        if timeframe == '1D':
-            timeframes = ['1D', '1W', '1M']  # Mặc định phân tích tất cả các khung
-        else:
-            timeframes = [timeframe]  # Chỉ phân tích khung thời gian được chọn
-        
-        # Sử dụng pipeline chuẩn hóa
-        data_pipeline = DataPipeline()
-        ai_analyzer = AIAnalyzer()
-        
-        # Chuẩn bị dữ liệu với pipeline
-        await update.message.reply_text(f"⏳ Đang chuẩn bị dữ liệu cho {symbol} (khung {timeframe})...")
-        pipeline_result = await data_pipeline.prepare_symbol_data(symbol, timeframes=timeframes, num_candles=num_candles)
-        
-        if pipeline_result['errors']:
-            error_message = f"⚠️ Một số lỗi xảy ra trong quá trình chuẩn bị dữ liệu:\n"
-            error_message += "\n".join(pipeline_result['errors'])
-            await update.message.reply_text(error_message)
-        
-        if not pipeline_result['dataframes']:
-            raise ValueError(f"Không thể tải dữ liệu cho {symbol}")
-        
-        # Tạo báo cáo với AI
-        await update.message.reply_text(f"⏳ Đang phân tích {symbol} (khung {timeframe}) với AI...")
-        report = await ai_analyzer.generate_report(
-            pipeline_result['dataframes'], 
-            symbol, 
-            pipeline_result['fundamental_data'], 
-            pipeline_result['outlier_reports'],
-            primary_timeframe=timeframe
-        )
-        await redis_manager.set(f"report_{symbol}_{timeframe}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
-
-        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol} (khung {timeframe})</b>\n\n"
-        formatted_report += f"<pre>{html.escape(report)}</pre>"
-        await update.message.reply_text(formatted_report, parse_mode='HTML')
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
-    except Exception as e:
-        logger.error(f"Lỗi trong analyze_command: {str(e)}")
-        await update.message.reply_text(f"❌ Lỗi không xác định: {str(e)}")
-
-async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    await update.message.reply_text(f"ID của bạn: {user_id}")
-
-async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if str(update.message.from_user.id) != ADMIN_ID:
-        await update.message.reply_text("❌ Chỉ admin dùng được lệnh này!")
-        return
-    if len(context.args) != 1:
-        await update.message.reply_text("❌ Nhập user_id: /approve 123456789")
-        return
-    user_id = context.args[0]
-    if not await db.is_user_approved(user_id):
-        await db.add_approved_user(user_id)
-        await update.message.reply_text(f"✅ Đã duyệt {user_id}")
-    else:
-        await update.message.reply_text(f"ℹ️ {user_id} đã được duyệt")
+            logger.error(f"Lỗi trong generate_report: {str(e)}")
+            return f"❌ Lỗi: {str(e)}"
 
 # ---------- MAIN & DEPLOY ----------
 async def main():
-    """Hàm chính của bot"""
-    
-    logger.info("Khởi động bot...")
-    
-    # Khởi tạo database
-    await init_db()
-    
-    # Kiểm tra và khởi tạo phiên bản schema
-    current_version = await model_db_manager.get_current_schema_version()
-    if not current_version:
-        logger.info("Khởi tạo phiên bản schema mới")
-        await model_db_manager.save_schema_version(
-            "2.0", 
-            description="Schema mới với hỗ trợ đa timeframe và lưu tham số mô hình"
-        )
-    else:
-        logger.info(f"Phiên bản schema hiện tại: {current_version}")
-
-    # Bật auto training mô hình
-    auto_train_task = None
-
-    # Khởi tạo Redis Manager
-    global redis_manager
-    redis_manager = RedisManager()
-
-    # Khởi tạo DB Manager
-    global db
-    db = DBManager()
-
-    # Khởi tạo scheduler
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
-    scheduler.start()
-    logger.info("Auto training scheduler đã khởi động.")
-
     # Khởi tạo bot application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyze", analyze_command))
+    app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("getid", get_id))
     app.add_handler(CommandHandler("approve", approve_user))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
     logger.info("🤖 Bot khởi động!")
 
-    # Thiết lập webhook cho môi trường Render
-    BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
-    WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-    
-    # Khởi động bot với webhook trong try-except để xử lý lỗi
-    try:
-        # Thiết lập webhook
-        await app.bot.set_webhook(url=WEBHOOK_URL)
-        
-        # Khởi động ứng dụng
-        await app.initialize()
-        await app.start()
-        
-        # Thiết lập web server để xử lý webhook
-        webapp = web.Application()
-        
-        # Webhook handler
-        async def webhook_handler(request):
-            # Loại bỏ kiểm tra request.match_info.get('token') không chính xác
-            try:
-                request_body_bytes = await request.read()
-                await app.update_queue.put(
-                    Update.de_json(json.loads(request_body_bytes), app.bot)
-                )
-                return web.Response()
-            except json.JSONDecodeError:
-                logger.error("Lỗi decode JSON từ request webhook")
-                return web.Response(status=400) # Bad Request
-            except Exception as e:
-                logger.error(f"Lỗi xử lý webhook: {str(e)}")
-                return web.Response(status=500) # Internal Server Error
-        
-        # Đăng ký route
-        webapp.router.add_post(f'/{TELEGRAM_TOKEN}', webhook_handler)
-        
-        # Khởi động web server
-        runner = web.AppRunner(webapp)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', PORT)
-        
-        # Khởi động site
-        await site.start()
-        
-        logger.info(f"Webhook đã thiết lập tại {WEBHOOK_URL}")
-        logger.info(f"Bot đang lắng nghe trên 0.0.0.0:{PORT}")
-        
-        # Giữ ứng dụng chạy
-        shutdown_event = asyncio.Event()
-        await shutdown_event.wait()
-        
-    except Exception as e:
-        logger.error(f"Lỗi khi thiết lập webhook: {str(e)}")
-        # Quay lại chế độ polling nếu webhook thất bại
-        logger.info("Chuyển sang chế độ polling...")
-        await app.run_polling()
+    # Khởi động bot
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await app.updater.idle()
 
-if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        import unittest
-
-        class TestTechnicalAnalysis(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=50, freq='D')
-                data = {
-                    'open': np.random.random(50) * 100,
-                    'high': np.random.random(50) * 100,
-                    'low': np.random.random(50) * 100,
-                    'close': np.linspace(100, 150, 50),
-                    'volume': np.random.randint(1000, 5000, 50)
-                }
-                self.df = pd.DataFrame(data, index=dates)
-
-            def test_calculate_indicators(self):
-                analyzer = TechnicalAnalyzer()
-                df_processed = analyzer.calculate_indicators(self.df)
-                self.assertIn('sma20', df_processed.columns)
-                self.assertIn('rsi', df_processed.columns)
-
-        class TestForecastProphet(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=100, freq='D')
-                self.df = pd.DataFrame({
-                    'close': np.linspace(100, 200, 100),
-                    'open': np.linspace(100, 200, 100),
-                    'high': np.linspace(100, 200, 100),
-                    'low': np.linspace(100, 200, 100),
-                    'volume': np.random.randint(1000, 5000, 100)
-                }, index=dates)
-
-            def test_forecast_with_prophet(self):
-                forecast, model = forecast_with_prophet(self.df, periods=7)
-                self.assertFalse(forecast.empty)
-                self.assertIn('yhat', forecast.columns)
-
-        class TestOutlierDetection(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=7, freq='D')
-                self.df = pd.DataFrame({
-                    'close': [100, 101, 102, 103, 500, 104, 105]
-                }, index=dates)
-
-            def test_detect_outliers(self):
-                loader = DataLoader()
-                df_with_outliers, report = DataNormalizer.detect_outliers(self.df)
-                self.assertIn('is_outlier', df_with_outliers.columns)
-                self.assertEqual(df_with_outliers['is_outlier'].sum(), 1)
-                self.assertIn('500', report)
-                
-        class TestDataNormalizer(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=10, freq='D')
-                data = {
-                    'open': [100, 101, 102, np.nan, 104, 105, 106, 107, 108, 109],
-                    'high': [110, 111, 112, np.nan, 114, 115, 116, 117, 118, 119],
-                    'low': [90, 91, 92, np.nan, 94, 95, 96, 97, 98, 99],
-                    'close': [105, 106, 107, np.nan, 109, 110, 111, 112, 113, 114],
-                    'volume': [1000, 1100, 1200, np.nan, 1400, 1500, 1600, 1700, 1800, 1900]
-                }
-                self.df = pd.DataFrame(data, index=dates)
-                
-            def test_fill_missing_values(self):
-                df_filled = DataNormalizer.fill_missing_values(self.df)
-                self.assertFalse(df_filled.isna().any().any())
-                # Kiểm tra giá trị được điền đúng
-                self.assertEqual(df_filled['close'][3], 107)  # Giá trị close trước đó
-                
-            def test_normalize_dataframe(self):
-                # Tạo DataFrame với tên cột khác
-                df_diff_cols = self.df.copy()
-                df_diff_cols.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-                
-                df_normalized = DataNormalizer.normalize_dataframe(df_diff_cols)
-                self.assertListEqual(list(df_normalized.columns), ['open', 'high', 'low', 'close', 'volume'])
-
-        class TestDataValidator(unittest.TestCase):
-            def setUp(self):
-                # Tạo dữ liệu test
-                self.df = pd.DataFrame({
-                    'open': [100, 105, 110, None, 107],
-                    'high': [110, 115, 120, 118, 112],
-                    'low': [98, 103, 108, 105, 102],
-                    'close': [105, 112, 116, 107, 105],
-                    'volume': [10000, 12000, 15000, 9000, 11000]
-                }, index=pd.date_range('2023-01-01', periods=5, freq='D'))
-                
-            def test_validate_ticker(self):
-                # Test mã hợp lệ
-                is_valid, _ = DataValidator.validate_ticker('FPT')
-                self.assertTrue(is_valid)
-                
-                # Test mã index hợp lệ
-                is_valid, _ = DataValidator.validate_ticker('VNINDEX')
-                self.assertTrue(is_valid)
-                
-                # Test mã không hợp lệ
-                is_valid, _ = DataValidator.validate_ticker('ABCDE')
-                self.assertFalse(is_valid)
-                
-                # Test mã rỗng
-                is_valid, _ = DataValidator.validate_ticker('')
-                self.assertFalse(is_valid)
-                
-            def test_validate_timeframe(self):
-                # Test các timeframe hợp lệ
-                for tf in ['1D', '1W', '1M', '5m', '15m', '30m', '1h', '4h']:
-                    is_valid, _ = DataValidator.validate_timeframe(tf)
-                    self.assertTrue(is_valid)
-                    
-                # Test các alias timeframe
-                for tf in ['d', 'daily', 'w', 'weekly', 'h', 'hourly']:
-                    is_valid, _ = DataValidator.validate_timeframe(tf)
-                    self.assertTrue(is_valid)
-                
-                # Test timeframe không hợp lệ
-                is_valid, _ = DataValidator.validate_timeframe('10m')
-                self.assertFalse(is_valid)
-                
-            def test_align_timestamp(self):
-                # Tạo dữ liệu intraday không căn chỉnh
-                intraday_df = pd.DataFrame({
-                    'open': [100, 105, 110, 107, 108],
-                    'high': [110, 115, 120, 112, 115],
-                    'low': [98, 103, 108, 102, 105],
-                    'close': [105, 112, 116, 105, 110],
-                    'volume': [10000, 12000, 15000, 11000, 13000]
-                }, index=pd.to_datetime([
-                    '2023-01-01 09:02:30',
-                    '2023-01-01 09:17:45',
-                    '2023-01-01 09:32:15',
-                    '2023-01-01 09:45:00',
-                    '2023-01-01 10:01:20'
-                ]))
-                
-                # Test căn chỉnh 15m
-                aligned_df = DataValidator.align_timestamp(intraday_df, '15m')
-                # Kiểm tra timestamps đã căn chỉnh đúng
-                for idx in aligned_df.index:
-                    self.assertEqual(idx.minute % 15, 0)
-                    
-                # Test căn chỉnh 1h
-                aligned_df = DataValidator.align_timestamp(intraday_df, '1h')
-                # Kiểm tra timestamps đã căn chỉnh đúng
-                for idx in aligned_df.index:
-                    self.assertEqual(idx.minute, 0)
-                
-            def test_handle_outliers(self):
-                # Tạo dữ liệu có outlier
-                df_outliers = pd.DataFrame({
-                    'open': [100, 105, 110, 200, 107],  # 200 là outlier
-                    'high': [110, 115, 120, 300, 112],  # 300 là outlier
-                    'low': [98, 103, 108, 105, 102],
-                    'close': [105, 112, 116, 250, 105]  # 250 là outlier
-                }, index=pd.date_range('2023-01-01', periods=5, freq='D'))
-                
-                # Test đánh dấu outlier
-                df_marked, report = DataValidator.handle_outliers(df_outliers, method='iqr', action='mark')
-                self.assertTrue('is_outlier' in df_marked.columns)
-                self.assertTrue(df_marked.iloc[3]['is_outlier'])  # 4th row has outliers
-                
-                # Test winsorize outlier
-                df_fixed, _ = DataValidator.handle_outliers(df_outliers, method='iqr', action='winsorize')
-                # Kiểm tra giá trị đã được thay thế
-                self.assertLess(df_fixed.iloc[3]['open'], 200)  # Should be capped
-                
-            def test_fill_missing_by_timeframe(self):
-                # Tạo dữ liệu intraday có missing values
-                intraday_df = pd.DataFrame({
-                    'open': [100, None, 110, None, 108],
-                    'high': [110, 115, None, 112, 115],
-                    'low': [98, 103, 108, None, 105],
-                    'close': [105, 112, 116, 105, None],
-                    'volume': [10000, None, 15000, 11000, 13000]
-                }, index=pd.to_datetime([
-                    '2023-01-01 09:00:00',
-                    '2023-01-01 09:15:00',
-                    '2023-01-01 09:30:00',
-                    '2023-01-01 09:45:00',
-                    '2023-01-01 10:00:00'
-                ]))
-                
-                # Test fill missing theo 15m
-                filled_df = DataValidator.fill_missing_by_timeframe(intraday_df, '15m')
-                self.assertFalse(filled_df.isna().any().any())  # No NaN values
-        
-        unittest.main(argv=[sys.argv[0]])
-    else:
-        import nest_asyncio
-        nest_asyncio.apply()
-        asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
