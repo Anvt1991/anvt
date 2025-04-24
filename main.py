@@ -30,11 +30,11 @@ import warnings
 from functools import lru_cache, wraps
 from datetime import datetime, timedelta
 import asyncio
+from inspect import isawaitable
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import hashlib
 import json
 import inspect
-from inspect import isawaitable
 
 import pandas as pd
 import numpy as np
@@ -1067,51 +1067,105 @@ class DataLoader:
             result = {}
             try:
                 if not is_index(symbol):
-                    # Import các hàm trực tiếp từ vnstock
-                    from vnstock import company_overview, financial_ratio, income_statement, balance_sheet, cash_flow
-                    
-                    # Company overview
                     try:
-                        overview = company_overview(symbol=symbol)
-                        # Sanitize data to ensure it's JSON-serializable and handle encoding issues
-                        overview_sanitized = {}
-                        for key, value in overview.items():
-                            if isinstance(value, str):
-                                # Handle any potential encoding issues with Vietnamese text
-                                overview_sanitized[key] = value.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-                            else:
-                                overview_sanitized[key] = value
-                        result['overview'] = overview_sanitized
-                    except Exception as e:
-                        logger.error(f"Lỗi lấy company_overview cho {symbol}: {str(e)}")
-                        result['overview'] = {'symbol': symbol, 'error': 'Failed to retrieve company overview'}
-                    
-                    # Financial ratios
-                    try:
-                        ratios = financial_ratio(symbol=symbol, report_type='yearly', report_range=3)
-                        result['ratios'] = ratios
-                    except Exception as e:
-                        logger.error(f"Lỗi lấy financial_ratio cho {symbol}: {str(e)}")
-                        result['ratios'] = None
-                    
-                    # Financial reports
-                    try:
-                        result['income_statement'] = income_statement(symbol=symbol, report_type='yearly', report_range=3)
-                    except Exception as e:
-                        logger.error(f"Lỗi lấy income_statement cho {symbol}: {str(e)}")
-                        result['income_statement'] = None
+                        # Thử import theo cách mới của vnstock 3.2.4+
+                        from vnstock import stock_company_profile, stock_financial_ratio, financial_report
                         
-                    try:
-                        result['balance_sheet'] = balance_sheet(symbol=symbol, report_type='yearly', report_range=3)
-                    except Exception as e:
-                        logger.error(f"Lỗi lấy balance_sheet cho {symbol}: {str(e)}")
-                        result['balance_sheet'] = None
+                        # Company overview - sử dụng stock_company_profile thay cho company_overview
+                        try:
+                            overview = stock_company_profile(symbol=symbol)
+                            # Sanitize data to ensure it's JSON-serializable and handle encoding issues
+                            overview_sanitized = {}
+                            for key, value in overview.items():
+                                if isinstance(value, str):
+                                    # Handle any potential encoding issues with Vietnamese text
+                                    overview_sanitized[key] = value.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                                else:
+                                    overview_sanitized[key] = value
+                            result['overview'] = overview_sanitized
+                        except Exception as e:
+                            logger.error(f"Lỗi lấy stock_company_profile cho {symbol}: {str(e)}")
+                            result['overview'] = {'symbol': symbol, 'error': 'Failed to retrieve company overview'}
                         
-                    try:
-                        result['cash_flow'] = cash_flow(symbol=symbol, report_type='yearly', report_range=3)
-                    except Exception as e:
-                        logger.error(f"Lỗi lấy cash_flow cho {symbol}: {str(e)}")
-                        result['cash_flow'] = None
+                        # Financial ratios
+                        try:
+                            ratios = stock_financial_ratio(symbol=symbol, report_type='yearly', report_range=3)
+                            result['ratios'] = ratios
+                        except Exception as e:
+                            logger.error(f"Lỗi lấy stock_financial_ratio cho {symbol}: {str(e)}")
+                            result['ratios'] = pd.DataFrame()  # Empty DataFrame thay vì None
+                        
+                        # Financial reports
+                        try:
+                            income = financial_report(symbol=symbol, report_type='IncomeStatement', report_range=3)
+                            result['income_statement'] = income
+                        except Exception as e:
+                            logger.error(f"Lỗi lấy financial_report (income) cho {symbol}: {str(e)}")
+                            result['income_statement'] = pd.DataFrame()
+                            
+                        try:
+                            balance = financial_report(symbol=symbol, report_type='BalanceSheet', report_range=3)
+                            result['balance_sheet'] = balance
+                        except Exception as e:
+                            logger.error(f"Lỗi lấy financial_report (balance) cho {symbol}: {str(e)}")
+                            result['balance_sheet'] = pd.DataFrame()
+                            
+                        try:
+                            cash = financial_report(symbol=symbol, report_type='CashFlow', report_range=3)
+                            result['cash_flow'] = cash
+                        except Exception as e:
+                            logger.error(f"Lỗi lấy financial_report (cash) cho {symbol}: {str(e)}")
+                            result['cash_flow'] = pd.DataFrame()
+                    except ImportError as ie:
+                        logger.error(f"Lỗi import vnstock API mới: {str(ie)}, thử API cũ")
+                        # Fallback to old API (for backward compatibility)
+                        try:
+                            from vnstock import company_overview, financial_ratio, income_statement, balance_sheet, cash_flow
+                            
+                            # Original code with old API...
+                            # Company overview
+                            try:
+                                overview = company_overview(symbol=symbol)
+                                # Sanitize data
+                                overview_sanitized = {}
+                                for key, value in overview.items():
+                                    if isinstance(value, str):
+                                        overview_sanitized[key] = value.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                                    else:
+                                        overview_sanitized[key] = value
+                                result['overview'] = overview_sanitized
+                            except Exception as e:
+                                logger.error(f"Lỗi lấy company_overview cho {symbol}: {str(e)}")
+                                result['overview'] = {'symbol': symbol, 'error': 'Failed to retrieve company overview'}
+                            
+                            # Financial ratios
+                            try:
+                                ratios = financial_ratio(symbol=symbol, report_type='yearly', report_range=3)
+                                result['ratios'] = ratios
+                            except Exception as e:
+                                logger.error(f"Lỗi lấy financial_ratio cho {symbol}: {str(e)}")
+                                result['ratios'] = pd.DataFrame()
+                            
+                            # Financial reports
+                            try:
+                                result['income_statement'] = income_statement(symbol=symbol, report_type='yearly', report_range=3)
+                            except Exception as e:
+                                logger.error(f"Lỗi lấy income_statement cho {symbol}: {str(e)}")
+                                result['income_statement'] = pd.DataFrame()
+                                
+                            try:
+                                result['balance_sheet'] = balance_sheet(symbol=symbol, report_type='yearly', report_range=3)
+                            except Exception as e:
+                                logger.error(f"Lỗi lấy balance_sheet cho {symbol}: {str(e)}")
+                                result['balance_sheet'] = pd.DataFrame()
+                                
+                            try:
+                                result['cash_flow'] = cash_flow(symbol=symbol, report_type='yearly', report_range=3)
+                            except Exception as e:
+                                logger.error(f"Lỗi lấy cash_flow cho {symbol}: {str(e)}")
+                                result['cash_flow'] = pd.DataFrame()
+                        except Exception as e:
+                            logger.error(f"Cả API cũ và mới đều không hoạt động: {str(e)}")
                 else:
                     # For indices
                     result['overview'] = {'symbol': symbol, 'type': 'index'}
@@ -1292,9 +1346,15 @@ class DataPipeline:
             else:
                 num_candles = DEFAULT_CANDLES
             
-            df, report = await self.process_data(symbol, tf, num_candles)
-            results[tf] = df
-            reports[tf] = report
+            try:
+                df, report = await self.process_data(symbol, tf, num_candles)
+                results[tf] = df
+                reports[tf] = report
+            except Exception as e:
+                logger.error(f"Lỗi tải dữ liệu {symbol} ({tf}): {str(e)}")
+                # Tạo DataFrame trống trong trường hợp lỗi
+                results[tf] = pd.DataFrame()
+                reports[tf] = {"status": "error", "message": str(e)}
         
         return results, reports
     
