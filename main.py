@@ -1,25 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-"""
-Bot Chứng Khoán Toàn Diện Phiên Bản V18.7 (Tối ưu hóa):
-- Tải dữ liệu chứng khoán qua VNStock/Yahoo Finance với cache Redis (async) + caching thông minh.
-- Hợp nhất, chuẩn hóa dữ liệu, bổ sung khung thời gian (1w, 1mo), phát hiện bất thường.
-- Phân tích kỹ thuật đa khung thời gian (SMA, RSI, MACD, ...) với tối ưu tính toán.
-- Thu thập tin tức từ nhiều nguồn RSS (async + parallel fetching).
-- Phân tích cơ bản nâng cao, phân biệt cổ phiếu/chỉ số.
-- Dự báo giá (Prophet) và tín hiệu giao dịch (XGBoost) với cải tiến hiệu suất model.
-- Báo cáo phân tích bằng Gemini AI, lưu lịch sử vào PostgreSQL (async + connection pooling).
-- Tích hợp Telegram với các lệnh: /start, /analyze, /getid, /approve.
-- Auto training mô hình theo lịch định kỳ (mỗi ngày 2h sáng) + incremental training.
-- Tối ưu deploy trên Render với webhook, xử lý async hoàn toàn.
-- Nâng cấp: Tối ưu hiệu suất, cache thông minh, kiểm soát dữ liệu, cải thiện mô hình ML, báo cáo đẹp hơn.
-- Cải tiến: Tách bạch raw data ↔ cleaned data ↔ indicator data, pipeline xử lý dữ liệu, cache versioning, timezone consistency, unit tests mở rộng.
-- Tối ưu: Kết nối bất đồng bộ cho DB và Redis với connection pooling, retry thông minh, quản lý bộ nhớ.
-- Hiệu suất: Cải thiện xử lý dữ liệu lớn, giảm độ trễ, mô hình ML nhẹ hơn & nhanh hơn.
-- Nâng cấp mới: Validate & normalizing data, phát hiện outlier nâng cao, lọc ngày lễ Việt Nam, tách pipeline xử lý dữ liệu.
-"""
-
 import os
 import sys
 import io
@@ -65,6 +43,328 @@ import holidays
 import html
 from aiohttp import web
 import unittest
+from sklearn.preprocessing import StandardScaler
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# ---------- CẤU HÌNH & LOGGING ----------
+load_dotenv()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")          # ví dụ: postgres://user:pass@hostname:port/dbname
+REDIS_URL = os.getenv("REDIS_URL")                # ví dụ: redis://:pass@hostname:port/0
+ADMIN_ID = os.getenv("ADMIN_ID", "1225226589")
+PORT = int(os.environ.get("PORT", 10000))
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME", "")
+
+# Thêm cache version để quản lý phiên bản cache
+CACHE_VERSION = "v1.0"
+
+# Tối ưu cấu hình logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("stock_bot.log", mode='a')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Cache expiration settings
+CACHE_EXPIRE_SHORT = 1800         # 30 phút cho dữ liệu ngắn hạn
+CACHE_EXPIRE_MEDIUM = 3600        # 1 giờ cho dữ liệu trung hạn
+CACHE_EXPIRE_LONG = 86400         # 1 ngày cho dữ liệu dài hạn
+NEWS_CACHE_EXPIRE = 900           # 15 phút cho tin tức
+DEFAULT_CANDLES = 100
+DEFAULT_TIMEFRAME = '1D'
+
+# Tăng số lượng worker cho thread pool
+thread_executor = ThreadPoolExecutor(max_workers=10)
+# Thêm process pool cho các tác vụ nặng về CPU
+process_executor = ProcessPoolExecutor(max_workers=4)
+
+# Decorator để đo thời gian thực thi của hàm
+def measure_execution_time(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = await func(*args, **kwargs)
+        end_time = time.time()
+        logger.debug(f"{func.__name__} executed in {end_time - start_time:.4f} seconds")
+        return result
+    return wrapper
+
+async def run_in_thread(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(thread_executor, lambda: func(*args, **kwargs))
+
+async def run_in_process(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(process_executor, lambda: func(*args, **kwargs))
+
+# Hàm tạo cache key với version
+def make_cache_key(prefix, params):
+    """Tạo cache key với version để quản lý phiên bản cache"""
+    if isinstance(params, dict):
+        # Sort keys để đảm bảo tính nhất quán
+        params_str = json.dumps(params, sort_keys=True)
+    else:
+        params_str = str(params)
+    
+    hash_key = hashlib.md5(params_str.encode()).hexdigest()
+    return f"{prefix}:{CACHE_VERSION}:{hash_key}"
+
+# ---------- KẾT NỐI REDIS (Async) ----------
+class RedisManager:
+    def __init__(self):
+        """Khởi tạo Redis Manager với cơ chế kết nối tự động"""
+        self.pool = None
+        self.connection_uri = None
+        self.connection_params = None
+        self.initialized = False
+        self.max_retries = 3
+        self.retry_backoff = 1.5
+        self.serialization_method = "pickle"  # Có thể là "pickle" hoặc "json"
+        self.compression_enabled = True
+        
+        # Kiểm tra môi trường để load cấu hình
+        self._init_from_env()
+    
+    def _init_from_env(self):
+        """Khởi tạo từ biến môi trường"""
+        load_dotenv()
+        redis_host = os.getenv('REDIS_HOST', 'localhost')
+        redis_port = int(os.getenv('REDIS_PORT', 6379))
+        redis_db = int(os.getenv('REDIS_DB', 0))
+        redis_password = os.getenv('REDIS_PASSWORD', None)
+        self.serialization_method = os.getenv('REDIS_SERIALIZATION', 'pickle')
+        self.compression_enabled = os.getenv('REDIS_COMPRESSION', 'true').lower() == 'true'
+        
+        if redis_host and redis_port:
+            uri_parts = [f"redis://"]
+            if redis_password:
+                uri_parts.append(f":{redis_password}@")
+            uri_parts.append(f"{redis_host}:{redis_port}/{redis_db}")
+            self.connection_uri = "".join(uri_parts)
+            
+            self.connection_params = {
+                'host': redis_host,
+                'port': redis_port,
+                'db': redis_db,
+                'password': redis_password
+            }
+
+    async def get_connection(self):
+        """Tạo kết nối mới hoặc tái sử dụng kết nối hiện có"""
+        if not self.initialized:
+            try:
+                import redis.asyncio as aioredis
+                if self.connection_uri:
+                    self.pool = aioredis.ConnectionPool.from_url(
+                        self.connection_uri,
+                        decode_responses=False,
+                        max_connections=10,
+                        socket_timeout=5.0,
+                        socket_connect_timeout=2.0
+                    )
+                else:
+                    # Fallback cho local testing
+                    self.pool = aioredis.ConnectionPool(
+                        host='localhost',
+                        port=6379,
+                        db=0,
+                        decode_responses=False,
+                        max_connections=10,
+                        socket_timeout=5.0,
+                        socket_connect_timeout=2.0
+                    )
+                self.initialized = True
+            except ImportError as e:
+                logger.warning(f"Redis không khả dụng, sẽ chạy không cache: {str(e)}")
+                return None
+            except Exception as e:
+                logger.error(f"Không thể khởi tạo Redis: {str(e)}")
+                return None
+
+        if self.pool:
+            try:
+                import redis.asyncio as aioredis
+                return aioredis.Redis(connection_pool=self.pool)
+            except Exception as e:
+                logger.error(f"Lỗi kết nối Redis: {str(e)}")
+        
+        return None
+    
+    def _serialize(self, value):
+        """Tuần tự hóa giá trị với hỗ trợ nén"""
+        if value is None:
+            return None
+            
+        if self.serialization_method == 'json':
+            try:
+                import json
+                serialized = json.dumps(value).encode('utf-8')
+            except (TypeError, ValueError):
+                # Fallback to pickle for complex objects
+                import pickle
+                serialized = pickle.dumps(value)
+        else:  # Default to pickle
+            import pickle
+            serialized = pickle.dumps(value)
+        
+        # Nén dữ liệu nếu được bật và kích thước > 1KB
+        if self.compression_enabled and len(serialized) > 1024:
+            try:
+                import zlib
+                compressed = zlib.compress(serialized)
+                # Chỉ sử dụng dữ liệu nén nếu nhỏ hơn bản gốc
+                if len(compressed) < len(serialized):
+                    return b'zlib:' + compressed
+            except ImportError:
+                pass
+        
+        return serialized
+    
+    def _deserialize(self, data):
+        """Giải tuần tự hóa với hỗ trợ giải nén"""
+        if data is None:
+            return None
+            
+        # Kiểm tra xem dữ liệu có được nén không
+        if data.startswith(b'zlib:'):
+            try:
+                import zlib
+                data = zlib.decompress(data[5:])
+            except (ImportError, zlib.error):
+                logger.warning("Không thể giải nén dữ liệu, trả về None")
+                return None
+        
+        # Thử giải tuần tự hóa với json
+        if self.serialization_method == 'json':
+            try:
+                return json.loads(data.decode('utf-8'))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Fallback to pickle
+                try:
+                    import pickle
+                    return pickle.loads(data)
+                except pickle.PickleError:
+                    logger.warning("Không thể giải tuần tự hóa dữ liệu, trả về None")
+                    return None
+        else:
+            # Mặc định sử dụng pickle
+            try:
+                import pickle
+                return pickle.loads(data)
+            except pickle.PickleError:
+                logger.warning("Không thể giải tuần tự hóa dữ liệu pickle, trả về None")
+                return None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def set(self, key, value, expire=None):
+        """Lưu dữ liệu vào Redis với tuần tự hóa và nén"""
+        r = await self.get_connection()
+        if not r:
+            return False
+        
+        try:
+            serialized = self._serialize(value)
+            if serialized is None:
+                return False
+                
+            if expire is None:
+                expire = 3600  # Mặc định hết hạn sau 1 giờ
+                
+            await r.set(key, serialized, ex=expire)
+            await r.close()
+            return True
+        except Exception as e:
+            logger.error(f"Lỗi Redis set: {str(e)}")
+            return False
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def get(self, key):
+        """Lấy dữ liệu từ Redis với hỗ trợ giải nén"""
+        r = await self.get_connection()
+        if not r:
+            return None
+        
+        try:
+            data = await r.get(key)
+            await r.close()
+            return self._deserialize(data)
+        except Exception as e:
+            logger.error(f"Lỗi Redis get: {str(e)}")
+            return None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def delete(self, key):
+        """Xóa khóa khỏi Redis"""
+        r = await self.get_connection()
+        if not r:
+            return False
+        
+        try:
+            await r.delete(key)
+            await r.close()
+            return True
+        except Exception as e:
+            logger.error(f"Lỗi Redis delete: {str(e)}")
+            return False
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+import os
+import sys
+import io
+import logging
+import pickle
+import time
+import gc
+import warnings
+from functools import lru_cache, wraps
+from datetime import datetime, timedelta
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import hashlib
+import json
+
+import pandas as pd
+import numpy as np
+from dotenv import load_dotenv
+from telegram import Update, ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+import yfinance as yf
+from vnstock import Vnstock
+import google.generativeai as genai
+
+from ta import trend, momentum, volatility
+from ta.volume import MFIIndicator
+import feedparser
+
+import redis.asyncio as redis
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary, Index, func
+from sqlalchemy.pool import QueuePool
+
+import xgboost as xgb
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.neighbors import LocalOutlierFactor
+from prophet import Prophet
+import matplotlib.pyplot as plt
+import holidays
+import html
+from aiohttp import web
+import unittest
+from sklearn.preprocessing import StandardScaler
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -646,7 +946,15 @@ def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
     
     # Lọc bỏ các ngày nghỉ lễ Việt Nam
     years = df.index.year.unique().tolist()
-    vietnam_holidays = holidays.VN(years=years)
+    try:
+        vietnam_holidays = holidays.country_holidays('VN', years=years)
+    except (AttributeError, KeyError):
+        try:
+            vietnam_holidays = holidays.Vietnam(years=years)
+        except (AttributeError, KeyError):
+            # Fallback nếu không có gói holidays Vietnam
+            logger.warning("Không thể tạo lịch nghỉ lễ Việt Nam, bỏ qua lọc ngày lễ")
+            return df
     
     # Tạo mặt nạ để lọc các ngày không phải ngày lễ
     holiday_mask = ~df.index.isin(vietnam_holidays)
@@ -1516,7 +1824,25 @@ def get_vietnam_holidays(years) -> pd.DataFrame:
     if isinstance(years, int):
         years = [years]
     
-    vn_holidays = holidays.Vietnam(years=years)
+    try:
+        vn_holidays = holidays.country_holidays('VN', years=years)
+    except (AttributeError, KeyError):
+        try:
+            vn_holidays = holidays.Vietnam(years=years)
+        except (AttributeError, KeyError):
+            # Fallback tạo danh sách cơ bản nếu không có gói holidays Vietnam
+            logger.warning("Không thể tạo lịch nghỉ lễ Việt Nam, sử dụng fallback cơ bản")
+            current_year = datetime.now().year
+            fallback_holidays = {}
+            for year in years:
+                # Tết Nguyên Đán (ước lượng)
+                tet_date = datetime(year, 2, 1)
+                fallback_holidays[tet_date] = "Tết Nguyên Đán"
+                # Ngày Quốc khánh
+                fallback_holidays[datetime(year, 9, 2)] = "Quốc Khánh"
+                # Ngày Quốc tế Lao động
+                fallback_holidays[datetime(year, 5, 1)] = "Quốc tế Lao động"
+            vn_holidays = fallback_holidays
     
     # Convert to DataFrame for Prophet
     holiday_df = pd.DataFrame([
@@ -1528,7 +1854,7 @@ def get_vietnam_holidays(years) -> pd.DataFrame:
 
 @measure_execution_time
 def forecast_with_prophet(df: pd.DataFrame, periods: int = 7) -> (pd.DataFrame, Prophet):
-    """Dự báo giá với Prophet cải tiến hiệu suất"""
+    """Dự báo giá với Prophet cải tiến hiệu suất và độ chính xác"""
     if df.empty or len(df) < 30:  # Tối thiểu 30 điểm dữ liệu để dự báo
         return pd.DataFrame(), None
     
@@ -1538,32 +1864,54 @@ def forecast_with_prophet(df: pd.DataFrame, periods: int = 7) -> (pd.DataFrame, 
         return pd.DataFrame(), None
     
     try:
-        # Lấy danh sách năm từ dữ liệu
-        years = pd.DatetimeIndex(df_prophet['ds']).year.unique().tolist()
-        # Thêm năm hiện tại và năm tiếp theo cho dự báo
-        current_year = datetime.now().year
-        years.extend([current_year, current_year + 1])
-        years = list(set(years))  # Loại bỏ trùng lặp
+        # Cache cho holidays để tối ưu hiệu suất
+        cache_key = f"holidays_{datetime.now().strftime('%Y')}"
+        cached_holidays = redis_manager.get(cache_key) if hasattr(redis_manager, 'get') else None
+        holidays_df = None
         
-        # Lấy ngày nghỉ
-        holidays_df = get_vietnam_holidays(years)
+        if cached_holidays is None:
+            # Lấy danh sách năm từ dữ liệu
+            years = pd.DatetimeIndex(df_prophet['ds']).year.unique().tolist()
+            # Thêm năm hiện tại và năm tiếp theo cho dự báo
+            current_year = datetime.now().year
+            years.extend([current_year, current_year + 1])
+            years = list(set(years))  # Loại bỏ trùng lặp
+            
+            # Lấy ngày nghỉ
+            holidays_df = get_vietnam_holidays(years)
+            
+            # Cache lại để sử dụng lần sau
+            if hasattr(redis_manager, 'set'):
+                redis_manager.set(cache_key, holidays_df, expire=86400)  # Cache 1 ngày
+        else:
+            holidays_df = cached_holidays
+        
+        # Phân tích xu hướng dữ liệu trước khi dự báo
+        is_volatile = df_prophet['y'].pct_change().std() > 0.03  # Kiểm tra tính biến động
+        
+        # Điều chỉnh tham số dựa trên đặc tính dữ liệu
+        changepoint_prior_scale = 0.1 if is_volatile else 0.05  # Tăng khả năng thích ứng nếu dữ liệu biến động mạnh
+        seasonality_mode = 'multiplicative' if is_volatile else 'additive'
         
         # Khởi tạo và train model với các tham số tối ưu
         model = Prophet(
-            yearly_seasonality=True,
-            weekly_seasonality=True,
+            yearly_seasonality=10,  # Tăng số lượng thành phần Fourier cho mùa vụ năm
+            weekly_seasonality=5,   # Tùy chỉnh thành phần tuần
             daily_seasonality=False,
             holidays=holidays_df,
-            seasonality_mode='multiplicative',  # Tốt hơn cho dữ liệu chứng khoán
+            seasonality_mode=seasonality_mode,  
             interval_width=0.95,  # Khoảng tin cậy 95%
-            changepoint_prior_scale=0.05,  # Mức độ linh hoạt của đường xu hướng
+            changepoint_prior_scale=changepoint_prior_scale,
             changepoint_range=0.9  # Chỉ phát hiện điểm thay đổi trong 90% đầu tiên của dữ liệu
         )
         
-        # Thêm seasonality mùa vụ theo quý
+        # Thêm seasonality mùa vụ theo quý (quan trọng cho dữ liệu tài chính)
         model.add_seasonality(name='quarterly', period=91.25, fourier_order=5)
         
-        # Fit model
+        # Thêm seasonality cho chu kỳ giao dịch ngắn hạn
+        model.add_seasonality(name='biweekly', period=14, fourier_order=3)
+        
+        # Fit model với các tùy chỉnh
         model.fit(df_prophet)
         
         # Dự báo
@@ -1571,8 +1919,17 @@ def forecast_with_prophet(df: pd.DataFrame, periods: int = 7) -> (pd.DataFrame, 
         # Lọc ra chỉ các ngày trong tuần (không lấy cuối tuần)
         future = future[future['ds'].dt.dayofweek < 5]
         
+        # Lọc bỏ ngày nghỉ lễ nếu có holidays_df
+        if holidays_df is not None and not holidays_df.empty:
+            holiday_dates = holidays_df['ds'].dt.date.tolist()
+            future = future[~future['ds'].dt.date.isin(holiday_dates)]
+        
         # Dự báo với future dataframe đã lọc
         forecast = model.predict(future)
+        
+        # Thêm thông tin độ tin cậy
+        forecast['certainty'] = 1.0 - (forecast['yhat_upper'] - forecast['yhat_lower']) / forecast['yhat']
+        forecast['certainty'] = forecast['certainty'].clip(0, 1)  # Giới hạn trong khoảng [0, 1]
         
         return forecast, model
     except Exception as e:
@@ -1610,7 +1967,7 @@ def evaluate_prophet_performance(df: pd.DataFrame, forecast: pd.DataFrame) -> fl
 
 @measure_execution_time
 async def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, float):
-    """Dự đoán tín hiệu giao dịch bằng XGBoost"""
+    """Dự đoán tín hiệu giao dịch bằng XGBoost với mô hình cải tiến"""
     try:
         # Kiểm tra model đã train
         model_db = ModelDBManager()
@@ -1620,9 +1977,9 @@ async def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, floa
             symbol = df.symbol
         
         # Tải model
-        model = await model_db.load_trained_model(symbol, 'xgboost')
+        model_package = await model_db.load_trained_model(symbol, 'xgboost')
         
-        if model is None:
+        if model_package is None:
             logger.warning(f"Không tìm thấy model XGBoost cho {symbol}, sử dụng dự đoán đơn giản")
             # Dự đoán đơn giản dựa trên xu hướng gần đây
             if len(df) >= 5:
@@ -1632,22 +1989,68 @@ async def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, floa
                 return signal, confidence
             return 0, 0.0
         
+        # Trích xuất thành phần từ model package
+        if isinstance(model_package, dict) and 'model' in model_package:
+            model = model_package['model']
+            scaler = model_package.get('scaler')
+            model_features = model_package.get('features', features)
+            target_type = model_package.get('target_type', 'target_basic')
+        else:
+            # Tương thích ngược với model cũ
+            model = model_package
+            scaler = None
+            model_features = features
+            target_type = 'target_basic'
+        
         # Chuẩn bị dữ liệu đầu vào
-        if not all(feature in df.columns for feature in features):
-            logger.error(f"Thiếu một số đặc trưng cần thiết cho XGBoost: {set(features) - set(df.columns)}")
-            return 0, 0.0
+        if not all(feature in df.columns for feature in model_features):
+            missing_features = set(model_features) - set(df.columns)
+            logger.error(f"Thiếu đặc trưng cho XGBoost: {missing_features}")
+            
+            # Tính toán thêm đặc trưng nếu là các chỉ báo kỹ thuật cơ bản
+            for feature in list(missing_features):
+                if feature == 'ma5' and 'close' in df.columns:
+                    df['ma5'] = df['close'].rolling(5).mean()
+                elif feature == 'ma10' and 'close' in df.columns:
+                    df['ma10'] = df['close'].rolling(10).mean()
+                elif feature == 'ma20' and 'close' in df.columns:
+                    df['ma20'] = df['close'].rolling(20).mean()
+                elif feature == 'rsi' and 'close' in df.columns:
+                    df['rsi'] = 100 - (100 / (1 + (df['close'].diff(1).clip(lower=0).rolling(14).mean() / 
+                                    df['close'].diff(1).clip(upper=0).abs().rolling(14).mean())))
+            
+            # Kiểm tra lại sau khi thêm đặc trưng
+            if not all(feature in df.columns for feature in model_features):
+                still_missing = set(model_features) - set(df.columns)
+                logger.error(f"Vẫn còn thiếu đặc trưng sau khi tính toán: {still_missing}")
+                return 0, 0.0
         
         # Lấy dữ liệu mới nhất
-        latest_data = df.iloc[-1][features].values.reshape(1, -1)
+        latest_data = df.iloc[-1][model_features].values.reshape(1, -1)
+        
+        # Chuẩn hóa dữ liệu nếu có scaler
+        if scaler is not None:
+            latest_data = scaler.transform(latest_data)
         
         # Dự đoán
-        prediction = model.predict(latest_data)[0]
-        probability = model.predict_proba(latest_data)[0]
-        
-        # Trả về tín hiệu (1 = mua, 0 = giữ, -1 = bán) và độ tin cậy
-        confidence = probability[int(prediction)] if len(probability) > 1 else probability[0]
-        
-        return int(prediction), float(confidence)
+        try:
+            prediction = model.predict(latest_data)[0]
+            probability = model.predict_proba(latest_data)[0]
+            
+            # Xử lý dự đoán dựa trên loại nhãn
+            if target_type == 'target_multi':
+                # Chuyển đổi từ {-1, 0, 1} thành {-1, 0, 1}
+                signal = prediction - 1 if prediction > 0 else 0
+                confidence = max(probability)
+            else:
+                # Nhãn nhị phân 0/1 chuyển thành -1/1
+                signal = 1 if prediction > 0 else -1
+                confidence = probability[int(prediction)] if len(probability) > 1 else probability[0]
+            
+            return int(signal), float(confidence)
+        except Exception as e:
+            logger.error(f"Lỗi khi dự đoán với model: {str(e)}")
+            return 0, 0.0
     except Exception as e:
         logger.error(f"Lỗi dự đoán XGBoost: {str(e)}")
         return 0, 0.0
@@ -1690,7 +2093,7 @@ async def train_prophet_model(df: pd.DataFrame) -> (Prophet, float):
 
 @measure_execution_time
 async def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClassifier, float):
-    """Train model XGBoost với cải tiến hiệu suất"""
+    """Train model XGBoost với cải tiến hiệu suất và khả năng tự điều chỉnh"""
     if df.empty or len(df) < 100:  # Cần ít nhất 100 điểm dữ liệu
         logger.warning("Không đủ dữ liệu để train model XGBoost")
         return None, 0.0
@@ -1698,7 +2101,30 @@ async def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClass
     try:
         # Tạo nhãn (1 = tăng, 0 = giảm) cho dữ liệu
         df = df.copy()
-        df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+        
+        # Phát hiện mô hình dự báo tối ưu dựa trên độ biến động của dữ liệu
+        volatility = df['close'].pct_change().std()
+        logger.info(f"Độ biến động của dữ liệu: {volatility:.4f}")
+        
+        # Tạo nhiều dạng nhãn để thử nghiệm
+        # 1. Nhãn cơ bản: tăng/giảm so với ngày trước
+        df['target_basic'] = (df['close'].shift(-1) > df['close']).astype(int)
+        
+        # 2. Nhãn với ngưỡng: tăng/giảm có ý nghĩa (>0.5%)
+        threshold = max(0.005, volatility / 4)  # Điều chỉnh ngưỡng theo độ biến động
+        df['target_threshold'] = ((df['close'].shift(-1) - df['close']) / df['close'] > threshold).astype(int)
+        
+        # 3. Nhãn đa lớp: mạnh lên/yếu đi/không đổi
+        df['pct_change'] = df['close'].shift(-1).pct_change()
+        df['target_multi'] = 0  # Mặc định không đổi
+        df.loc[df['pct_change'] > threshold, 'target_multi'] = 1  # Tăng mạnh
+        df.loc[df['pct_change'] < -threshold, 'target_multi'] = -1  # Giảm mạnh
+        
+        # Chọn kiểu nhãn dựa trên đặc tính dữ liệu
+        if volatility > 0.03:  # Biến động cao
+            target_col = 'target_threshold'
+        else:
+            target_col = 'target_basic'
         
         # Loại bỏ NaN
         df = df.dropna()
@@ -1708,65 +2134,139 @@ async def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClass
         
         # Kiểm tra và lọc features
         available_features = [f for f in features if f in df.columns]
-        if len(available_features) < len(features):
-            logger.warning(f"Thiếu một số đặc trưng cho XGBoost: {set(features) - set(available_features)}")
+        if len(available_features) < len(features) * 0.7:  # Cần ít nhất 70% features
+            logger.warning(f"Thiếu quá nhiều đặc trưng, chỉ còn {len(available_features)}/{len(features)}")
+            # Thêm các features cơ bản nếu có thể
+            if all(col in df.columns for col in ['open', 'high', 'low', 'close', 'volume']):
+                # Tính thêm các chỉ báo cơ bản
+                df['ma5'] = df['close'].rolling(5).mean()
+                df['ma10'] = df['close'].rolling(10).mean()
+                df['ma20'] = df['close'].rolling(20).mean()
+                df['rsi'] = 100 - (100 / (1 + (df['close'].diff(1).clip(lower=0).rolling(14).mean() / 
+                                              df['close'].diff(1).clip(upper=0).abs().rolling(14).mean())))
+                
+                # Thêm vào available_features
+                for col in ['ma5', 'ma10', 'ma20', 'rsi']:
+                    if col not in available_features and col in df.columns:
+                        available_features.append(col)
+                
+                # Loại bỏ NaN sau khi tính toán
+                df = df.dropna()
         
-        if not available_features:
-            return None, 0.0
+        # Chuẩn hóa dữ liệu đầu vào
+        X = df[available_features].copy()
+        y = df[target_col].astype(int)
         
-        # Chuẩn bị dữ liệu
-        X = df[available_features]
-        y = df['target']
+        # Phân chia dữ liệu theo thời gian
+        tscv = TimeSeriesSplit(n_splits=5, test_size=max(30, int(len(X) * 0.2)))
         
-        # Time series split
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        # Tham số tối ưu cho XGBoost
-        params = {
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'max_depth': 6,
-            'learning_rate': 0.05,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 1,
-            'gamma': 0,
-            'n_estimators': 200,
-            'random_state': 42
-        }
-        
-        # Function để train model trong process khác để tối ưu memory
-        def train_model(X, y, params, tscv):
-            model = xgb.XGBClassifier(**params)
-            
-            # Cross-validation scores
+        # Train model với nhiều bộ tham số khác nhau
+        async def train_model(X, y, params, tscv):
+            """Train mô hình XGBoost với bộ tham số xác định và đánh giá chéo theo thời gian"""
             cv_scores = []
             
             for train_idx, test_idx in tscv.split(X):
                 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
                 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
                 
-                model.fit(X_train, y_train)
-                y_pred = model.predict(X_test)
+                # Chuẩn hóa dữ liệu (sử dụng dữ liệu train để fit scaler)
+                scaler = StandardScaler()
+                X_train_scaled = scaler.fit_transform(X_train)
+                X_test_scaled = scaler.transform(X_test)
                 
-                f1 = f1_score(y_test, y_pred, average='weighted')
-                cv_scores.append(f1)
+                # Train model
+                model = xgb.XGBClassifier(**params)
+                model.fit(
+                    X_train_scaled, y_train,
+                    eval_set=[(X_test_scaled, y_test)],
+                    early_stopping_rounds=10,
+                    verbose=False
+                )
+                
+                # Đánh giá
+                y_pred = model.predict(X_test_scaled)
+                acc = sum(y_pred == y_test) / len(y_test)
+                cv_scores.append(acc)
             
-            # Final model training on full dataset
-            final_model = xgb.XGBClassifier(**params)
-            final_model.fit(X, y)
-            
-            # Average F1 score as performance metric
-            avg_performance = np.mean(cv_scores)
-            
-            return final_model, avg_performance
+            # Trung bình độ chính xác cross-validation
+            avg_score = sum(cv_scores) / len(cv_scores)
+            return avg_score
         
-        # Train model in a separate process
-        model, performance = await run_in_process(train_model, X, y, params, tscv)
+        # Các bộ tham số thử nghiệm dựa trên kích thước và đặc tính dữ liệu
+        param_sets = [
+            {
+                'n_estimators': 100,
+                'max_depth': 3,
+                'learning_rate': 0.1,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'objective': 'binary:logistic' if target_col != 'target_multi' else 'multi:softmax',
+                'num_class': 1 if target_col != 'target_multi' else 3,
+                'eval_metric': 'logloss',
+                'use_label_encoder': False,
+                'random_state': 42
+            },
+            {
+                'n_estimators': 200,
+                'max_depth': 5,
+                'learning_rate': 0.05,
+                'subsample': 0.7,
+                'colsample_bytree': 0.7,
+                'objective': 'binary:logistic' if target_col != 'target_multi' else 'multi:softmax',
+                'num_class': 1 if target_col != 'target_multi' else 3,
+                'eval_metric': 'logloss',
+                'use_label_encoder': False,
+                'random_state': 42
+            },
+            {
+                'n_estimators': 300,
+                'max_depth': 4,
+                'learning_rate': 0.01,
+                'subsample': 0.9,
+                'colsample_bytree': 0.9,
+                'objective': 'binary:logistic' if target_col != 'target_multi' else 'multi:softmax',
+                'num_class': 1 if target_col != 'target_multi' else 3,
+                'eval_metric': 'logloss',
+                'use_label_encoder': False,
+                'random_state': 42
+            }
+        ]
         
-        return model, performance
+        # Đánh giá các bộ tham số
+        best_score = 0
+        best_params = None
+        
+        for params in param_sets:
+            score = await train_model(X, y, params, tscv)
+            if score > best_score:
+                best_score = score
+                best_params = params
+        
+        if best_params is None:
+            return None, 0.0
+        
+        # Train lại với toàn bộ dữ liệu sử dụng tham số tốt nhất
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        
+        # Lưu scaler vào model để sử dụng khi dự đoán
+        best_params['scaler'] = scaler
+        best_params['features'] = available_features
+        
+        final_model = xgb.XGBClassifier(**{k: v for k, v in best_params.items() if k not in ['scaler', 'features']})
+        final_model.fit(X_scaled, y)
+        
+        # Đóng gói model với scaler và thông tin tính năng
+        model_package = {
+            'model': final_model,
+            'scaler': scaler,
+            'features': available_features,
+            'target_type': target_col
+        }
+        
+        return model_package, best_score
     except Exception as e:
-        logger.error(f"Lỗi train model XGBoost: {str(e)}")
+        logger.error(f"Lỗi train model XGBoost: {str(e)}", exc_info=True)
         return None, 0.0
 
 async def get_training_symbols() -> list:
