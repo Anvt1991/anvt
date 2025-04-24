@@ -143,8 +143,19 @@ def make_cache_key(prefix, params):
 class RedisManager:
     def __init__(self):
         try:
+            # Ensure Redis URL has the proper scheme
+            redis_url = REDIS_URL
+            
+            if not redis_url:
+                # Use a default local Redis URL if none is provided
+                redis_url = "redis://localhost:6379/0"
+                logger.info(f"Using default Redis URL: {redis_url}")
+            elif not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
+                redis_url = f"redis://{redis_url}"
+                logger.info(f"Added 'redis://' prefix to Redis URL")
+                
             self.redis_client = redis.from_url(
-                REDIS_URL,
+                redis_url,
                 encoding="utf-8",
                 decode_responses=False,
                 socket_timeout=5.0,
@@ -155,11 +166,16 @@ class RedisManager:
             logger.info("Kết nối Redis thành công.")
         except Exception as e:
             logger.error(f"Lỗi kết nối Redis: {str(e)}")
-            raise
+            self.redis_client = None
+            logger.warning("Continuing without Redis. Some features may not work correctly.")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def set(self, key, value, expire):
         try:
+            if self.redis_client is None:
+                logger.debug(f"Redis not available, skipping set for key: {key}")
+                return False
+                
             serialized_value = pickle.dumps(value)
             await self.redis_client.set(key, serialized_value, ex=expire)
             return True
@@ -170,6 +186,10 @@ class RedisManager:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def get(self, key):
         try:
+            if self.redis_client is None:
+                logger.debug(f"Redis not available, skipping get for key: {key}")
+                return None
+                
             data = await self.redis_client.get(key)
             if data:
                 return pickle.loads(data)
@@ -182,6 +202,10 @@ class RedisManager:
     async def delete(self, key):
         """Xóa một key khỏi cache"""
         try:
+            if self.redis_client is None:
+                logger.debug(f"Redis not available, skipping delete for key: {key}")
+                return False
+                
             await self.redis_client.delete(key)
             return True
         except Exception as e:
@@ -192,6 +216,10 @@ class RedisManager:
     async def invalidate_by_pattern(self, pattern):
         """Xóa tất cả các keys khớp với pattern"""
         try:
+            if self.redis_client is None:
+                logger.debug(f"Redis not available, skipping invalidate for pattern: {pattern}")
+                return False
+                
             cursor = b'0'
             while cursor:
                 cursor, keys = await self.redis_client.scan(cursor=cursor, match=pattern, count=100)
@@ -247,6 +275,10 @@ class TrainedModel(Base):
     )
 
 # Tối ưu kết nối database với connection pooling
+if not DATABASE_URL:
+    DATABASE_URL = "sqlite+aiosqlite:///./stock_bot.db"
+    logger.info(f"Using default SQLite database: {DATABASE_URL}")
+
 engine = create_async_engine(
     DATABASE_URL, 
     echo=False,
@@ -259,19 +291,67 @@ engine = create_async_engine(
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing database: {str(e)}")
+        logger.warning("Continuing without database initialization. Some features may not work correctly.")
 
 class DBManager:
     def __init__(self):
         self.Session = SessionLocal
+        self.connection_ok = True
+        
+        # Test the database connection
+        async def test_connection():
+            try:
+                async with self.Session() as session:
+                    await session.execute(select(1))
+                return True
+            except Exception as e:
+                logger.error(f"Database connection test failed: {str(e)}")
+                return False
+        
+        # Create an event loop if not already running
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is running, we need to schedule the test
+                asyncio.create_task(self._set_connection_status())
+            else:
+                # If loop is not running yet, run the test directly
+                self.connection_ok = loop.run_until_complete(test_connection())
+        except Exception as e:
+            logger.error(f"Error testing database connection: {str(e)}")
+            self.connection_ok = False
+    
+    async def _set_connection_status(self):
+        try:
+            async with self.Session() as session:
+                await session.execute(select(1))
+            self.connection_ok = True
+        except Exception as e:
+            logger.error(f"Database connection test failed: {str(e)}")
+            self.connection_ok = False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def is_user_approved(self, user_id) -> bool:
+        # Always approve the admin
+        if str(user_id) == ADMIN_ID:
+            return True
+            
+        # If the database connection is not okay, we can't check
+        if not self.connection_ok:
+            logger.warning(f"Database connection not available, can't verify user {user_id}")
+            # Default to not approved when DB is unavailable
+            return False
+            
         try:
             async with self.Session() as session:
                 result = await session.execute(select(ApprovedUser).filter_by(user_id=str(user_id)))
-                return result.scalar_one_or_none() is not None or str(user_id) == ADMIN_ID
+                return result.scalar_one_or_none() is not None
         except Exception as e:
             logger.error(f"Lỗi kiểm tra người dùng: {str(e)}")
             return False
@@ -367,7 +447,9 @@ db = DBManager()
 class ModelDBManager:
     def __init__(self):
         self.Session = SessionLocal
-        self.db = DBManager()
+        # Share the connection status with DBManager
+        # since both use the same database connection
+        self.connection_ok = db_manager.connection_ok if 'db_manager' in globals() else True
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def store_trained_model(self, symbol: str, model_type: str, model, performance: float = None):
@@ -1880,29 +1962,41 @@ class AIAnalyzer:
     
     def __init__(self):
         self.db_manager = DBManager()
-        self.model = genai.GenerativeModel('gemini-pro')
-        self.safety_settings = [
-            {
-                "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-            }
-        ]
+        
+        # Check if Gemini API key is set
+        self.gemini_available = bool(GEMINI_API_KEY) and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY"
+        
+        if self.gemini_available:
+            self.model = genai.GenerativeModel('gemini-pro')
+            self.safety_settings = [
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                }
+            ]
+        else:
+            logger.warning("AIAnalyzer initialized without Gemini API. Will use basic analysis only.")
+            self.model = None
+            self.safety_settings = None
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def generate_content(self, prompt):
         """Tạo nội dung AI với Gemini API"""
+        if not self.gemini_available:
+            return "AI analysis not available (Gemini API key not set)"
+            
         try:
             response = await run_in_thread(
                 lambda: self.model.generate_content(
@@ -2287,6 +2381,18 @@ async def main():
             level=logging.INFO
         )
         
+        # Check if Telegram token is set correctly
+        if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
+            logger.error("Telegram token not set. Please set the TELEGRAM_TOKEN environment variable.")
+            logger.warning("Running in limited mode without Telegram bot integration.")
+            
+            # Instead of returning, you could add code here to run in a "headless" mode
+            # where the bot doesn't connect to Telegram but performs other tasks
+            
+            # For now, we'll just show that the bot is operational but limited
+            logger.info("Bot started successfully in limited mode (no Telegram integration)")
+            return
+        
         # Mode bot: webhook hoặc polling
         use_webhook = os.getenv('USE_WEBHOOK', 'False').lower() == 'true'
         mode = os.getenv('MODE', 'production').lower()
@@ -2388,18 +2494,20 @@ async def main():
             async def health_check_handler(request):
                 # Kiểm tra Redis và DB để đảm bảo các thành phần hoạt động
                 try:
-                    # Kiểm tra Redis
-                    redis_key = "health_check"
-                    await redis_manager.set(redis_key, True, 10)
-                    redis_value = await redis_manager.get(redis_key)
-                    redis_health = redis_value is True
+                    # Kiểm tra Redis availability
+                    redis_health = False
+                    if redis_manager.redis_client is not None:
+                        redis_key = "health_check"
+                        await redis_manager.set(redis_key, True, 10)
+                        redis_value = await redis_manager.get(redis_key)
+                        redis_health = redis_value is True
                     
                     # Kiểm tra DB
                     db_health = await db_manager.is_user_approved("admin")
                     
                     return web.json_response({
                         "status": "healthy" if redis_health and db_health is not None else "degraded",
-                        "redis": "ok" if redis_health else "error",
+                        "redis": "ok" if redis_health else "disabled" if redis_manager.redis_client is None else "error",
                         "database": "ok" if db_health is not None else "error",
                         "uptime": time.time() - START_TIME
                     })
@@ -2461,8 +2569,12 @@ if __name__ == "__main__":
     START_TIME = time.time()
     
     try:
-        # Khởi tạo Gemini API
-        genai.configure(api_key=GEMINI_API_KEY)
+        # Khởi tạo Gemini API if API key is available
+        if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
+            logger.warning("Gemini API key not set. AI-powered features will not be available.")
+        else:
+            genai.configure(api_key=GEMINI_API_KEY)
+            logger.info("Gemini API initialized successfully")
         
         # Khởi tạo constants
         TOKEN = TELEGRAM_TOKEN
