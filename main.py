@@ -2551,14 +2551,16 @@ async def main():
         # Chọn chế độ chạy - luôn sử dụng webhook
         # Webhook mode
         if RENDER_EXTERNAL_URL:
-            webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
+            webhook_path = '/telegram/webhook'
+            webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
         else:
-            webhook_url = os.getenv('WEBHOOK_URL', f'https://example.com:{port}/{TELEGRAM_TOKEN}')
+            webhook_path = '/telegram/webhook'
+            webhook_url = os.getenv('WEBHOOK_URL', f'https://example.com:{port}{webhook_path}')
         webhook_listen = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
         webhook_port = port
         
         logger.info(f"Starting webhook on {webhook_url}")
-        await application.bot.set_webhook(url=webhook_url)
+        await application.bot.set_webhook(url=webhook_url, secret_token=TELEGRAM_TOKEN)
         
         # Setup aiohttp webapp
         app = web.Application()
@@ -2566,8 +2568,16 @@ async def main():
         # Telegram webhook handler
         async def telegram_webhook_handler(request):
             try:
+                # Verify the Telegram secret token for security
+                secret_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+                if secret_header != TELEGRAM_TOKEN:
+                    logger.warning(f"Unauthorized webhook request from {request.remote}")
+                    return web.Response(status=403)
+                    
                 request_body_json = await request.json()
                 update = Update.de_json(request_body_json, application.bot)
+                # Initialize the application before processing updates
+                await application.initialize()
                 await application.process_update(update)
                 return web.Response()
             except Exception as e:
@@ -2619,8 +2629,8 @@ async def main():
         # Áp dụng middleware
         app.middlewares.append(logging_middleware)
         
-        # Đăng ký các route
-        app.router.add_post(f'/{TELEGRAM_TOKEN}', telegram_webhook_handler)
+        # Đăng ký các route - use the webhook_path variable
+        app.router.add_post(webhook_path, telegram_webhook_handler)
         app.router.add_get('/health', health_check_handler)
         
         # Bắt đầu server
