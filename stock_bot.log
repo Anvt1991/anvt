@@ -29,3 +29,22 @@ Traceback: (<class 'telegram.error.InvalidToken'>, InvalidToken('You must pass t
 2025-04-24 10:08:03,512 - __main__ - ERROR - Telegram token not set. Please set the TELEGRAM_TOKEN environment variable.
 2025-04-24 10:08:03,512 - __main__ - WARNING - Running in limited mode without Telegram bot integration.
 2025-04-24 10:08:03,513 - __main__ - INFO - Bot started successfully in limited mode (no Telegram integration)
+2025-04-24 12:47:43,819 - __main__ - INFO - Using default Redis URL: redis://localhost:6379/0
+2025-04-24 12:47:43,820 - __main__ - INFO - Kết nối Redis thành công.
+2025-04-24 12:47:43,827 - __main__ - INFO - Using default SQLite database: sqlite+aiosqlite:///./stock_bot.db
+2025-04-24 12:47:43,861 - __main__ - INFO - Using default Redis URL: redis://localhost:6379/0
+2025-04-24 12:47:43,862 - __main__ - INFO - Kết nối Redis thành công.
+2025-04-24 12:47:43,866 - __main__ - WARNING - Gemini API key not set. AI-powered features will not be available.
+2025-04-24 12:47:43,866 - __main__ - CRITICAL - Lỗi khởi động bot: name 'run_tests' is not defined
+2025-04-24 12:47:43,866 - __main__ - CRITICAL - CRITICAL ERROR: name 'run_tests' is not defined
+Traceback: (<class 'NameError'>, NameError("name 'run_tests' is not defined"), <traceback object at 0x000001FB465A7DC0>)
+2025-04-24 12:48:07,759 - __main__ - INFO - Using default Redis URL: redis://localhost:6379/0
+2025-04-24 12:48:07,760 - __main__ - INFO - Kết nối Redis thành công.
+2025-04-24 12:48:07,776 - __main__ - INFO - Using default SQLite database: sqlite+aiosqlite:///./stock_bot.db
+2025-04-24 12:48:07,833 - __main__ - INFO - Using default Redis URL: redis://localhost:6379/0
+2025-04-24 12:48:07,834 - __main__ - INFO - Kết nối Redis thành công.
+2025-04-24 12:48:07,841 - __main__ - WARNING - Gemini API key not set. AI-powered features will not be available.
+2025-04-24 12:48:07,858 - __main__ - INFO - Database initialized successfully
+2025-04-24 12:48:07,858 - __main__ - ERROR - Telegram token not set. Please set the TELEGRAM_TOKEN environment variable.
+2025-04-24 12:48:07,859 - __main__ - WARNING - Running in limited mode without Telegram bot integration.
+2025-04-24 12:48:07,859 - __main__ - INFO - Bot started successfully in limited mode (no Telegram integration)

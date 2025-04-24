@@ -932,7 +932,7 @@ class DataLoader:
                 df = await self._download_yahoo_data(yahoo_symbol, num_candles, period, interval)
             else:
                 # Sử dụng VNStock cho cổ phiếu Việt Nam
-                async def fetch_vnstock():
+                def fetch_vnstock():
                     if timeframe == '1D':
                         # Import trực tiếp từ vnstock module
                         from vnstock import stock_historical_data
@@ -946,6 +946,19 @@ class DataLoader:
                         raise ValueError(f"VNStock không hỗ trợ khung thời gian {timeframe}")
                 
                 df = await run_in_thread(fetch_vnstock)
+                
+                # Đảm bảo df không phải là coroutine
+                if isawaitable(df):
+                    try:
+                        df = await df
+                    except Exception as e:
+                        logger.error(f"Lỗi khi await DataFrame từ VNStock cho {symbol}: {str(e)}")
+                        return pd.DataFrame(), f"Lỗi: {str(e)}"
+                
+                # Kiểm tra kết quả có phải DataFrame hay không
+                if df is None or not hasattr(df, 'empty'):
+                    logger.warning(f"Kết quả từ VNStock không phải DataFrame cho {symbol}")
+                    return pd.DataFrame(), "Kết quả không phải DataFrame"
                 
                 # Preprocessing for VNStock data
                 if not df.empty:
@@ -1024,6 +1037,18 @@ class DataLoader:
             
             df = await run_in_thread(fetch_yf)
             
+            # Đảm bảo df không phải là coroutine
+            if isawaitable(df):
+                try:
+                    df = await df
+                except Exception as e:
+                    logger.error(f"Lỗi khi await DataFrame từ Yahoo cho {symbol}: {str(e)}")
+                    return pd.DataFrame()
+            
+            if df is None or not hasattr(df, 'empty'):
+                logger.warning(f"Kết quả từ Yahoo không phải DataFrame cho {symbol}")
+                return pd.DataFrame()
+                
             if df.empty:
                 logger.warning(f"Yahoo Finance không trả về dữ liệu cho {symbol}")
                 return pd.DataFrame()
@@ -1176,6 +1201,14 @@ class DataLoader:
         
         fundamental_data = await run_in_thread(fetch)
         
+        # Đảm bảo fundamental_data không phải là coroutine
+        if isawaitable(fundamental_data):
+            try:
+                fundamental_data = await fundamental_data
+            except Exception as e:
+                logger.error(f"Lỗi khi await fundamental_data từ Yahoo cho {symbol}: {str(e)}")
+                return {}
+        
         # Cache the result
         await redis_manager.set(cache_key, fundamental_data, CACHE_EXPIRE_LONG)
         
@@ -1194,58 +1227,74 @@ class DataLoader:
         def fetch():
             result = {}
             try:
-                # Điều chỉnh symbol cho Yahoo Finance
-                yahoo_symbol = symbol
-                if symbol.upper() == 'VNINDEX':
-                    yahoo_symbol = '^VNINDEX'
-                elif symbol.upper() == 'VN30':
-                    yahoo_symbol = '^VN30'
-                elif symbol.upper() == 'HNX':
-                    yahoo_symbol = '^HNX'
-                elif not symbol.startswith('^'):
-                    yahoo_symbol = f"{symbol}.VN"
+                # Safely fetch data from yfinance
+                ticker = yf.Ticker(symbol)
                 
-                ticker = yf.Ticker(yahoo_symbol)
+                # Basic info
+                info = ticker.info
+                if info:
+                    # Convert types to ensure it's JSON-serializable
+                    info_serializable = {}
+                    for key, value in info.items():
+                        if isinstance(value, (str, int, float, bool, type(None))):
+                            info_serializable[key] = value
+                        else:
+                            # Convert non-standard types to string
+                            info_serializable[key] = str(value)
+                    result['info'] = info_serializable
                 
-                if is_index(symbol):
-                    result = {'info': {'shortName': symbol, 'type': 'index'}}
-                else:
-                    # Basic info
-                    result['info'] = ticker.info
-                    
-                    # Financials
-                    if 'financials' not in result:
-                        result['financials'] = {}
-                    
+                # Financials (some may not be available for non-US stocks)
+                try:
                     # Balance sheet
-                    try:
-                        result['financials']['balance_sheet'] = ticker.balance_sheet
-                    except:
-                        result['financials']['balance_sheet'] = None
-                    
-                    # Income statement
-                    try:
-                        result['financials']['income_stmt'] = ticker.income_stmt
-                    except:
-                        result['financials']['income_stmt'] = None
-                    
-                    # Cash flow
-                    try:
-                        result['financials']['cash_flow'] = ticker.cashflow
-                    except:
-                        result['financials']['cash_flow'] = None
-            except Exception as e:
-                logger.error(f"Lỗi lấy dữ liệu cơ bản Yahoo Finance cho {symbol}: {str(e)}")
-                result = {'error': str(e)}
-            
-            return result
+                    balance_sheet = ticker.balance_sheet
+                    if not balance_sheet.empty:
+                        result['balance_sheet'] = balance_sheet
+                except Exception as e:
+                    logger.warning(f"Không lấy được balance sheet cho {symbol}: {str(e)}")
                 
-        fundamental_data = await run_in_thread(fetch)
-        
-        # Cache the result
-        await redis_manager.set(cache_key, fundamental_data, CACHE_EXPIRE_LONG)
-        
-        return fundamental_data
+                try:
+                    # Income statement
+                    income_stmt = ticker.income_stmt
+                    if not income_stmt.empty:
+                        result['income_stmt'] = income_stmt
+                except Exception as e:
+                    logger.warning(f"Không lấy được income statement cho {symbol}: {str(e)}")
+                
+                try:
+                    # Cash flow
+                    cash_flow = ticker.cashflow
+                    if not cash_flow.empty:
+                        result['cash_flow'] = cash_flow
+                except Exception as e:
+                    logger.warning(f"Không lấy được cashflow cho {symbol}: {str(e)}")
+                
+                # News (if available)
+                try:
+                    news = ticker.news
+                    if news:
+                        result['news'] = news[:5]  # Limit to 5 news items
+                except Exception as e:
+                    logger.warning(f"Không lấy được tin tức cho {symbol}: {str(e)}")
+                
+            except Exception as e:
+                logger.error(f"Lỗi lấy dữ liệu Yahoo Finance cho {symbol}: {str(e)}")
+                
+                return result
+                
+            fundamental_data = await run_in_thread(fetch)
+            
+            # Đảm bảo fundamental_data không phải là coroutine
+            if isawaitable(fundamental_data):
+                try:
+                    fundamental_data = await fundamental_data
+                except Exception as e:
+                    logger.error(f"Lỗi khi await fundamental_data từ Yahoo cho {symbol}: {str(e)}")
+                    return {}
+            
+            # Cache the result
+            await redis_manager.set(cache_key, fundamental_data, CACHE_EXPIRE_LONG)
+            
+            return fundamental_data
     
     async def get_fundamental_data(self, symbol: str) -> dict:
         """Tải dữ liệu cơ bản của mã chứng khoán"""
@@ -1274,53 +1323,54 @@ class DataPipeline:
     @measure_execution_time
     async def process_data(self, symbol: str, timeframe: str = DEFAULT_TIMEFRAME, num_candles: int = DEFAULT_CANDLES) -> (pd.DataFrame, dict):
         """
-        Quy trình xử lý dữ liệu hoàn chỉnh: tải, validate, phát hiện outlier và chuẩn hóa
-        Trả về DataFrame đã xử lý và báo cáo xử lý
+        Xử lý dữ liệu thô, trả về DataFrame đã làm sạch và báo cáo
         """
-        # 1. Tải dữ liệu
-        df, outlier_report = await self.data_loader.load_data(symbol, timeframe, num_candles)
-        
-        # Lưu báo cáo outlier
-        self.outlier_reports[symbol] = outlier_report
-        
-        if df.empty:
-            return df, {"status": "error", "message": "Không thể tải dữ liệu"}
-        
-        # 2. Validate và loại bỏ trùng lặp
-        df_validated, validation_report = self.validator.validate_data(df)
-        df_validated, removed_count = self.validator.remove_duplicates(df_validated)
-        
-        # Cập nhật báo cáo về số lượng bản ghi đã loại bỏ
-        if removed_count > 0:
-            validation_report["fixes"].append(f"Đã loại bỏ {removed_count} bản ghi trùng lặp")
-        
-        # Lưu báo cáo validation
-        self.validation_reports[symbol] = validation_report
-        
-        if validation_report["status"] == "error":
-            return df_validated, validation_report
-        
-        # 3. Lọc các ngày giao dịch
-        df_validated = filter_trading_days(df_validated)
-        
-        # 4. Chuẩn hóa dữ liệu cho ML
-        df_normalized = self.validator.normalize_data(df_validated)
-        
-        # 5. Đảm bảo sắp xếp theo thời gian
-        df_normalized = df_normalized.sort_index()
-        
-        # Tổng hợp báo cáo xử lý
-        processing_report = {
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "original_rows": len(df),
-            "processed_rows": len(df_normalized),
-            "validation": validation_report,
-            "outliers": outlier_report,
-            "status": "success"
-        }
-        
-        return df_normalized, processing_report
+        try:
+            # Load raw data
+            df, outlier_report = await self.data_loader.load_data(symbol, timeframe, num_candles)
+            
+            # Đảm bảo df không phải là coroutine
+            if isawaitable(df):
+                try:
+                    df = await df
+                except Exception as e:
+                    logger.error(f"Lỗi khi await DataFrame cho {symbol} ({timeframe}): {str(e)}")
+                    return pd.DataFrame(), {"status": "error", "message": str(e)}
+            
+            # Validate and clean data
+            if df is not None and hasattr(df, 'empty') and not df.empty:
+                # Lưu báo cáo outlier
+                if symbol not in self.outlier_reports:
+                    self.outlier_reports[symbol] = {}
+                self.outlier_reports[symbol][timeframe] = outlier_report
+                
+                # Validate data
+                df_clean, validation_report = DataValidator.validate_data(df)
+                
+                # Lưu báo cáo validate
+                if symbol not in self.validation_reports:
+                    self.validation_reports[symbol] = {}
+                self.validation_reports[symbol][timeframe] = validation_report
+                
+                if validation_report["status"] == "success":
+                    # Loại bỏ dữ liệu trùng lặp
+                    df_clean, removed_count = DataValidator.remove_duplicates(df_clean)
+                    if removed_count > 0:
+                        validation_report["fixes"].append(f"Đã loại bỏ {removed_count} bản ghi trùng lặp")
+                    
+                    # Add extra normalized features for ML
+                    df_clean = DataValidator.normalize_data(df_clean)
+                    
+                    return df_clean, validation_report
+                else:
+                    # Nếu dữ liệu không hợp lệ, trả về DataFrame rỗng và báo lỗi
+                    return pd.DataFrame(), validation_report
+            else:
+                return pd.DataFrame(), {"status": "error", "message": "Dữ liệu trống"}
+                
+        except Exception as e:
+            logger.error(f"Lỗi xử lý dữ liệu {symbol} ({timeframe}): {str(e)}")
+            return pd.DataFrame(), {"status": "error", "message": str(e)}
     
     @measure_execution_time
     async def process_multi_timeframe(self, symbol: str, timeframes: list = None) -> (dict, dict):
