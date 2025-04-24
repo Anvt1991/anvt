@@ -26,21 +26,19 @@ import io
 import logging
 import pickle
 import time
+import gc
 import warnings
 from functools import lru_cache, wraps
 from datetime import datetime, timedelta
 import asyncio
-from inspect import isawaitable
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import hashlib
 import json
-import inspect
 
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.constants import ParseMode
+from telegram import Update, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 import yfinance as yf
@@ -55,19 +53,21 @@ import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary, Index, func
+from sqlalchemy.pool import QueuePool
 
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neighbors import LocalOutlierFactor
 from prophet import Prophet
+import matplotlib.pyplot as plt
 import holidays
 import html
 from aiohttp import web
 import unittest
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -75,8 +75,6 @@ warnings.filterwarnings('ignore')
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# Use a fixed webhook secret token or generate one if needed
-WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "AnvietxoSecureWebhookToken2025")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")          # ví dụ: postgres://user:pass@hostname:port/dbname
 REDIS_URL = os.getenv("REDIS_URL")                # ví dụ: redis://:pass@hostname:port/0
@@ -93,16 +91,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(stream=sys.stdout),
-        logging.FileHandler("stock_bot.log", mode='a', encoding='utf-8')
+        logging.StreamHandler(),
+        logging.FileHandler("stock_bot.log", mode='a')
     ]
 )
 logger = logging.getLogger(__name__)
-
-# Ensure system can handle Unicode properly
-import sys
-sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace') if hasattr(sys.stdout, 'reconfigure') else None
-sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace') if hasattr(sys.stderr, 'reconfigure') else None
 
 # Cache expiration settings
 CACHE_EXPIRE_SHORT = 1800         # 30 phút cho dữ liệu ngắn hạn
@@ -152,40 +145,23 @@ def make_cache_key(prefix, params):
 class RedisManager:
     def __init__(self):
         try:
-            # Ensure Redis URL has the proper scheme
-            redis_url = REDIS_URL
-            
-            if not redis_url:
-                # Use a default local Redis URL if none is provided
-                redis_url = "redis://localhost:6379/0"
-                logger.info(f"Using default Redis URL: {redis_url}")
-            elif not redis_url.startswith(('redis://', 'rediss://', 'unix://')):
-                redis_url = f"redis://{redis_url}"
-                logger.info(f"Added 'redis://' prefix to Redis URL")
-                
             self.redis_client = redis.from_url(
-                redis_url,
+                REDIS_URL,
                 encoding="utf-8",
                 decode_responses=False,
                 socket_timeout=5.0,
                 socket_connect_timeout=5.0,
                 retry_on_timeout=True,
-                health_check_interval=30,
-                encoding_errors="replace"  # Handle encoding errors gracefully
+                health_check_interval=30
             )
             logger.info("Kết nối Redis thành công.")
         except Exception as e:
             logger.error(f"Lỗi kết nối Redis: {str(e)}")
-            self.redis_client = None
-            logger.warning("Continuing without Redis. Some features may not work correctly.")
+            raise
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def set(self, key, value, expire):
         try:
-            if self.redis_client is None:
-                logger.debug(f"Redis not available, skipping set for key: {key}")
-                return False
-                
             serialized_value = pickle.dumps(value)
             await self.redis_client.set(key, serialized_value, ex=expire)
             return True
@@ -196,10 +172,6 @@ class RedisManager:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def get(self, key):
         try:
-            if self.redis_client is None:
-                logger.debug(f"Redis not available, skipping get for key: {key}")
-                return None
-                
             data = await self.redis_client.get(key)
             if data:
                 return pickle.loads(data)
@@ -212,10 +184,6 @@ class RedisManager:
     async def delete(self, key):
         """Xóa một key khỏi cache"""
         try:
-            if self.redis_client is None:
-                logger.debug(f"Redis not available, skipping delete for key: {key}")
-                return False
-                
             await self.redis_client.delete(key)
             return True
         except Exception as e:
@@ -226,10 +194,6 @@ class RedisManager:
     async def invalidate_by_pattern(self, pattern):
         """Xóa tất cả các keys khớp với pattern"""
         try:
-            if self.redis_client is None:
-                logger.debug(f"Redis not available, skipping invalidate for pattern: {pattern}")
-                return False
-                
             cursor = b'0'
             while cursor:
                 cursor, keys = await self.redis_client.scan(cursor=cursor, match=pattern, count=100)
@@ -285,10 +249,6 @@ class TrainedModel(Base):
     )
 
 # Tối ưu kết nối database với connection pooling
-if not DATABASE_URL:
-    DATABASE_URL = "sqlite+aiosqlite:///./stock_bot.db"
-    logger.info(f"Using default SQLite database: {DATABASE_URL}")
-
 engine = create_async_engine(
     DATABASE_URL, 
     echo=False,
@@ -301,67 +261,19 @@ engine = create_async_engine(
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Error initializing database: {str(e)}")
-        logger.warning("Continuing without database initialization. Some features may not work correctly.")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 class DBManager:
     def __init__(self):
         self.Session = SessionLocal
-        self.connection_ok = True
-        
-        # Test the database connection
-        async def test_connection():
-            try:
-                async with self.Session() as session:
-                    await session.execute(select(1))
-                return True
-            except Exception as e:
-                logger.error(f"Database connection test failed: {str(e)}")
-                return False
-        
-        # Create an event loop if not already running
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If loop is running, we need to schedule the test
-                asyncio.create_task(self._set_connection_status())
-            else:
-                # If loop is not running yet, run the test directly
-                self.connection_ok = loop.run_until_complete(test_connection())
-        except Exception as e:
-            logger.error(f"Error testing database connection: {str(e)}")
-            self.connection_ok = False
-    
-    async def _set_connection_status(self):
-        try:
-            async with self.Session() as session:
-                await session.execute(select(1))
-            self.connection_ok = True
-        except Exception as e:
-            logger.error(f"Database connection test failed: {str(e)}")
-            self.connection_ok = False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def is_user_approved(self, user_id) -> bool:
-        # Always approve the admin
-        if str(user_id) == ADMIN_ID:
-            return True
-            
-        # If the database connection is not okay, we can't check
-        if not self.connection_ok:
-            logger.warning(f"Database connection not available, can't verify user {user_id}")
-            # Default to not approved when DB is unavailable
-            return False
-            
         try:
             async with self.Session() as session:
                 result = await session.execute(select(ApprovedUser).filter_by(user_id=str(user_id)))
-                return result.scalar_one_or_none() is not None
+                return result.scalar_one_or_none() is not None or str(user_id) == ADMIN_ID
         except Exception as e:
             logger.error(f"Lỗi kiểm tra người dùng: {str(e)}")
             return False
@@ -415,13 +327,6 @@ class DBManager:
     async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
         try:
             today = datetime.now().strftime("%Y-%m-%d")
-            
-            # Sanitize report text to ensure it's properly encoded
-            sanitized_report = report
-            if isinstance(report, str):
-                # Handle any potential encoding issues with Vietnamese text
-                sanitized_report = report.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-            
             async with self.Session() as session:
                 # Kiểm tra xem đã có báo cáo cho ngày hôm nay chưa
                 existing_report = await session.execute(
@@ -432,7 +337,7 @@ class DBManager:
                 
                 if existing_report:
                     # Cập nhật báo cáo hiện tại
-                    existing_report.report = sanitized_report
+                    existing_report.report = report
                     existing_report.close_today = close_today
                     existing_report.close_yesterday = close_yesterday
                     existing_report.timestamp = datetime.now()
@@ -441,7 +346,7 @@ class DBManager:
                     new_report = ReportHistory(
                         symbol=symbol,
                         date=today,
-                        report=sanitized_report,
+                        report=report,
                         close_today=close_today,
                         close_yesterday=close_yesterday
                     )
@@ -464,9 +369,7 @@ db = DBManager()
 class ModelDBManager:
     def __init__(self):
         self.Session = SessionLocal
-        # Share the connection status with DBManager
-        # since both use the same database connection
-        self.connection_ok = db_manager.connection_ok if 'db_manager' in globals() else True
+        self.db = DBManager()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def store_trained_model(self, symbol: str, model_type: str, model, performance: float = None):
@@ -741,10 +644,8 @@ def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
     # Lọc ra ngày trong tuần (1-5: Thứ Hai - Thứ Sáu)
     df = df[df.index.dayofweek < 5]
     
-    # Lọc bỏ các ngày nghỉ lễ Việt Nam sử dụng hàm có sẵn
+    # Lọc bỏ các ngày nghỉ lễ Việt Nam
     years = df.index.year.unique().tolist()
-    
-    # Dùng thư viện holidays trực tiếp để tránh tạo thêm instance
     vietnam_holidays = holidays.VN(years=years)
     
     # Tạo mặt nạ để lọc các ngày không phải ngày lễ
@@ -866,10 +767,7 @@ class DataLoader:
             outlier_report = f"Phát hiện {len(outliers)} điểm bất thường:\n"
             for idx, row in outliers.iterrows():
                 date_str = idx.strftime('%Y-%m-%d') if isinstance(idx, pd.Timestamp) else str(idx)
-                methods_detected = []
-                for method, outliers_series in outlier_methods.items():
-                    if idx in outliers_series.index and outliers_series.loc[idx]:
-                        methods_detected.append(method)
+                methods_detected = [method for method, outliers in outlier_methods.items() if outliers.loc[idx]]
                 outlier_report += (
                     f"- Ngày {date_str}: Giá {row['close']} (Z-score: {row['z_score']:.2f}, "
                     f"Phát hiện bởi: {', '.join(methods_detected)})\n"
@@ -932,12 +830,9 @@ class DataLoader:
                 df = await self._download_yahoo_data(yahoo_symbol, num_candles, period, interval)
             else:
                 # Sử dụng VNStock cho cổ phiếu Việt Nam
-                def fetch_vnstock():
+                async def fetch_vnstock():
                     if timeframe == '1D':
-                        # Import trực tiếp từ vnstock module
-                        from vnstock import stock_historical_data
-                        
-                        return stock_historical_data(
+                        return self.vnstock.stock_historical_data(
                             symbol=symbol, 
                             start_date=(datetime.now() - timedelta(days=num_candles*2)).strftime('%Y-%m-%d'),
                             end_date=datetime.now().strftime('%Y-%m-%d')
@@ -946,19 +841,6 @@ class DataLoader:
                         raise ValueError(f"VNStock không hỗ trợ khung thời gian {timeframe}")
                 
                 df = await run_in_thread(fetch_vnstock)
-                
-                # Đảm bảo df không phải là coroutine
-                if isawaitable(df):
-                    try:
-                        df = await df
-                    except Exception as e:
-                        logger.error(f"Lỗi khi await DataFrame từ VNStock cho {symbol}: {str(e)}")
-                        return pd.DataFrame(), f"Lỗi: {str(e)}"
-                
-                # Kiểm tra kết quả có phải DataFrame hay không
-                if df is None or not hasattr(df, 'empty'):
-                    logger.warning(f"Kết quả từ VNStock không phải DataFrame cho {symbol}")
-                    return pd.DataFrame(), "Kết quả không phải DataFrame"
                 
                 # Preprocessing for VNStock data
                 if not df.empty:
@@ -1037,18 +919,6 @@ class DataLoader:
             
             df = await run_in_thread(fetch_yf)
             
-            # Đảm bảo df không phải là coroutine
-            if isawaitable(df):
-                try:
-                    df = await df
-                except Exception as e:
-                    logger.error(f"Lỗi khi await DataFrame từ Yahoo cho {symbol}: {str(e)}")
-                    return pd.DataFrame()
-            
-            if df is None or not hasattr(df, 'empty'):
-                logger.warning(f"Kết quả từ Yahoo không phải DataFrame cho {symbol}")
-                return pd.DataFrame()
-                
             if df.empty:
                 logger.warning(f"Yahoo Finance không trả về dữ liệu cho {symbol}")
                 return pd.DataFrame()
@@ -1057,15 +927,6 @@ class DataLoader:
             df.columns = df.columns.str.lower()
             # Keep only OHLCV columns
             required_cols = ['open', 'high', 'low', 'close', 'volume']
-            
-            # Kiểm tra trường hợp chỉ số (có thể không có volume)
-            if is_index(symbol) and 'volume' not in df.columns:
-                # Đối với chỉ số, không bắt buộc phải có volume
-                required_cols = [col for col in required_cols if col != 'volume']
-                logger.info(f"Bỏ qua cột volume cho chỉ số {symbol}")
-                # Thêm cột volume giả để đảm bảo tính nhất quán
-                df['volume'] = 0
-            
             df = df[[col for col in required_cols if col in df.columns]]
             
             # Take only the last num_candles
@@ -1092,105 +953,16 @@ class DataLoader:
             result = {}
             try:
                 if not is_index(symbol):
-                    try:
-                        # Thử import theo cách mới của vnstock 3.2.4+
-                        from vnstock import stock_company_profile, stock_financial_ratio, financial_report
-                        
-                        # Company overview - sử dụng stock_company_profile thay cho company_overview
-                        try:
-                            overview = stock_company_profile(symbol=symbol)
-                            # Sanitize data to ensure it's JSON-serializable and handle encoding issues
-                            overview_sanitized = {}
-                            for key, value in overview.items():
-                                if isinstance(value, str):
-                                    # Handle any potential encoding issues with Vietnamese text
-                                    overview_sanitized[key] = value.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-                                else:
-                                    overview_sanitized[key] = value
-                            result['overview'] = overview_sanitized
-                        except Exception as e:
-                            logger.error(f"Lỗi lấy stock_company_profile cho {symbol}: {str(e)}")
-                            result['overview'] = {'symbol': symbol, 'error': 'Failed to retrieve company overview'}
-                        
-                        # Financial ratios
-                        try:
-                            ratios = stock_financial_ratio(symbol=symbol, report_type='yearly', report_range=3)
-                            result['ratios'] = ratios
-                        except Exception as e:
-                            logger.error(f"Lỗi lấy stock_financial_ratio cho {symbol}: {str(e)}")
-                            result['ratios'] = pd.DataFrame()  # Empty DataFrame thay vì None
-                        
-                        # Financial reports
-                        try:
-                            income = financial_report(symbol=symbol, report_type='IncomeStatement', report_range=3)
-                            result['income_statement'] = income
-                        except Exception as e:
-                            logger.error(f"Lỗi lấy financial_report (income) cho {symbol}: {str(e)}")
-                            result['income_statement'] = pd.DataFrame()
-                            
-                        try:
-                            balance = financial_report(symbol=symbol, report_type='BalanceSheet', report_range=3)
-                            result['balance_sheet'] = balance
-                        except Exception as e:
-                            logger.error(f"Lỗi lấy financial_report (balance) cho {symbol}: {str(e)}")
-                            result['balance_sheet'] = pd.DataFrame()
-                            
-                        try:
-                            cash = financial_report(symbol=symbol, report_type='CashFlow', report_range=3)
-                            result['cash_flow'] = cash
-                        except Exception as e:
-                            logger.error(f"Lỗi lấy financial_report (cash) cho {symbol}: {str(e)}")
-                            result['cash_flow'] = pd.DataFrame()
-                    except ImportError as ie:
-                        logger.error(f"Lỗi import vnstock API mới: {str(ie)}, thử API cũ")
-                        # Fallback to old API (for backward compatibility)
-                        try:
-                            from vnstock import company_overview, financial_ratio, income_statement, balance_sheet, cash_flow
-                            
-                            # Original code with old API...
-                            # Company overview
-                            try:
-                                overview = company_overview(symbol=symbol)
-                                # Sanitize data
-                                overview_sanitized = {}
-                                for key, value in overview.items():
-                                    if isinstance(value, str):
-                                        overview_sanitized[key] = value.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-                                    else:
-                                        overview_sanitized[key] = value
-                                result['overview'] = overview_sanitized
-                            except Exception as e:
-                                logger.error(f"Lỗi lấy company_overview cho {symbol}: {str(e)}")
-                                result['overview'] = {'symbol': symbol, 'error': 'Failed to retrieve company overview'}
-                            
-                            # Financial ratios
-                            try:
-                                ratios = financial_ratio(symbol=symbol, report_type='yearly', report_range=3)
-                                result['ratios'] = ratios
-                            except Exception as e:
-                                logger.error(f"Lỗi lấy financial_ratio cho {symbol}: {str(e)}")
-                                result['ratios'] = pd.DataFrame()
-                            
-                            # Financial reports
-                            try:
-                                result['income_statement'] = income_statement(symbol=symbol, report_type='yearly', report_range=3)
-                            except Exception as e:
-                                logger.error(f"Lỗi lấy income_statement cho {symbol}: {str(e)}")
-                                result['income_statement'] = pd.DataFrame()
-                                
-                            try:
-                                result['balance_sheet'] = balance_sheet(symbol=symbol, report_type='yearly', report_range=3)
-                            except Exception as e:
-                                logger.error(f"Lỗi lấy balance_sheet cho {symbol}: {str(e)}")
-                                result['balance_sheet'] = pd.DataFrame()
-                                
-                            try:
-                                result['cash_flow'] = cash_flow(symbol=symbol, report_type='yearly', report_range=3)
-                            except Exception as e:
-                                logger.error(f"Lỗi lấy cash_flow cho {symbol}: {str(e)}")
-                                result['cash_flow'] = pd.DataFrame()
-                        except Exception as e:
-                            logger.error(f"Cả API cũ và mới đều không hoạt động: {str(e)}")
+                    # Company overview
+                    result['overview'] = self.vnstock.company_overview(symbol)
+                    
+                    # Financial ratios
+                    result['ratios'] = self.vnstock.financial_ratio(symbol, 'yearly', 3)
+                    
+                    # Financial reports
+                    result['income_statement'] = self.vnstock.income_statement(symbol, 'yearly', 3)
+                    result['balance_sheet'] = self.vnstock.balance_sheet(symbol, 'yearly', 3)
+                    result['cash_flow'] = self.vnstock.cash_flow(symbol, 'yearly', 3)
                 else:
                     # For indices
                     result['overview'] = {'symbol': symbol, 'type': 'index'}
@@ -1200,14 +972,6 @@ class DataLoader:
             return result
         
         fundamental_data = await run_in_thread(fetch)
-        
-        # Đảm bảo fundamental_data không phải là coroutine
-        if isawaitable(fundamental_data):
-            try:
-                fundamental_data = await fundamental_data
-            except Exception as e:
-                logger.error(f"Lỗi khi await fundamental_data từ Yahoo cho {symbol}: {str(e)}")
-                return {}
         
         # Cache the result
         await redis_manager.set(cache_key, fundamental_data, CACHE_EXPIRE_LONG)
@@ -1227,74 +991,58 @@ class DataLoader:
         def fetch():
             result = {}
             try:
-                # Safely fetch data from yfinance
-                ticker = yf.Ticker(symbol)
+                # Điều chỉnh symbol cho Yahoo Finance
+                yahoo_symbol = symbol
+                if symbol.upper() == 'VNINDEX':
+                    yahoo_symbol = '^VNINDEX'
+                elif symbol.upper() == 'VN30':
+                    yahoo_symbol = '^VN30'
+                elif symbol.upper() == 'HNX':
+                    yahoo_symbol = '^HNX'
+                elif not symbol.startswith('^'):
+                    yahoo_symbol = f"{symbol}.VN"
                 
-                # Basic info
-                info = ticker.info
-                if info:
-                    # Convert types to ensure it's JSON-serializable
-                    info_serializable = {}
-                    for key, value in info.items():
-                        if isinstance(value, (str, int, float, bool, type(None))):
-                            info_serializable[key] = value
-                        else:
-                            # Convert non-standard types to string
-                            info_serializable[key] = str(value)
-                    result['info'] = info_serializable
+                ticker = yf.Ticker(yahoo_symbol)
                 
-                # Financials (some may not be available for non-US stocks)
-                try:
+                if is_index(symbol):
+                    result = {'info': {'shortName': symbol, 'type': 'index'}}
+                else:
+                    # Basic info
+                    result['info'] = ticker.info
+                    
+                    # Financials
+                    if 'financials' not in result:
+                        result['financials'] = {}
+                    
                     # Balance sheet
-                    balance_sheet = ticker.balance_sheet
-                    if not balance_sheet.empty:
-                        result['balance_sheet'] = balance_sheet
-                except Exception as e:
-                    logger.warning(f"Không lấy được balance sheet cho {symbol}: {str(e)}")
-                
-                try:
+                    try:
+                        result['financials']['balance_sheet'] = ticker.balance_sheet
+                    except:
+                        result['financials']['balance_sheet'] = None
+                    
                     # Income statement
-                    income_stmt = ticker.income_stmt
-                    if not income_stmt.empty:
-                        result['income_stmt'] = income_stmt
-                except Exception as e:
-                    logger.warning(f"Không lấy được income statement cho {symbol}: {str(e)}")
-                
-                try:
+                    try:
+                        result['financials']['income_stmt'] = ticker.income_stmt
+                    except:
+                        result['financials']['income_stmt'] = None
+                    
                     # Cash flow
-                    cash_flow = ticker.cashflow
-                    if not cash_flow.empty:
-                        result['cash_flow'] = cash_flow
-                except Exception as e:
-                    logger.warning(f"Không lấy được cashflow cho {symbol}: {str(e)}")
-                
-                # News (if available)
-                try:
-                    news = ticker.news
-                    if news:
-                        result['news'] = news[:5]  # Limit to 5 news items
-                except Exception as e:
-                    logger.warning(f"Không lấy được tin tức cho {symbol}: {str(e)}")
-                
+                    try:
+                        result['financials']['cash_flow'] = ticker.cashflow
+                    except:
+                        result['financials']['cash_flow'] = None
             except Exception as e:
-                logger.error(f"Lỗi lấy dữ liệu Yahoo Finance cho {symbol}: {str(e)}")
+                logger.error(f"Lỗi lấy dữ liệu cơ bản Yahoo Finance cho {symbol}: {str(e)}")
+                result = {'error': str(e)}
+            
+            return result
                 
-                return result
-                
-            fundamental_data = await run_in_thread(fetch)
-            
-            # Đảm bảo fundamental_data không phải là coroutine
-            if isawaitable(fundamental_data):
-                try:
-                    fundamental_data = await fundamental_data
-                except Exception as e:
-                    logger.error(f"Lỗi khi await fundamental_data từ Yahoo cho {symbol}: {str(e)}")
-                    return {}
-            
-            # Cache the result
-            await redis_manager.set(cache_key, fundamental_data, CACHE_EXPIRE_LONG)
-            
-            return fundamental_data
+        fundamental_data = await run_in_thread(fetch)
+        
+        # Cache the result
+        await redis_manager.set(cache_key, fundamental_data, CACHE_EXPIRE_LONG)
+        
+        return fundamental_data
     
     async def get_fundamental_data(self, symbol: str) -> dict:
         """Tải dữ liệu cơ bản của mã chứng khoán"""
@@ -1323,54 +1071,53 @@ class DataPipeline:
     @measure_execution_time
     async def process_data(self, symbol: str, timeframe: str = DEFAULT_TIMEFRAME, num_candles: int = DEFAULT_CANDLES) -> (pd.DataFrame, dict):
         """
-        Xử lý dữ liệu thô, trả về DataFrame đã làm sạch và báo cáo
+        Quy trình xử lý dữ liệu hoàn chỉnh: tải, validate, phát hiện outlier và chuẩn hóa
+        Trả về DataFrame đã xử lý và báo cáo xử lý
         """
-        try:
-            # Load raw data
-            df, outlier_report = await self.data_loader.load_data(symbol, timeframe, num_candles)
-            
-            # Đảm bảo df không phải là coroutine
-            if isawaitable(df):
-                try:
-                    df = await df
-                except Exception as e:
-                    logger.error(f"Lỗi khi await DataFrame cho {symbol} ({timeframe}): {str(e)}")
-                    return pd.DataFrame(), {"status": "error", "message": str(e)}
-            
-            # Validate and clean data
-            if df is not None and hasattr(df, 'empty') and not df.empty:
-                # Lưu báo cáo outlier
-                if symbol not in self.outlier_reports:
-                    self.outlier_reports[symbol] = {}
-                self.outlier_reports[symbol][timeframe] = outlier_report
-                
-                # Validate data
-                df_clean, validation_report = DataValidator.validate_data(df)
-                
-                # Lưu báo cáo validate
-                if symbol not in self.validation_reports:
-                    self.validation_reports[symbol] = {}
-                self.validation_reports[symbol][timeframe] = validation_report
-                
-                if validation_report["status"] == "success":
-                    # Loại bỏ dữ liệu trùng lặp
-                    df_clean, removed_count = DataValidator.remove_duplicates(df_clean)
-                    if removed_count > 0:
-                        validation_report["fixes"].append(f"Đã loại bỏ {removed_count} bản ghi trùng lặp")
-                    
-                    # Add extra normalized features for ML
-                    df_clean = DataValidator.normalize_data(df_clean)
-                    
-                    return df_clean, validation_report
-                else:
-                    # Nếu dữ liệu không hợp lệ, trả về DataFrame rỗng và báo lỗi
-                    return pd.DataFrame(), validation_report
-            else:
-                return pd.DataFrame(), {"status": "error", "message": "Dữ liệu trống"}
-                
-        except Exception as e:
-            logger.error(f"Lỗi xử lý dữ liệu {symbol} ({timeframe}): {str(e)}")
-            return pd.DataFrame(), {"status": "error", "message": str(e)}
+        # 1. Tải dữ liệu
+        df, outlier_report = await self.data_loader.load_data(symbol, timeframe, num_candles)
+        
+        # Lưu báo cáo outlier
+        self.outlier_reports[symbol] = outlier_report
+        
+        if df.empty:
+            return df, {"status": "error", "message": "Không thể tải dữ liệu"}
+        
+        # 2. Validate và loại bỏ trùng lặp
+        df_validated, validation_report = self.validator.validate_data(df)
+        df_validated, removed_count = self.validator.remove_duplicates(df_validated)
+        
+        # Cập nhật báo cáo về số lượng bản ghi đã loại bỏ
+        if removed_count > 0:
+            validation_report["fixes"].append(f"Đã loại bỏ {removed_count} bản ghi trùng lặp")
+        
+        # Lưu báo cáo validation
+        self.validation_reports[symbol] = validation_report
+        
+        if validation_report["status"] == "error":
+            return df_validated, validation_report
+        
+        # 3. Lọc các ngày giao dịch
+        df_validated = filter_trading_days(df_validated)
+        
+        # 4. Chuẩn hóa dữ liệu cho ML
+        df_normalized = self.validator.normalize_data(df_validated)
+        
+        # 5. Đảm bảo sắp xếp theo thời gian
+        df_normalized = df_normalized.sort_index()
+        
+        # Tổng hợp báo cáo xử lý
+        processing_report = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "original_rows": len(df),
+            "processed_rows": len(df_normalized),
+            "validation": validation_report,
+            "outliers": outlier_report,
+            "status": "success"
+        }
+        
+        return df_normalized, processing_report
     
     @measure_execution_time
     async def process_multi_timeframe(self, symbol: str, timeframes: list = None) -> (dict, dict):
@@ -1396,15 +1143,9 @@ class DataPipeline:
             else:
                 num_candles = DEFAULT_CANDLES
             
-            try:
-                df, report = await self.process_data(symbol, tf, num_candles)
-                results[tf] = df
-                reports[tf] = report
-            except Exception as e:
-                logger.error(f"Lỗi tải dữ liệu {symbol} ({tf}): {str(e)}")
-                # Tạo DataFrame trống trong trường hợp lỗi
-                results[tf] = pd.DataFrame()
-                reports[tf] = {"status": "error", "message": str(e)}
+            df, report = await self.process_data(symbol, tf, num_candles)
+            results[tf] = df
+            reports[tf] = report
         
         return results, reports
     
@@ -1420,30 +1161,13 @@ class DataPipeline:
         fundamental_data = await self.data_loader.get_fundamental_data(symbol)
         
         # Tạo báo cáo tổng hợp
-        # Kiểm tra dữ liệu một cách an toàn
-        has_data = False
-        for df_key, df in dfs.items():
-            # Nếu df là một coroutine, cần await nó trước
-            if isawaitable(df):
-                try:
-                    df = await df
-                    dfs[df_key] = df  # Cập nhật lại dictionary với giá trị đã await
-                except Exception as e:
-                    logger.error(f"Lỗi khi await coroutine cho {df_key}: {str(e)}")
-                    continue
-            
-            # Kiểm tra DataFrame có dữ liệu
-            if df is not None and hasattr(df, 'empty') and not df.empty:
-                has_data = True
-                break
-                
         summary_report = {
             "symbol": symbol,
             "timeframes_processed": list(dfs.keys()),
             "fundamental_data_available": len(fundamental_data) > 0,
             "outlier_reports": self.outlier_reports.get(symbol, ""),
             "validation_reports": self.validation_reports.get(symbol, {}),
-            "status": "success" if has_data else "error"
+            "status": "success" if not all(df.empty for df in dfs.values()) else "error"
         }
         
         return dfs, fundamental_data, summary_report
@@ -1537,32 +1261,24 @@ class TechnicalAnalyzer:
         return result_df
     
     @measure_execution_time
-    async def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
+    def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
         """Tính toán chỉ báo cho nhiều khung thời gian song song"""
         results = {}
         
         async def calculate_for_df(timeframe, df):
-            # Đảm bảo không phải là coroutine
-            if isawaitable(df):
-                try:
-                    df = await df
-                except Exception as e:
-                    logger.error(f"Lỗi khi await DataFrame cho {timeframe}: {str(e)}")
-                    return timeframe, pd.DataFrame()
-            
-            # Kiểm tra DataFrame không rỗng
-            if df is not None and hasattr(df, 'empty') and not df.empty:
+            if not df.empty:
                 return timeframe, self.calculate_indicators(df)
-            return timeframe, pd.DataFrame()  # Trả về DataFrame rỗng trong trường hợp lỗi
+            return timeframe, df
         
-        # Xử lý từng khung thời gian
-        tasks = []
-        for timeframe, df in dfs.items():
-            tasks.append(calculate_for_df(timeframe, df))
+        # Sử dụng asyncio.gather để tính toán song song
+        async def process_all():
+            tasks = [calculate_for_df(timeframe, df) for timeframe, df in dfs.items()]
+            result_list = await asyncio.gather(*tasks)
+            return {timeframe: df for timeframe, df in result_list}
         
-        # Đợi tất cả các tác vụ hoàn thành
-        result_list = await asyncio.gather(*tasks)
-        results = {timeframe: df for timeframe, df in result_list}
+        # Chạy bất đồng bộ nhưng trong thread hiện tại
+        loop = asyncio.get_event_loop()
+        results = loop.run_until_complete(process_all())
         
         return results
 
@@ -2062,13 +1778,9 @@ async def get_training_symbols() -> list:
         # Thu thập từ VNStock
         def fetch_vn30():
             try:
-                # Import trực tiếp từ vnstock module
-                from vnstock import listing_companies
-                
-                # Sử dụng listing_companies thay vì ticker_industry
-                return listing_companies()
-            except Exception as e:
-                logger.error(f"Lỗi khi lấy danh sách công ty: {str(e)}")
+                vnstock = Vnstock()
+                return vnstock.ticker_industry()
+            except:
                 return None
         
         industry_data = await run_in_thread(fetch_vn30)
@@ -2156,41 +1868,29 @@ class AIAnalyzer:
     
     def __init__(self):
         self.db_manager = DBManager()
-        
-        # Check if Gemini API key is set
-        self.gemini_available = bool(GEMINI_API_KEY) and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY"
-        
-        if self.gemini_available:
-            self.model = genai.GenerativeModel('gemini-pro')
-            self.safety_settings = [
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                }
-            ]
-        else:
-            logger.warning("AIAnalyzer initialized without Gemini API. Will use basic analysis only.")
-            self.model = None
-            self.safety_settings = None
+        self.model = genai.GenerativeModel('gemini-pro')
+        self.safety_settings = [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+            }
+        ]
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def generate_content(self, prompt):
         """Tạo nội dung AI với Gemini API"""
-        if not self.gemini_available:
-            return "AI analysis not available (Gemini API key not set)"
-            
         try:
             response = await run_in_thread(
                 lambda: self.model.generate_content(
@@ -2358,21 +2058,15 @@ class AIAnalyzer:
             # Thêm cảnh báo nếu phát hiện dữ liệu bất thường
             outlier_report = outlier_reports.get(symbol, "")
             if outlier_report and "Phát hiện" in outlier_report:
-                # Sanitize outlier report text
-                outlier_report = outlier_report.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
                 report_parts.append(f"⚠️ *CẢNH BÁO DỮ LIỆU BẤT THƯỜNG*\n{outlier_report}\n")
             
             # Phân tích giá
             price_analysis = self.analyze_price_action(df_daily)
-            # Sanitize price analysis text
-            price_analysis = price_analysis.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
             report_parts.append(f"*PHÂN TÍCH GIÁ*\n{price_analysis}\n")
             
             # Phân tích cơ bản
             if fundamental_data:
                 fundamental_analysis = deep_fundamental_analysis(fundamental_data)
-                # Sanitize fundamental analysis text
-                fundamental_analysis = fundamental_analysis.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
                 report_parts.append(f"*PHÂN TÍCH CƠ BẢN*\n{fundamental_analysis}\n")
             
             # Tin tức
@@ -2381,9 +2075,7 @@ class AIAnalyzer:
                 if news_items:
                     news_section = "*TIN TỨC MỚI NHẤT*\n"
                     for item in news_items:
-                        # Sanitize news title
-                        title = item['title'].encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-                        news_section += f"• [{title}]({item['link']})\n"
+                        news_section += f"• [{item['title']}]({item['link']})\n"
                     report_parts.append(f"{news_section}\n")
             except Exception as e:
                 logger.error(f"Lỗi lấy tin tức: {str(e)}")
@@ -2433,14 +2125,12 @@ class AIAnalyzer:
             except Exception as e:
                 logger.error(f"Lỗi tạo dự báo: {str(e)}")
             
-            # Kết hợp tất cả phần báo cáo và đảm bảo xử lý Unicode
-            final_report = '\n'.join(report_parts)
-            # Final sanitization of the entire report
-            final_report = final_report.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
-            
             # Lưu báo cáo vào lịch sử
             if last_price is not None and prev_price is not None:
-                await self.save_report_history(symbol, final_report, last_price, prev_price)
+                await self.save_report_history(symbol, '\n'.join(report_parts), last_price, prev_price)
+            
+            # Kết hợp tất cả phần báo cáo
+            final_report = '\n'.join(report_parts)
             
             return final_report
         except Exception as e:
@@ -2449,12 +2139,6 @@ class AIAnalyzer:
 
 # ---------- TELEGRAM COMMANDS ----------
 async def notify_admin_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check if update is None (called from main function)
-    if update is None:
-        # Just log that we're starting the bot
-        logger.info("Bot started successfully")
-        return
-        
     user = update.message.from_user
     user_id = user.id
     if not await is_user_approved(user_id):
@@ -2529,7 +2213,7 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         # Tính toán chỉ báo kỹ thuật
-        dfs_with_indicators = await analyzer.calculate_multi_timeframe_indicators(dfs)
+        dfs_with_indicators = analyzer.calculate_multi_timeframe_indicators(dfs)
         
         # Tạo báo cáo
         report = await ai_analyzer.generate_report(
@@ -2585,20 +2269,8 @@ async def main():
             level=logging.INFO
         )
         
-        # Check if Telegram token is set correctly
-        if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
-            logger.error("Telegram token not set. Please set the TELEGRAM_TOKEN environment variable.")
-            logger.warning("Running in limited mode without Telegram bot integration.")
-            
-            # Instead of returning, you could add code here to run in a "headless" mode
-            # where the bot doesn't connect to Telegram but performs other tasks
-            
-            # For now, we'll just show that the bot is operational but limited
-            logger.info("Bot started successfully in limited mode (no Telegram integration)")
-            return
-        
         # Mode bot: webhook hoặc polling
-        use_webhook = os.getenv('USE_WEBHOOK', 'True').lower() == 'true'
+        use_webhook = os.getenv('USE_WEBHOOK', 'False').lower() == 'true'
         mode = os.getenv('MODE', 'production').lower()
         port = int(os.getenv('PORT', 8443))
         
@@ -2636,7 +2308,7 @@ async def main():
             # Kiểm thử sinh báo cáo AI
             logger.info("Đang kiểm thử sinh báo cáo AI...")
             dfs, fundamental_data, _ = await data_pipeline.get_fundamental_and_technical_data(symbol)
-            dfs_with_indicators = await analyzer.calculate_multi_timeframe_indicators(dfs)
+            dfs_with_indicators = analyzer.calculate_multi_timeframe_indicators(dfs)
             
             ai_analyzer = AIAnalyzer()
             report = await ai_analyzer.generate_report(
@@ -2665,116 +2337,99 @@ async def main():
         application.add_handler(CommandHandler("getid", get_id))
         application.add_handler(CommandHandler("approve", approve_user))
         
-        # Ghi log khởi động bot (passing None as update since this is initialization, not a user update)
+        # Gửi thông báo tới quản trị viên
         await notify_admin_new_user(None, application)
         
-        # Chọn chế độ chạy - luôn sử dụng webhook
-        # Webhook mode
-        if RENDER_EXTERNAL_URL:
-            webhook_path = '/telegram/webhook'
-            webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
-        else:
-            webhook_path = '/telegram/webhook'
-            webhook_url = os.getenv('WEBHOOK_URL', f'https://example.com:{port}{webhook_path}')
-        webhook_listen = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
-        webhook_port = port
-        
-        logger.info(f"Starting webhook on {webhook_url}")
-        await application.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET_TOKEN)
-        
-        # Setup aiohttp webapp
-        app = web.Application()
-        
-        # Telegram webhook handler
-        async def telegram_webhook_handler(request):
-            try:
-                # Verify the Telegram secret token for security
-                secret_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-                if secret_header != WEBHOOK_SECRET_TOKEN:
-                    logger.warning(f"Unauthorized webhook request from {request.remote}")
-                    return web.Response(status=403)
-                    
-                request_body_json = await request.json()
-                update = Update.de_json(request_body_json, application.bot)
-                # Initialize the application before processing updates
-                await application.initialize()
-                await application.process_update(update)
-                return web.Response()
-            except Exception as e:
-                logger.error(f"Error in webhook handler: {str(e)}")
-                return web.Response(status=500)
-        
-        # Health check endpoint
-        async def health_check_handler(request):
-            # Kiểm tra Redis và DB để đảm bảo các thành phần hoạt động
-            try:
-                # Kiểm tra Redis availability
-                redis_health = False
-                if redis_manager.redis_client is not None:
+        # Chọn chế độ chạy
+        if use_webhook:
+            # Webhook mode
+            webhook_url = os.getenv('WEBHOOK_URL', f'https://example.com:{port}/{TELEGRAM_TOKEN}')
+            webhook_listen = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
+            webhook_port = port
+            
+            logger.info(f"Starting webhook on {webhook_url}")
+            await application.bot.set_webhook(url=webhook_url)
+            
+            # Setup aiohttp webapp
+            app = web.Application()
+            
+            # Telegram webhook handler
+            async def telegram_webhook_handler(request):
+                if request.match_info.get('token') == TELEGRAM_TOKEN:
+                    try:
+                        request_body_json = await request.json()
+                        update = Update.de_json(request_body_json, application.bot)
+                        await application.process_update(update)
+                        return web.Response()
+                    except Exception as e:
+                        logger.error(f"Error in webhook handler: {str(e)}")
+                        return web.Response(status=500)
+                return web.Response(status=403)
+            
+            # Health check endpoint
+            async def health_check_handler(request):
+                # Kiểm tra Redis và DB để đảm bảo các thành phần hoạt động
+                try:
+                    # Kiểm tra Redis
                     redis_key = "health_check"
                     await redis_manager.set(redis_key, True, 10)
                     redis_value = await redis_manager.get(redis_key)
                     redis_health = redis_value is True
-                
-                # Kiểm tra DB
-                db_health = await db_manager.is_user_approved("admin")
-                
-                return web.json_response({
-                    "status": "healthy" if redis_health and db_health is not None else "degraded",
-                    "redis": "ok" if redis_health else "disabled" if redis_manager.redis_client is None else "error",
-                    "database": "ok" if db_health is not None else "error",
-                    "uptime": time.time() - START_TIME
-                })
-            except Exception as e:
-                logger.error(f"Health check error: {str(e)}")
-                return web.json_response({
-                    "status": "error",
-                    "message": str(e)
-                }, status=500)
-        
-        # Root path handler
-        async def root_handler(request):
-            return web.json_response({
-                "status": "ok",
-                "service": "Stock Bot API",
-                "version": "1.0.0"
-            })
-        
-        # Middleware để log các request
-        @web.middleware
-        async def logging_middleware(request, handler):
-            start_time = time.time()
-            try:
-                response = await handler(request)
-                end_time = time.time()
-                logger.info(f"Request {request.method} {request.path} completed in {end_time - start_time:.3f}s with status {response.status}")
-                return response
-            except Exception as e:
-                end_time = time.time()
-                logger.error(f"Request {request.method} {request.path} failed in {end_time - start_time:.3f}s: {str(e)}")
-                raise
-        
-        # Áp dụng middleware
-        app.middlewares.append(logging_middleware)
-        
-        # Đăng ký các route - use the webhook_path variable
-        app.router.add_post(webhook_path, telegram_webhook_handler)
-        app.router.add_get('/health', health_check_handler)
-        app.router.add_get('/', root_handler)
-        
-        # Bắt đầu server
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, webhook_listen, webhook_port)
-        await site.start()
-        
-        # Giữ ứng dụng chạy
-        while True:
-            # Mỗi 3 giờ huấn luyện mô hình tự động nếu được bật
-            if os.getenv('AUTO_TRAIN', 'False').lower() == 'true':
-                await auto_train_models()
-                
-            await asyncio.sleep(3 * 60 * 60)  # 3 giờ
+                    
+                    # Kiểm tra DB
+                    db_health = await db_manager.is_user_approved("admin")
+                    
+                    return web.json_response({
+                        "status": "healthy" if redis_health and db_health is not None else "degraded",
+                        "redis": "ok" if redis_health else "error",
+                        "database": "ok" if db_health is not None else "error",
+                        "uptime": time.time() - START_TIME
+                    })
+                except Exception as e:
+                    logger.error(f"Health check error: {str(e)}")
+                    return web.json_response({
+                        "status": "error",
+                        "message": str(e)
+                    }, status=500)
+            
+            # Middleware để log các request
+            @web.middleware
+            async def logging_middleware(request, handler):
+                start_time = time.time()
+                try:
+                    response = await handler(request)
+                    end_time = time.time()
+                    logger.info(f"Request {request.method} {request.path} completed in {end_time - start_time:.3f}s with status {response.status}")
+                    return response
+                except Exception as e:
+                    end_time = time.time()
+                    logger.error(f"Request {request.method} {request.path} failed in {end_time - start_time:.3f}s: {str(e)}")
+                    raise
+            
+            # Áp dụng middleware
+            app.middlewares.append(logging_middleware)
+            
+            # Đăng ký các route
+            app.router.add_post(f'/{TELEGRAM_TOKEN}', telegram_webhook_handler)
+            app.router.add_get('/health', health_check_handler)
+            
+            # Bắt đầu server
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, webhook_listen, webhook_port)
+            await site.start()
+            
+            # Giữ ứng dụng chạy
+            while True:
+                # Mỗi 3 giờ huấn luyện mô hình tự động nếu được bật
+                if os.getenv('AUTO_TRAIN', 'False').lower() == 'true':
+                    await auto_train_models()
+                    
+                await asyncio.sleep(3 * 60 * 60)  # 3 giờ
+        else:
+            # Polling mode
+            logger.info("Starting polling")
+            await application.run_polling()
     except Exception as e:
         logger.error(f"Error in main function: {str(e)}")
         raise
@@ -2788,12 +2443,8 @@ if __name__ == "__main__":
     START_TIME = time.time()
     
     try:
-        # Khởi tạo Gemini API if API key is available
-        if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY":
-            logger.warning("Gemini API key not set. AI-powered features will not be available.")
-        else:
-            genai.configure(api_key=GEMINI_API_KEY)
-            logger.info("Gemini API initialized successfully")
+        # Khởi tạo Gemini API
+        genai.configure(api_key=GEMINI_API_KEY)
         
         # Khởi tạo constants
         TOKEN = TELEGRAM_TOKEN
