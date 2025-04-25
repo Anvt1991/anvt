@@ -2662,13 +2662,12 @@ async def migrate_database():
             # Kiểm tra xem cột last_active đã tồn tại chưa
             connection = await session.connection()
             insp = inspect(connection)
-            has_last_active = False
             
-            # Lấy thông tin các cột trong bảng approved_users
-            columns_info = await connection.run_sync(lambda conn: insp.get_columns('approved_users'))
-            column_names = [col['name'] for col in columns_info]
+            # Kiểm tra bảng approved_users
+            approved_users_columns = await connection.run_sync(lambda conn: insp.get_columns('approved_users'))
+            approved_users_column_names = [col['name'] for col in approved_users_columns]
             
-            if 'last_active' not in column_names:
+            if 'last_active' not in approved_users_column_names:
                 logger.info("Cột last_active chưa tồn tại, đang thêm vào...")
                 # Thêm cột last_active vào bảng
                 add_column_sql = text("""
@@ -2680,8 +2679,30 @@ async def migrate_database():
                 logger.info("Đã thêm cột last_active vào bảng approved_users")
             else:
                 logger.info("Cột last_active đã tồn tại")
+                
+            # Kiểm tra bảng report_history
+            try:
+                report_history_columns = await connection.run_sync(lambda conn: insp.get_columns('report_history'))
+                report_history_column_names = [col['name'] for col in report_history_columns]
+                
+                if 'timeframe' not in report_history_column_names:
+                    logger.info("Cột timeframe chưa tồn tại trong bảng report_history, đang thêm vào...")
+                    # Thêm cột timeframe vào bảng
+                    add_timeframe_sql = text("""
+                        ALTER TABLE report_history 
+                        ADD COLUMN timeframe VARCHAR NOT NULL DEFAULT '1D'
+                    """)
+                    await session.execute(add_timeframe_sql)
+                    await session.commit()
+                    logger.info("Đã thêm cột timeframe vào bảng report_history")
+                else:
+                    logger.info("Cột timeframe đã tồn tại trong bảng report_history")
+            except Exception as e:
+                logger.error(f"Lỗi khi kiểm tra/thêm cột timeframe: {str(e)}")
+                logger.error(traceback.format_exc())
+            
     except Exception as e:
-        logger.error(f"Lỗi khi kiểm tra/thêm cột last_active: {str(e)}")
+        logger.error(f"Lỗi khi kiểm tra/thêm cột trong database: {str(e)}")
         logger.error(traceback.format_exc())
 
 def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
