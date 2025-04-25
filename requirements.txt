@@ -21,7 +21,7 @@ asyncpg
 
 redis>=4.0.0
 
-python-telegram-bot>=13.7
+python-telegram-bot[webhooks]>=13.7
 
 scikit-learn>=0.24.0
 

@@ -8,6 +8,7 @@ Bot Chứng Khoán Toàn Diện Phiên Bản V18.9 (Nâng cấp):
 - Nâng cấp bộ xác thực và chuẩn hóa dữ liệu đầu vào (DataValidator).
 - Cải tiến hệ thống tải dữ liệu với hỗ trợ đa khung thời gian (5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M).
 - Bổ sung xử lý dữ liệu thông minh: phát hiện và xử lý outlier, chuẩn hóa DataFrame.
+- Cấu hình webhook độc quyền cho Render, không sử dụng fallback polling.
 - Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng.
 """
 
@@ -1458,14 +1459,34 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
     logger.info("🤖 Bot khởi động!")
 
-    BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
-    WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=WEBHOOK_URL,
-        url_path=TELEGRAM_TOKEN
-    )
+    # Kiểm tra xem có đang chạy trên Render hay ở môi trường local
+    if RENDER_EXTERNAL_URL:
+        # Chế độ Render - chỉ sử dụng webhook
+        BASE_URL = RENDER_EXTERNAL_URL
+        WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
+        logger.info(f"Chạy trên Render với webhook URL: {WEBHOOK_URL}")
+
+        # Đảm bảo tất cả các dependencies cần thiết cho webhook được cài đặt
+        try:
+            import sys, subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-telegram-bot[webhooks]"])
+            logger.info("Đã cài đặt/kiểm tra python-telegram-bot[webhooks]")
+        except Exception as e:
+            logger.error(f"Lỗi cài đặt dependencies webhook: {str(e)}")
+            raise
+
+        # Khởi động webhook, không có fallback sang polling
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=WEBHOOK_URL,
+            url_path=TELEGRAM_TOKEN
+        )
+        logger.info(f"Webhook được thiết lập tại: {WEBHOOK_URL}")
+    else:
+        # Chế độ local development - sử dụng polling
+        logger.info("Khởi động bot ở chế độ polling (local development)...")
+        await app.run_polling()
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "test":

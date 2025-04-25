@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: stock-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9
+      - key: REDIS_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+    preDeployCommand: |
+      pip install --upgrade pip
+      pip install 'python-telegram-bot[webhooks]>=13.7'
