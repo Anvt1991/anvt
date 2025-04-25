@@ -6,3 +6,8 @@ git push
 git add requirements.txt
 git commit -m "fix: add support for telegram bot"
 git push
+
+
+git add bot_sieucap_v19.db
+git commit -m "add : data"
+git push
