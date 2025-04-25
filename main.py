@@ -53,6 +53,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 import aiohttp
 import json
+from timestamp_aligner import TimestampAligner
 
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
@@ -303,6 +304,8 @@ class DataLoader:
             'vnstock': 1.0,
             'yahoo': 0.8
         }
+        # Khởi tạo bộ căn chỉnh timestamp
+        self.timestamp_aligner = TimestampAligner(exchange_timezone='Asia/Bangkok')
         
     def _get_data_source_priorities(self):
         """Trả về danh sách các nguồn dữ liệu theo thứ tự ưu tiên."""
@@ -478,6 +481,10 @@ class DataLoader:
                 # Chuẩn hóa dữ liệu
                 df = self.standardize_dataframe(df)
                 
+                # Căn chỉnh timestamp chính xác
+                df = self.timestamp_aligner.fix_timestamp_issues(df)
+                df = self.timestamp_aligner.standardize_timeframe(df, freq=timeframe)
+                
                 # Kiểm tra tính hợp lệ
                 is_valid, validation_msg = self.validate_price_data(df)
                 if not is_valid:
@@ -487,8 +494,8 @@ class DataLoader:
                 # Xử lý giá trị thiếu 
                 df = self.handle_missing_values(df)
                 
-                # Lọc ngày giao dịch
-                df = filter_trading_days(df)
+                # Lọc ngày giao dịch 
+                df = self.timestamp_aligner.filter_trading_days(df)
                 
                 # Phát hiện ngoại lai
                 df, outlier_report = self.detect_outliers(df)
@@ -717,6 +724,90 @@ class DataLoader:
         if fundamental_data and any(v is not None for v in fundamental_data.values()):
             return fundamental_data
         return {"error": f"Không có dữ liệu cơ bản cho {symbol}"}
+
+    async def merge_data_sources(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
+        """
+        Tải dữ liệu từ nhiều nguồn và hợp nhất lại với căn chỉnh timestamp.
+        
+        Args:
+            symbol: Mã chứng khoán cần tải
+            timeframe: Khung thời gian ('1D', '1W', '1M')
+            num_candles: Số nến cần tải
+            
+        Returns:
+            DataFrame hợp nhất từ nhiều nguồn
+        """
+        dataframes = []
+        sources = self._get_data_source_priorities()
+        
+        # Tải dữ liệu từ các nguồn
+        for source in sources:
+            try:
+                if source == 'vnstock':
+                    df = await self._load_from_vnstock(symbol, timeframe, num_candles)
+                elif source == 'yahoo':
+                    df = await self._load_from_yahoo(symbol, timeframe, num_candles)
+                else:
+                    continue
+                    
+                # Chuẩn hóa dữ liệu
+                df = self.standardize_dataframe(df)
+                
+                # Tạo cột để đánh dấu nguồn dữ liệu
+                df['data_source'] = source
+                
+                dataframes.append(df)
+            except Exception as e:
+                logger.warning(f"Không thể tải dữ liệu từ nguồn {source}: {str(e)}")
+        
+        if not dataframes:
+            raise ValueError(f"Không thể tải dữ liệu cho {symbol} từ bất kỳ nguồn nào")
+            
+        # Sử dụng TimestampAligner để hợp nhất các DataFrame
+        merged_df = self.timestamp_aligner.merge_dataframes_with_alignment(dataframes, freq=timeframe)
+        
+        # Xử lý trùng lặp và lọc dữ liệu
+        merged_df = self.handle_missing_values(merged_df)
+        merged_df = self.timestamp_aligner.filter_trading_days(merged_df)
+        
+        return merged_df
+        
+    async def get_precise_timestamp_data(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
+        """
+        Tải dữ liệu với timestamp được căn chỉnh chính xác.
+        
+        Args:
+            symbol: Mã chứng khoán cần tải
+            timeframe: Khung thời gian ('1D', '1W', '1M')
+            num_candles: Số nến cần tải
+            
+        Returns:
+            DataFrame với timestamp đã được căn chỉnh chính xác
+        """
+        cache_key = f"precise_ts_{symbol}_{timeframe}_{num_candles}"
+        cached_data = await redis_manager.get(cache_key)
+        
+        if cached_data is not None:
+            return cached_data
+            
+        try:
+            # Tải dữ liệu từ nguồn chính
+            df, _ = await self.load_data(symbol, timeframe, num_candles)
+            
+            # Căn chỉnh timestamp
+            fixed_df = self.timestamp_aligner.fix_timestamp_issues(df)
+            aligned_df = self.timestamp_aligner.standardize_timeframe(fixed_df, freq=timeframe)
+            
+            # Thêm các đặc trưng timestamp
+            enhanced_df = self.timestamp_aligner.extract_timestamp_features(aligned_df)
+            
+            # Lưu vào cache
+            await redis_manager.set(cache_key, enhanced_df, expire=CACHE_EXPIRE_MEDIUM)
+            
+            return enhanced_df
+        except Exception as e:
+            logger.error(f"Lỗi tải dữ liệu timestamp chính xác cho {symbol}: {str(e)}")
+            raise
 
 # ---------- QUẢN LÝ CHẤT LƯỢNG DỮ LIỆU ----------
 class DataQualityControl:
@@ -1588,11 +1679,98 @@ async def refresh_data_command(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Lỗi làm mới dữ liệu cho {symbol}: {str(e)}")
         await update.message.reply_text(f"❌ Lỗi làm mới dữ liệu: {str(e)}")
 
-# Thêm các lệnh mới vào hàm main
-def add_new_commands(app):
-    app.add_handler(CommandHandler("datastats", data_stats_command))
-    app.add_handler(CommandHandler("refresh", refresh_data_command))
-    logger.info("Đã đăng ký các lệnh mới cho quản lý dữ liệu")
+async def check_timestamp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh để kiểm tra và sửa timestamp cho một mã cụ thể."""
+    user_id = update.message.from_user.id
+    if not await is_user_approved(user_id):
+        await notify_admin_new_user(update, context)
+        return
+        
+    args = context.args
+    if not args or len(args) < 1:
+        await update.message.reply_text("❌ Vui lòng nhập: /checkts [Mã] [Khung thời gian: 1D, 1W, 1M (mặc định 1D)]")
+        return
+        
+    symbol = args[0].upper()
+    timeframe = args[1].upper() if len(args) > 1 else '1D'
+    
+    if timeframe not in ['1D', '1W', '1M']:
+        await update.message.reply_text("❌ Khung thời gian không hợp lệ. Sử dụng: 1D, 1W, hoặc 1M")
+        return
+        
+    await update.message.reply_text(f"⏳ Đang kiểm tra timestamp cho {symbol} ({timeframe})...")
+    
+    try:
+        # Khởi tạo loader và timestamp aligner
+        data_loader = DataLoader(primary_source='vnstock', backup_sources=['yahoo'])
+        
+        # Tải dữ liệu
+        regular_df, _ = await data_loader.load_data(symbol, timeframe, 30)
+        precise_df = await data_loader.get_precise_timestamp_data(symbol, timeframe, 30)
+        
+        # Tạo báo cáo
+        report = f"🕒 <b>KIỂM TRA TIMESTAMP CHO {symbol} ({timeframe})</b>\n\n"
+        
+        # So sánh số lượng nến
+        regular_count = len(regular_df) if regular_df is not None else 0
+        precise_count = len(precise_df) if precise_df is not None else 0
+        
+        report += f"📊 <b>SỐ LƯỢNG NẾN:</b>\n"
+        report += f"- Dữ liệu thông thường: {regular_count} nến\n"
+        report += f"- Dữ liệu đã căn chỉnh: {precise_count} nến\n\n"
+        
+        # Thông tin timestamp
+        if precise_df is not None and not precise_df.empty:
+            first_date = precise_df.index[0].strftime('%Y-%m-%d %H:%M')
+            last_date = precise_df.index[-1].strftime('%Y-%m-%d %H:%M')
+            
+            report += f"🗓️ <b>PHẠM VI THỜI GIAN:</b>\n"
+            report += f"- Từ: {first_date}\n"
+            report += f"- Đến: {last_date}\n\n"
+            
+            # Kiểm tra timezone
+            timezone = str(precise_df.index[0].tz)
+            report += f"🌐 <b>TIMEZONE:</b> {timezone}\n\n"
+            
+            # Kiểm tra thời gian trong ngày
+            hours = [idx.hour for idx in precise_df.index]
+            minutes = [idx.minute for idx in precise_df.index]
+            
+            if len(set(hours)) == 1 and len(set(minutes)) == 1:
+                report += f"✅ <b>CHUẨN HÓA THỜI GIAN:</b> Tất cả timestamp đều vào {hours[0]}:{minutes[0]}\n\n"
+            else:
+                report += f"⚠️ <b>CHUẨN HÓA THỜI GIAN:</b> Timestamp không đồng nhất!\n"
+                report += f"- Giờ khác nhau: {set(hours)}\n"
+                report += f"- Phút khác nhau: {set(minutes)}\n\n"
+                
+            # Kiểm tra ngày giao dịch
+            weekdays = [idx.weekday() for idx in precise_df.index]
+            weekday_counts = {
+                0: "Thứ 2", 1: "Thứ 3", 2: "Thứ 4", 
+                3: "Thứ 5", 4: "Thứ 6", 5: "Thứ 7", 6: "Chủ nhật"
+            }
+            
+            if any(wd >= 5 for wd in weekdays):
+                report += "⚠️ <b>NGÀY GIAO DỊCH:</b> Phát hiện ngày cuối tuần trong dữ liệu!\n"
+                for wd, count in sorted({wd: weekdays.count(wd) for wd in set(weekdays)}.items()):
+                    report += f"- {weekday_counts[wd]}: {count} nến\n"
+            else:
+                report += "✅ <b>NGÀY GIAO DỊCH:</b> Tất cả đều là ngày trong tuần (Thứ 2-6)\n"
+                for wd, count in sorted({wd: weekdays.count(wd) for wd in set(weekdays)}.items()):
+                    report += f"- {weekday_counts[wd]}: {count} nến\n"
+        else:
+            report += "❌ Không có dữ liệu sau khi căn chỉnh timestamp"
+            
+        await update.message.reply_text(report, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"Lỗi kiểm tra timestamp cho {symbol}: {str(e)}")
+        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
+
+# Thêm lệnh mới vào main
+def add_timestamp_commands(app):
+    app.add_handler(CommandHandler("checkts", check_timestamp_command))
+    logger.info("Đã đăng ký lệnh kiểm tra timestamp")
 
 # ---------- MAIN & DEPLOY ----------
 async def main():
