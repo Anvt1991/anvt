@@ -8,7 +8,7 @@ Bot Chứng Khoán Toàn Diện Phiên Bản V18.8.1T (Nâng cấp tải dữ li
 - Cập nhật dữ liệu gia tăng giảm tải hệ thống và băng thông
 - Tự động phát hiện và xử lý ngoại lai, dữ liệu bị thiếu
 - Hệ thống tạo đặc trưng phái sinh tự động cho phân tích kỹ thuật
-- Sử dụng mô hình anthropic/claude-3-haiku
+- Sử dụng mô hình deepseek/deepseek-chat-v3-0324:free
 - Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng
 """
 
@@ -1232,7 +1232,7 @@ class AIAnalyzer:
             "X-Title": "Stock Analysis Bot"
         }
         payload = {
-            "model": "anthropic/claude-3-haiku",
+            "model": "deepseek/deepseek-chat-v3-0324:free",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1024,
             "temperature": 0.2
