@@ -9,6 +9,8 @@ Bot Chứng Khoán Toàn Diện Phiên Bản V18.9 (Nâng cấp):
 - Cải tiến hệ thống tải dữ liệu với hỗ trợ đa khung thời gian (5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M).
 - Bổ sung xử lý dữ liệu thông minh: phát hiện và xử lý outlier, chuẩn hóa DataFrame.
 - Cấu hình webhook độc quyền cho Render, không sử dụng fallback polling.
+- Sửa lỗi cảnh báo datetime với isin và lỗi event loop.
+- Tăng cường JSON response formatting và xử lý lỗi với OpenRouter API.
 - Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng.
 """
 
@@ -53,6 +55,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 import aiohttp
 import json
+import traceback
+import re
 
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
@@ -290,7 +294,14 @@ def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
     years = df.index.year.unique()
     vn_holidays = holidays.Vietnam(years=years)
     holiday_dates = set(vn_holidays.keys())
-    df = df[~pd.to_datetime(df.index.date).isin(holiday_dates)]
+    
+    # Sửa lỗi deprecation: chuyển đổi rõ ràng để tránh cảnh báo isin với datetime64
+    date_indexes = pd.to_datetime(df.index.date)
+    holiday_dates_dt = pd.to_datetime(list(holiday_dates))
+    
+    # Phương pháp an toàn hơn: sử dụng list comprehension thay vì isin
+    df = df[[d not in holiday_dates for d in df.index.date]]
+    
     return df
 
 # ---------- XÁC THỰC VÀ CHUẨN HÓA DỮ LIỆU ----------
@@ -1173,10 +1184,12 @@ class AIAnalyzer:
             raise Exception("Chưa có OPENROUTER_API_KEY")
 
         prompt = (
-            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán."
-            " Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing,"
-            " sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự."
-            "\n\nChỉ trả về kết quả ở dạng JSON như sau, không thêm giải thích nào khác:\n"
+            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán. "
+            "Nhiệm vụ của bạn là phân tích dữ liệu và trả về JSON hợp lệ theo định dạng cụ thể.\n\n"
+            "Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing, "
+            "sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự.\n\n"
+            "⚠️ QUAN TRỌNG: Chỉ trả về kết quả ở dạng JSON nghiêm ngặt như mẫu dưới đây, KHÔNG thêm bất kỳ văn bản nào khác trước hoặc sau JSON:\n"
+            "```json\n"
             "{\n"
             "  \"support_levels\": [giá1, giá2, ...],\n"
             "  \"resistance_levels\": [giá1, giá2, ...],\n"
@@ -1184,8 +1197,15 @@ class AIAnalyzer:
             "    {\"name\": \"tên mẫu hình\", \"description\": \"giải thích ngắn\"},\n"
             "    ...\n"
             "  ]\n"
-            "}\n\n"
-            f"Dữ liệu:\n{json.dumps(technical_data, ensure_ascii=False, indent=2)}"
+            "}\n"
+            "```\n\n"
+            "Đảm bảo:\n"
+            "1. Tất cả giá trị trong 'support_levels' và 'resistance_levels' là số (không đặt trong dấu ngoặc kép)\n"
+            "2. Trường 'patterns' phải luôn là một mảng, ngay cả khi trống ([])\n"
+            "3. Mỗi phần tử trong 'patterns' phải có đủ 'name' và 'description'\n"
+            "4. Đảm bảo không có dấu phẩy thừa ở cuối mảng hoặc đối tượng\n"
+            "5. KHÔNG có văn bản nào ở bên ngoài JSON\n\n"
+            f"Dữ liệu phân tích:\n{json.dumps(technical_data, ensure_ascii=False, indent=2)}"
         )
 
         headers = {
@@ -1198,7 +1218,8 @@ class AIAnalyzer:
             "model": "deepseek/deepseek-chat-v3-0324:free",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1024,
-            "temperature": 0.2
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"}
         }
 
         try:
@@ -1224,6 +1245,9 @@ class AIAnalyzer:
                             logger.error("Nội dung phản hồi OpenRouter trống")
                             return {"support_levels": [], "resistance_levels": [], "patterns": []}
                             
+                        # Xử lý các trường hợp nội dung có thể chứa markdown hoặc không phải JSON thuần túy
+                        content = self._extract_json_from_content(content)
+                            
                         try:
                             parsed_content = json.loads(content)
                             # Đảm bảo các khóa dự kiến tồn tại
@@ -1231,9 +1255,9 @@ class AIAnalyzer:
                                 raise json.JSONDecodeError("Phản hồi không phải là đối tượng JSON", content, 0)
                                 
                             result_dict = {
-                                "support_levels": parsed_content.get("support_levels", []),
-                                "resistance_levels": parsed_content.get("resistance_levels", []),
-                                "patterns": parsed_content.get("patterns", [])
+                                "support_levels": self._ensure_list_of_numbers(parsed_content.get("support_levels", [])),
+                                "resistance_levels": self._ensure_list_of_numbers(parsed_content.get("resistance_levels", [])),
+                                "patterns": self._validate_patterns_format(parsed_content.get("patterns", []))
                             }
                             return result_dict
                         except json.JSONDecodeError:
@@ -1248,7 +1272,78 @@ class AIAnalyzer:
         except Exception as e:
             logger.error(f"Lỗi kết nối OpenRouter: {str(e)}")
             return {"support_levels": [], "resistance_levels": [], "patterns": []}
-
+            
+    def _extract_json_from_content(self, content: str) -> str:
+        """Trích xuất JSON từ nội dung có thể chứa markdown hoặc text thừa."""
+        # Tìm JSON giữa ```json và ```
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
+        if json_match:
+            return json_match.group(1).strip()
+            
+        # Tìm bất kỳ JSON nào trong nội dung
+        json_match = re.search(r'\{\s*"[^"]+"\s*:', content)
+        if json_match:
+            # Tìm đoạn văn bản từ vị trí bắt đầu của JSON đến hết
+            start_idx = json_match.start()
+            json_content = content[start_idx:]
+            # Đếm số lượng dấu { và }
+            open_braces = 0
+            close_braces = 0
+            end_idx = len(json_content)
+            
+            for i, char in enumerate(json_content):
+                if char == '{':
+                    open_braces += 1
+                elif char == '}':
+                    close_braces += 1
+                    if open_braces == close_braces:
+                        end_idx = i + 1
+                        break
+                        
+            return json_content[:end_idx]
+            
+        # Trả về nguyên văn nếu không tìm thấy mẫu JSON
+        return content
+        
+    def _ensure_list_of_numbers(self, values) -> list:
+        """Đảm bảo giá trị là danh sách các số."""
+        if not isinstance(values, list):
+            return []
+            
+        result = []
+        for val in values:
+            try:
+                if isinstance(val, (int, float)):
+                    result.append(val)
+                elif isinstance(val, str):
+                    # Cố gắng chuyển đổi chuỗi thành số
+                    result.append(float(val.replace(',', '.')))
+            except (ValueError, TypeError):
+                # Bỏ qua các giá trị không thể chuyển thành số
+                pass
+                
+        return result
+        
+    def _validate_patterns_format(self, patterns) -> list:
+        """Xác thực và chuẩn hóa định dạng của mảng patterns."""
+        if not isinstance(patterns, list):
+            return []
+            
+        result = []
+        for pattern in patterns:
+            if isinstance(pattern, dict) and 'name' in pattern:
+                # Đảm bảo có mô tả
+                if 'description' not in pattern:
+                    pattern['description'] = ""
+                    
+                # Chỉ giữ lại các trường cần thiết
+                result.append({
+                    'name': str(pattern['name']),
+                    'description': str(pattern['description'])
+                })
+                
+        return result
+        
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
             tech_analyzer = TechnicalAnalyzer()
@@ -1488,49 +1583,75 @@ async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN & DEPLOY ----------
 async def main():
-    await init_db()
+    try:
+        await init_db()
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
-    scheduler.start()
-    logger.info("Auto training scheduler đã khởi động.")
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
+        scheduler.start()
+        logger.info("Auto training scheduler đã khởi động.")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("analyze", analyze_command))
-    app.add_handler(CommandHandler("getid", get_id))
-    app.add_handler(CommandHandler("approve", approve_user))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
-    logger.info("🤖 Bot khởi động!")
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("analyze", analyze_command))
+        app.add_handler(CommandHandler("getid", get_id))
+        app.add_handler(CommandHandler("approve", approve_user))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
+        logger.info("🤖 Bot khởi động!")
 
-    # Kiểm tra xem có đang chạy trên Render hay ở môi trường local
-    if RENDER_EXTERNAL_URL:
-        # Chế độ Render - chỉ sử dụng webhook
-        BASE_URL = RENDER_EXTERNAL_URL
-        WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-        logger.info(f"Chạy trên Render với webhook URL: {WEBHOOK_URL}")
+        # Kiểm tra xem có đang chạy trên Render hay ở môi trường local
+        if RENDER_EXTERNAL_URL:
+            # Chế độ Render - chỉ sử dụng webhook
+            BASE_URL = RENDER_EXTERNAL_URL
+            WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
+            logger.info(f"Chạy trên Render với webhook URL: {WEBHOOK_URL}")
 
-        # Đảm bảo tất cả các dependencies cần thiết cho webhook được cài đặt
+            # Đảm bảo tất cả các dependencies cần thiết cho webhook được cài đặt
+            try:
+                import sys, subprocess
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "python-telegram-bot[webhooks]"])
+                logger.info("Đã cài đặt/kiểm tra python-telegram-bot[webhooks]")
+            except Exception as e:
+                logger.error(f"Lỗi cài đặt dependencies webhook: {str(e)}")
+                raise
+
+            # Sử dụng run_webhook một cách an toàn
+            webhook_server = await app.initialize()
+            await webhook_server.start_webhook(
+                listen="0.0.0.0",
+                port=PORT,
+                url_path=TELEGRAM_TOKEN,
+                webhook_url=WEBHOOK_URL
+            )
+            
+            # Sử dụng signal handler để hỗ trợ tắt bot một cách an toàn
+            import signal
+            
+            def signal_handler(sig, frame):
+                logger.info("Đang dừng ứng dụng...")
+                asyncio.create_task(app.shutdown())
+                
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+            
+            # Giữ cho ứng dụng tiếp tục chạy
+            await asyncio.Event().wait()
+        else:
+            # Chế độ local development - sử dụng polling
+            logger.info("Khởi động bot ở chế độ polling (local development)...")
+            await app.run_polling()
+    except Exception as e:
+        logger.critical(f"Lỗi nghiêm trọng trong main(): {str(e)}")
+        logger.critical(f"Traceback: {traceback.format_exc()}")
+        # Đảm bảo tất cả tài nguyên được giải phóng
         try:
-            import sys, subprocess
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "python-telegram-bot[webhooks]"])
-            logger.info("Đã cài đặt/kiểm tra python-telegram-bot[webhooks]")
-        except Exception as e:
-            logger.error(f"Lỗi cài đặt dependencies webhook: {str(e)}")
-            raise
-
-        # Khởi động webhook, không có fallback sang polling
-        await app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=WEBHOOK_URL,
-            url_path=TELEGRAM_TOKEN
-        )
-        logger.info(f"Webhook được thiết lập tại: {WEBHOOK_URL}")
-    else:
-        # Chế độ local development - sử dụng polling
-        logger.info("Khởi động bot ở chế độ polling (local development)...")
-        await app.run_polling()
+            if 'scheduler' in locals() and scheduler.running:
+                scheduler.shutdown()
+            if 'app' in locals():
+                await app.shutdown()
+        except Exception as cleanup_error:
+            logger.error(f"Lỗi khi dọn dẹp tài nguyên: {str(cleanup_error)}")
+        raise
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == "test":
