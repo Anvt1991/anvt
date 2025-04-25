@@ -36,6 +36,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+import time
 
 # Data processing imports
 import pandas as pd
@@ -1627,375 +1628,7 @@ class TechnicalAnalyzer:
         return indicators
 
 # ---------- DỰ BÁO GIÁ ----------
-class EnhancedPredictor:
-    """
-    Lớp dự báo nâng cao sử dụng nhiều mô hình để dự đoán giá và tín hiệu giao dịch.
-    Hỗ trợ mô hình lai, đánh giá hiệu suất và sanity check.
-    """
-    def hybrid_predict(self, df: pd.DataFrame, days: int = 5):
-        """
-        Dự báo giá bằng mô hình lai kết hợp nhiều phương pháp
-        
-        Args:
-            df: DataFrame chứa dữ liệu giá
-            days: Số ngày cần dự báo
-            
-        Returns:
-            Tuple gồm mảng dự báo và dictionary các kịch bản
-        """
-        if df.empty or len(df) < 50:
-            raise ValueError("Không đủ dữ liệu để dự báo (cần ít nhất 50 điểm dữ liệu)")
-        df = df.copy()
-        if getattr(df.index, 'tz', None) is not None:
-            df.index = df.index.tz_convert(None)
-            df.index = df.index.tz_localize(None)
-        
-        # Fix for "cannot insert date, already exists" error
-        if 'date' in df.columns:
-            # If 'date' is already a column, use it directly
-            df_prophet = df.copy()
-            df_prophet.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
-        else:
-            # Otherwise reset the index as before
-            df_prophet = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
-            
-        df_prophet['ds'] = pd.to_datetime(df_prophet['ds']).dt.tz_localize(None)
-        
-        # Cải thiện mô hình Prophet với các tham số điều chỉnh
-        model = Prophet(
-            changepoint_prior_scale=0.05,  # Giảm để giới hạn sự biến động
-            seasonality_prior_scale=10,    # Tăng trọng số cho yếu tố mùa vụ
-            seasonality_mode='multiplicative'  # Phù hợp hơn với dữ liệu tài chính
-        )
-        
-        # Thêm mùa vụ tuần và tháng phù hợp với thị trường chứng khoán
-        model.add_seasonality(name='weekly', period=5, fourier_order=5)
-        model.add_seasonality(name='monthly', period=21, fourier_order=5)
-        
-        # Đặt giới hạn tăng trưởng cho mô hình
-        last_value = df['close'].iloc[-1]
-        growth_cap = last_value * 1.5  # Không dự báo tăng quá 50%
-        growth_floor = last_value * 0.5  # Không dự báo giảm quá 50%
-        df_prophet['cap'] = growth_cap
-        df_prophet['floor'] = growth_floor
-        
-        model.fit(df_prophet[['ds', 'y', 'cap', 'floor']])
-        future = model.make_future_dataframe(periods=days)
-        future['cap'] = growth_cap
-        future['floor'] = growth_floor
-        forecast = model.predict(future)
-        
-        # Lấy kết quả dự báo
-        raw_predictions = forecast.tail(days)['yhat'].values
-        
-        # Áp dụng bộ lọc sanity check để giới hạn dự báo phi lý
-        predictions = self._apply_sanity_checks(raw_predictions, last_value)
-        
-        # Tính toán xác suất các kịch bản dựa trên dự báo đã điều chỉnh
-        last_close = df['close'].iloc[-1]
-        volatility = df['close'].pct_change().std() * 100
-        
-        # Điều chỉnh xác suất dựa trên độ biến động thực tế và giá trị dự báo
-        trend_strength = (predictions[-1] - last_close) / last_close
-        
-        # Xác định xác suất các kịch bản
-        if abs(trend_strength) < 0.02:  # Dự báo sideway
-            sideway_prob = 60
-            breakout_prob = 20 if trend_strength > 0 else 10
-            breakdown_prob = 20 if trend_strength < 0 else 10
-        elif trend_strength > 0:  # Dự báo tăng
-            breakout_prob = min(70, 40 + abs(trend_strength) * 100)
-            breakdown_prob = max(10, 30 - abs(trend_strength) * 50)
-            sideway_prob = 100 - breakout_prob - breakdown_prob
-        else:  # Dự báo giảm
-            breakdown_prob = min(70, 40 + abs(trend_strength) * 100)
-            breakout_prob = max(10, 30 - abs(trend_strength) * 50)
-            sideway_prob = 100 - breakout_prob - breakdown_prob
-        
-        # Điều chỉnh dựa trên độ biến động
-        volatility_factor = min(1.5, max(0.5, volatility / 2))
-        sideway_prob = sideway_prob * (1 / volatility_factor)
-        
-        # Đảm bảo tổng xác suất là 100%
-        total = breakout_prob + breakdown_prob + sideway_prob
-        breakout_prob = breakout_prob / total * 100
-        breakdown_prob = breakdown_prob / total * 100
-        sideway_prob = 100 - breakout_prob - breakdown_prob
-
-        return predictions, {
-            "Breakout": {"prob": breakout_prob, "target": last_close * 1.05},
-            "Breakdown": {"prob": breakdown_prob, "target": last_close * 0.95},
-            "Sideway": {"prob": sideway_prob, "target": last_close}
-        }
-    
-    def _apply_sanity_checks(self, predictions, last_value):
-        """
-        Áp dụng kiểm tra hợp lý cho dự báo để loại bỏ giá trị phi lý.
-        
-        Args:
-            predictions: Mảng các giá trị dự báo
-            last_value: Giá trị gần nhất
-            
-        Returns:
-            Mảng các giá trị dự báo đã điều chỉnh
-        """
-        adjusted_predictions = np.array(predictions)
-        
-        # Lọc 1: Giới hạn biến động tối đa mỗi bước (không quá 5%)
-        max_change_per_step = 0.05
-        for i in range(1, len(adjusted_predictions)):
-            max_change = last_value * max_change_per_step
-            if abs(adjusted_predictions[i] - adjusted_predictions[i-1]) > max_change:
-                direction = 1 if adjusted_predictions[i] > adjusted_predictions[i-1] else -1
-                adjusted_predictions[i] = adjusted_predictions[i-1] + direction * max_change
-        
-        # Lọc 2: Giới hạn biến động tổng thể so với giá hiện tại
-        max_total_change_pct = 0.15  # Giới hạn 15% tổng biến động
-        for i in range(len(adjusted_predictions)):
-            max_total_change = last_value * max_total_change_pct
-            if abs(adjusted_predictions[i] - last_value) > max_total_change:
-                direction = 1 if adjusted_predictions[i] > last_value else -1
-                adjusted_predictions[i] = last_value + direction * max_total_change
-        
-        # Lọc 3: Không cho phép giá âm
-        adjusted_predictions = np.maximum(adjusted_predictions, 0)
-        
-        return adjusted_predictions
-
-    def evaluate_prophet_performance(self, df: pd.DataFrame, forecast: pd.DataFrame) -> float:
-        """
-        Đánh giá hiệu suất của mô hình Prophet
-        
-        Args:
-            df: DataFrame chứa dữ liệu thực tế
-            forecast: DataFrame chứa dự báo từ Prophet
-            
-        Returns:
-            Điểm hiệu suất từ 0 đến 1
-        """
-        if df.empty or forecast.empty:
-            logger.warning("DataFrame df hoặc forecast rỗng, trả về hiệu suất 0.0")
-            return 0.0
-        
-        # Extract actual values
-        actual = df['close'].values
-        
-        # Prepare forecast DataFrame for matching with actual dates
-        forecast_df = forecast.copy()
-        forecast_df['ds'] = pd.to_datetime(forecast_df['ds'])
-        forecast_df = forecast_df.set_index('ds')
-        
-        try:
-            # Convert df.index to datetime if it's not already
-            date_index = pd.to_datetime(df.index)
-            
-            # Safer approach: manually build arrays of matching dates
-            matched_actual = []
-            matched_predicted = []
-            
-            for i, date in enumerate(date_index):
-                # Try to find the closest date in forecast
-                date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
-                matching_dates = forecast_df.index[forecast_df.index.strftime('%Y-%m-%d') == date_str]
-                
-                if not matching_dates.empty:
-                    matched_actual.append(actual[i])
-                    matched_predicted.append(forecast_df.loc[matching_dates[0], 'yhat'])
-            
-            if not matched_actual:
-                # If no exact matches, try a more flexible approach with date strings
-                logger.warning("Không tìm thấy ngày trùng khớp, thử phương pháp linh hoạt hơn...")
-                df_dates = pd.Series(date_index.strftime('%Y-%m-%d'))
-                forecast_dates = pd.Series(forecast_df.index.strftime('%Y-%m-%d'))
-                
-                # Find common dates as strings
-                common_date_strs = set(df_dates).intersection(set(forecast_dates))
-                
-                if not common_date_strs:
-                    logger.error("Không thể đồng bộ ngày giữa df và forecast: không có ngày trùng khớp")
-                    return 0.0
-                
-                # Get values for common dates
-                for date_str in common_date_strs:
-                    # Get df indices with this date
-                    df_idx = df_dates[df_dates == date_str].index
-                    # Get forecast indices with this date
-                    forecast_idx = forecast_dates[forecast_dates == date_str].index
-                    
-                    if not df_idx.empty and not forecast_idx.empty:
-                        # Add to our lists
-                        matched_actual.append(df.iloc[df_idx[0]]['close'])
-                        matched_predicted.append(forecast_df.iloc[forecast_idx[0]]['yhat'])
-                
-                if not matched_actual:
-                    logger.error("Không thể đồng bộ ngày giữa df và forecast: không có ngày trùng khớp sau khi kiểm tra")
-                    return 0.0
-            
-            # Convert to numpy arrays
-            actual = np.array(matched_actual)
-            predicted = np.array(matched_predicted)
-                
-        except KeyError as e:
-            logger.error(f"Không thể đồng bộ ngày giữa df và forecast: {str(e)}")
-            return 0.0
-        except Exception as e:
-            logger.error(f"Lỗi khi đánh giá hiệu suất Prophet: {str(e)}")
-            return 0.0
-        
-        if len(actual) != len(predicted):
-            logger.error(f"Kích thước không khớp: actual ({len(actual)}), predicted ({len(predicted)})")
-            return 0.0
-        
-        if len(actual) < 10:
-            logger.warning(f"Quá ít điểm dữ liệu cho đánh giá chính xác: {len(actual)} điểm")
-            return 0.3  # Return a moderate score
-        
-        # Tính toán các chỉ số hiệu suất
-        mse = np.mean((actual - predicted) ** 2)
-        mae = np.mean(np.abs(actual - predicted))
-        mape = np.mean(np.abs((actual - predicted) / actual)) * 100
-        
-        # Phát hiện dự báo phi lý
-        avg_price = np.mean(actual)
-        is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in predicted)
-        
-        # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
-        if is_unrealistic:
-            logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
-            return 0.1  # Giảm mạnh điểm hiệu suất
-            
-        # Đánh giá hiệu suất dựa trên MSE và MAPE
-        # 1/(1+MSE) cho giá trị từ 0-1, càng gần 1 càng tốt
-        mse_score = 1 / (1 + mse)
-        # MAPE < 10% là tốt, >30% là kém
-        mape_score = max(0, 1 - (mape / 30))
-        
-        # Kết hợp hai điểm số (70% MSE, 30% MAPE)
-        performance = 0.7 * mse_score + 0.3 * mape_score
-        
-        return performance
-
-    def forecast_with_prophet(self, df: pd.DataFrame, periods: int = 7):
-        """
-        Dự báo giá bằng mô hình Prophet với các cải tiến
-        
-        Args:
-            df: DataFrame chứa dữ liệu giá
-            periods: Số kỳ cần dự báo
-            
-        Returns:
-            Tuple gồm forecast, model và hiệu suất
-        """
-        if df.empty or len(df) < 50:
-            raise ValueError("Không đủ dữ liệu để dự báo Prophet (cần ít nhất 50 điểm dữ liệu)")
-        df = df.copy()
-        if getattr(df.index, 'tz', None) is not None:
-            df.index = df.index.tz_convert(None)
-            df.index = df.index.tz_localize(None)
-            
-        # Fix for "cannot insert date, already exists" error
-        if 'date' in df.columns:
-            # If 'date' is already a column, use it directly
-            df_reset = df.copy()
-            df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
-        else:
-            # Otherwise reset the index as before
-            df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
-            
-        df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
-        
-        # Cải thiện mô hình Prophet với các tham số điều chỉnh
-        model = Prophet(
-            changepoint_prior_scale=0.05,
-            seasonality_prior_scale=10,
-            seasonality_mode='multiplicative'
-        )
-        
-        # Thêm các tham số mùa vụ phù hợp với thị trường chứng khoán
-        model.add_seasonality(name='weekly', period=5, fourier_order=5)
-        model.add_seasonality(name='monthly', period=21, fourier_order=5)
-        
-        # Thêm giới hạn tăng trưởng
-        last_value = df['close'].iloc[-1]
-        growth_cap = last_value * 1.5
-        growth_floor = last_value * 0.5
-        df_reset['cap'] = growth_cap
-        df_reset['floor'] = growth_floor
-        
-        # Huấn luyện mô hình với các ràng buộc
-        model.fit(df_reset[['ds', 'y', 'cap', 'floor']])
-        
-        # Tạo dữ liệu dự báo
-        future = model.make_future_dataframe(periods=periods)
-        future['cap'] = growth_cap
-        future['floor'] = growth_floor
-        
-        # Dự báo
-        forecast = model.predict(future)
-        
-        # Đánh giá hiệu suất
-        performance = self.evaluate_prophet_performance(df, forecast)
-        
-        # Kiểm tra và điều chỉnh dự báo phi lý
-        if performance < 0.3:  # Hiệu suất kém
-            logger.warning("Hiệu suất Prophet thấp, áp dụng lọc dự báo phi lý")
-            # Điều chỉnh dự báo: Sử dụng phương pháp hồi quy tuyến tính đơn giản thay thế
-            last_n = min(30, len(df))
-            X = np.arange(last_n).reshape(-1, 1)
-            y = df['close'].tail(last_n).values
-            from sklearn.linear_model import LinearRegression
-            reg = LinearRegression().fit(X, y)
-            future_idx = np.arange(last_n, last_n + periods).reshape(-1, 1)
-            linear_pred = reg.predict(future_idx)
-            
-            # Giới hạn dự báo trong phạm vi hợp lý
-            for i in range(len(linear_pred)):
-                day = i + 1
-                max_change = last_value * (0.02 * day)  # Tối đa 2% mỗi ngày
-                if abs(linear_pred[i] - last_value) > max_change:
-                    direction = 1 if linear_pred[i] > last_value else -1
-                    linear_pred[i] = last_value + direction * max_change
-            
-            # Ghi đè giá trị dự báo
-            future_indices = forecast.index[-periods:]
-            forecast.loc[future_indices, 'yhat'] = linear_pred
-            forecast.loc[future_indices, 'yhat_lower'] = linear_pred * 0.95
-            forecast.loc[future_indices, 'yhat_upper'] = linear_pred * 1.05
-            
-            performance = 0.5  # Đặt hiệu suất mặc định cho mô hình hồi quy tuyến tính
-        
-        return forecast, model, performance
-
-    def predict_xgboost_signal(self, df: pd.DataFrame, features: list):
-        """
-        Dự báo tín hiệu giao dịch bằng XGBoost
-        
-        Args:
-            df: DataFrame chứa dữ liệu đã tính toán chỉ báo kỹ thuật
-            features: Danh sách các đặc trưng sử dụng để dự báo
-            
-        Returns:
-            Tuple của tín hiệu dự báo và độ chính xác
-        """
-        if df.empty or len(df) < 50:
-            raise ValueError("Không đủ dữ liệu để dự báo XGBoost (cần ít nhất 50 điểm dữ liệu)")
-        df = df.copy()
-        df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
-        X = df[features].shift(1)
-        y = df['target']
-        valid_idx = X.notna().all(axis=1) & y.notna()
-        X = X[valid_idx]
-        y = y[valid_idx]
-        if len(X) < 50:
-            return "Không đủ dữ liệu để dự báo XGBoost", 0.0
-        X_train = X.iloc[:-1]
-        y_train = y.iloc[:-1]
-        model = xgb.XGBClassifier()
-        model.fit(X_train, y_train)
-        pred = model.predict(X.iloc[-1:])[0]
-        actual = y.iloc[-1]
-        accuracy = 1 if pred == actual else 0
-        return "Tăng" if pred == 1 else "Giảm", accuracy
+# EnhancedPredictor đã được thay thế hoàn toàn bởi Predictor
 
 # ---------- AI & BÁO CÁO ----------
 class AIAnalyzer:
@@ -2003,7 +1636,7 @@ class AIAnalyzer:
         genai.configure(api_key=GEMINI_API_KEY)
         self.gemini_model = genai.GenerativeModel('gemini-1.5-pro')
         self.tech_analyzer = TechnicalAnalyzer()
-        self.predictor = EnhancedPredictor()
+        self.predictor = Predictor()  # Đã thay thế EnhancedPredictor
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def generate_content(self, prompt):
@@ -2627,53 +2260,78 @@ async def fetch_rss(url: str, keywords: list, is_symbol_search: bool = False) ->
 # ---------- AUTO TRAINING ----------
 async def auto_train_models():
     """
-    Tự động huấn luyện mô hình cho các mã đã có trong lịch sử báo cáo.
-    Sử dụng PostgreSQL database.
+    Tự động huấn luyện và lưu trữ các mô hình dự báo cho các mã chứng khoán phổ biến.
+    Chạy theo lịch để cập nhật các mô hình.
     """
-    # Lấy danh sách mã cần training
-    symbols = await db.get_training_symbols()
-    if not symbols:
-        logger.info("Không có mã nào trong ReportHistory, bỏ qua auto training.")
-        return
+    start_time = time.time()
+    logger.info("Bắt đầu auto_train_models()")
+    
+    try:
+        # Khởi tạo DataLoader và Predictor
+        loader = DataLoader()
+        predictor = Predictor()  # Thay EnhancedPredictor bằng Predictor
         
-    for symbol in symbols:
-        try:
-            logger.info(f"Bắt đầu auto training cho mã: {symbol}")
-            loader = DataLoader()
-            tech_analyzer = TechnicalAnalyzer()
-            raw_df, cleaned_df, _ = await loader.load_data(symbol, '1D', 500)
-            df = tech_analyzer.calculate_indicators(cleaned_df)
-            features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-            
-            # Huấn luyện mô hình
-            prophet_model, prophet_perf = await run_in_thread(train_prophet_model, df)
-            xgb_model, xgb_perf = await run_in_thread(train_xgboost_model, df, features)
-            
-            # Chuẩn bị tham số
-            prophet_params = {
-                'changepoint_prior_scale': 0.05,
-                'seasonality_prior_scale': 10,
-                'seasonality_mode': 'multiplicative'
-            }
-            xgb_params = {
-                'features': features,
-                'data_points': len(df)
-            }
-            
-            # Lưu mô hình với thông tin version và params
-            await db.store_trained_model(
-                symbol, 'prophet', prophet_model, prophet_perf, 
-                version="1.1", params=prophet_params
-            )
-            await db.store_trained_model(
-                symbol, 'xgboost', xgb_model, xgb_perf,
-                version="1.1", params=xgb_params
-            )
-            
-            logger.info(f"Auto training cho {symbol} hoàn tất.")
-        except Exception as e:
-            logger.error(f"Lỗi auto training cho {symbol}: {str(e)}")
-            logger.error(traceback.format_exc())  # Thêm stack trace đầy đủ
+        # Top mã chứng khoán VN30
+        symbols = [
+            'VNM', 'VIC', 'VCB', 'FPT', 'MWG', 'HPG', 'VHM', 'VRE', 'BID',
+            'MSN', 'TCB', 'SSI', 'ACB', 'VPB', 'SAB', 'GAS', 'VJC', 'CTG'
+        ]
+        
+        # Huấn luyện cho từng mã
+        for symbol in symbols:
+            try:
+                logger.info(f"Đang huấn luyện mô hình cho {symbol}...")
+                
+                # Tải dữ liệu
+                raw_df, cleaned_df, _ = await loader.load_data(symbol, '1D', 365)
+                
+                if cleaned_df is None or len(cleaned_df) < 100:
+                    logger.warning(f"Không đủ dữ liệu cho {symbol}, bỏ qua")
+                    continue
+                
+                # Huấn luyện mô hình Prophet
+                try:
+                    prophet_model, prophet_perf = train_prophet_model(cleaned_df)
+                    # Lưu mô hình vào cơ sở dữ liệu
+                    await db.store_trained_model(
+                        symbol=symbol,
+                        model_type='prophet',
+                        model=prophet_model,
+                        performance=prophet_perf,
+                        version=datetime.now().strftime('%Y%m%d'),
+                        params={"days": 7}
+                    )
+                    logger.info(f"Đã huấn luyện Prophet cho {symbol} (perf: {prophet_perf:.2f})")
+                except Exception as e:
+                    logger.error(f"Lỗi huấn luyện Prophet cho {symbol}: {str(e)}")
+                
+                # Huấn luyện mô hình XGBoost
+                try:
+                    indicators_df = TechnicalAnalyzer().calculate_common_indicators(cleaned_df)
+                    features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 
+                               'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b']
+                    xgb_model, xgb_perf = train_xgboost_model(indicators_df[indicators_df[features].notna().all(axis=1)], features)
+                    # Lưu mô hình vào cơ sở dữ liệu
+                    await db.store_trained_model(
+                        symbol=symbol,
+                        model_type='xgboost',
+                        model=xgb_model,
+                        performance=xgb_perf,
+                        version=datetime.now().strftime('%Y%m%d'),
+                        params={"features": features}
+                    )
+                    logger.info(f"Đã huấn luyện XGBoost cho {symbol} (perf: {xgb_perf:.2f})")
+                except Exception as e:
+                    logger.error(f"Lỗi huấn luyện XGBoost cho {symbol}: {str(e)}")
+                
+            except Exception as e:
+                logger.error(f"Lỗi tổng thể khi huấn luyện mô hình cho {symbol}: {str(e)}")
+        
+        execution_time = time.time() - start_time
+        logger.info(f"auto_train_models() hoàn thành trong {execution_time:.2f} giây")
+    except Exception as e:
+        logger.error(f"Lỗi trong auto_train_models: {str(e)}")
+        logger.error(traceback.format_exc())
 
 async def migrate_database():
     """
