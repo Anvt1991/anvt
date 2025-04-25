@@ -2047,7 +2047,7 @@ class AIAnalyzer:
         }}
         ```
         
-        Chỉ trả lại JSON, không cần giải thích thêm.
+        Hãy giữ mô tả ngắn gọn, tối đa 100 ký tự. Chỉ trả lại JSON, không giải thích thêm.
         """.format(json.dumps(technical_data, ensure_ascii=False, cls=CustomJSONEncoder))
         
         headers = {
@@ -2058,7 +2058,7 @@ class AIAnalyzer:
         payload = {
             "model": GROQ_MODEL_NAME,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 800
+            "max_tokens": 1200  # Tăng max_tokens để tránh bị cắt giữa chừng
         }
         
         async with aiohttp.ClientSession() as session:
@@ -2074,6 +2074,18 @@ class AIAnalyzer:
                     result = json.loads(result_text)
                     # Extract the content from the message
                     message_content = result['choices'][0]['message']['content']
+                    finish_reason = result['choices'][0]['finish_reason']
+                    
+                    # Kiểm tra nếu phản hồi bị cắt do độ dài
+                    if finish_reason == "length":
+                        logger.warning("Phản hồi từ Groq bị cắt do giới hạn độ dài. Cố gắng phục hồi JSON...")
+                        # Trả về mẫu JSON đơn giản nếu không thể phục hồi
+                        return {
+                            "patterns": [
+                                {"name": "Phản hồi bị cắt", "description": "Không thể phân tích đầy đủ do phản hồi từ Groq bị cắt"},
+                                {"name": "Dữ liệu một phần", "description": "Chỉ trả về thông tin một phần, vui lòng thử lại"}
+                            ]
+                        }
                     
                     # Extract JSON portion from the content (between triple backticks)
                     import re
@@ -2088,30 +2100,126 @@ class AIAnalyzer:
                     json_match = re.search(r'```json\s*([\s\S]*?)\s*```', message_content)
                     if json_match:
                         json_text = json_match.group(1).strip()
-                        return json.loads(json_text)
+                        try:
+                            return json.loads(json_text)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Lỗi khi parse JSON trong code block: {str(e)}")
+                            # Cố gắng sửa JSON không hoàn chỉnh
+                            fixed_json = self._fix_incomplete_json(json_text)
+                            if fixed_json:
+                                return fixed_json
                     
                     # Try to find JSON in any code blocks
                     json_match = re.search(r'```\s*([\s\S]*?)\s*```', message_content)
                     if json_match:
                         json_text = json_match.group(1).strip()
                         if json_text.startswith('{') and ('}' in json_text):
-                            return json.loads(json_text)
+                            try:
+                                return json.loads(json_text)
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Lỗi khi parse JSON trong code block khác: {str(e)}")
+                                # Cố gắng sửa JSON không hoàn chỉnh
+                                fixed_json = self._fix_incomplete_json(json_text)
+                                if fixed_json:
+                                    return fixed_json
                     
                     # Try to find JSON directly in the content
                     json_match = re.search(r'({[\s\S]*})', message_content)
                     if json_match:
                         json_text = json_match.group(1).strip()
-                        return json.loads(json_text)
+                        try:
+                            return json.loads(json_text)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Lỗi khi parse JSON trực tiếp: {str(e)}")
+                            # Cố gắng sửa JSON không hoàn chỉnh
+                            fixed_json = self._fix_incomplete_json(json_text)
+                            if fixed_json:
+                                return fixed_json
                         
                     # If message is already JSON formatted
                     if message_content.strip().startswith('{') and message_content.strip().endswith('}'):
-                        return json.loads(message_content)
+                        try:
+                            return json.loads(message_content)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Lỗi khi parse message_content dạng JSON: {str(e)}")
+                            # Cố gắng sửa JSON không hoàn chỉnh
+                            fixed_json = self._fix_incomplete_json(message_content)
+                            if fixed_json:
+                                return fixed_json
                     
                     logger.error(f"Không thể tìm thấy phần JSON trong nội dung phản hồi: {message_content}")
                     return {"patterns": [{"name": "JSON không đúng định dạng", "description": "Không thể tìm thấy JSON trong nội dung phản hồi"}]}
                 except (KeyError, json.JSONDecodeError) as e:
                     logger.error(f"Lỗi parsing phản hồi từ Groq: {str(e)}. Nội dung phản hồi: {result_text}")
+                    # Cố gắng tìm kiếm và sửa JSON trong văn bản gốc
+                    fixed_json = self._extract_and_fix_json(result_text)
+                    if fixed_json:
+                        return fixed_json
                     return {"patterns": [{"name": "Lỗi parsing", "description": "Không thể phân tích phản hồi từ Groq"}]}
+    
+    def _fix_incomplete_json(self, json_text):
+        """Cố gắng sửa JSON không hoàn chỉnh"""
+        try:
+            # Kiểm tra xem JSON có dấu hiệu của patterns array không
+            if '"patterns"' in json_text and '"name"' in json_text:
+                # Cố gắng tách patterns đã hoàn chỉnh
+                import re
+                patterns = []
+                pattern_matches = re.finditer(r'{"name": *"([^"]+)", *"description": *"([^"]+)"}', json_text)
+                
+                for match in pattern_matches:
+                    name = match.group(1)
+                    description = match.group(2)
+                    patterns.append({"name": name, "description": description})
+                
+                if patterns:
+                    return {"patterns": patterns}
+                
+                # Tìm pattern không hoàn chỉnh cuối cùng
+                last_pattern_match = re.search(r'{"name": *"([^"]+)"(, *"description": *"([^"]+)")?}?$', json_text)
+                if last_pattern_match:
+                    name = last_pattern_match.group(1)
+                    description = last_pattern_match.group(3) if last_pattern_match.group(3) else "Mô tả không hoàn chỉnh"
+                    patterns.append({"name": name, "description": description})
+                    
+                if patterns:
+                    return {"patterns": patterns}
+            
+            # Nếu không tìm thấy pattern, tạo pattern giả
+            return {"patterns": [{"name": "JSON không hoàn chỉnh", "description": "Phản hồi bị cắt từ API"}]}
+        except Exception as e:
+            logger.error(f"Lỗi khi cố gắng sửa JSON không hoàn chỉnh: {str(e)}")
+            return None
+    
+    def _extract_and_fix_json(self, result_text):
+        """Trích xuất và sửa JSON từ phản hồi API gốc"""
+        try:
+            # Cố gắng tìm nội dung JSON trong phản hồi API
+            import re
+            content_match = re.search(r'"content":"(.*?)(?:\\"|")', result_text)
+            if content_match:
+                content = content_match.group(1).replace('\\\\', '\\').replace('\\"', '"')
+                # Tìm kiểm JSON trong nội dung
+                json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
+                if json_match:
+                    json_text = json_match.group(1)
+                    return self._fix_incomplete_json(json_text)
+            
+            # Tìm kiếm trực tiếp các pattern trong toàn bộ văn bản
+            pattern_matches = re.finditer(r'"name": *"([^"]+)", *"description": *"([^"]+)"', result_text)
+            patterns = []
+            for match in pattern_matches:
+                name = match.group(1)
+                description = match.group(2)
+                patterns.append({"name": name, "description": description})
+            
+            if patterns:
+                return {"patterns": patterns}
+            
+            return None
+        except Exception as e:
+            logger.error(f"Lỗi khi cố gắng trích xuất JSON từ phản hồi API gốc: {str(e)}")
+            return None
 
     async def generate_report_with_groq(self, prompt: str) -> str:
         headers = {
