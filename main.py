@@ -71,7 +71,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary, TIMESTAMP, func
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary, TIMESTAMP, func, text
 
 # In-memory cache dictionary
 cache = {}
@@ -1023,7 +1023,9 @@ class DBManager:
     async def is_user_approved(self, user_id) -> bool:
         try:
             async with self.Session() as session:
-                result = await session.execute(select(ApprovedUser).filter_by(user_id=str(user_id)))
+                # Chỉ truy vấn cột user_id thay vì tất cả các cột
+                query = select(ApprovedUser.user_id).filter_by(user_id=str(user_id))
+                result = await session.execute(query)
                 return result.scalar_one_or_none() is not None or str(user_id) == ADMIN_ID
         except Exception as e:
             logger.error(f"Lỗi kiểm tra người dùng: {str(e)}")
@@ -1032,16 +1034,43 @@ class DBManager:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def add_approved_user(self, user_id, approved_at=None, notes=None) -> None:
         try:
-            async with self.Session() as session:
-                if not await self.is_user_approved(user_id) and str(user_id) != ADMIN_ID:
-                    new_user = ApprovedUser(
-                        user_id=str(user_id),
-                        approved_at=approved_at or datetime.now(),
-                        notes=notes
-                    )
-                    session.add(new_user)
-                    await session.commit()
-                    logger.info(f"Thêm người dùng được phê duyệt: {user_id}")
+            # Kiểm tra xem người dùng đã được phê duyệt chưa
+            is_approved = await self.is_user_approved(user_id)
+            if not is_approved and str(user_id) != ADMIN_ID:
+                async with self.Session() as session:
+                    try:
+                        # Thử sử dụng phương pháp an toàn hơn bằng SQL trực tiếp
+                        insert_stmt = text("""
+                            INSERT INTO approved_users (user_id, approved_at, notes)
+                            VALUES (:user_id, :approved_at, :notes)
+                        """)
+                        await session.execute(
+                            insert_stmt,
+                            {
+                                "user_id": str(user_id),
+                                "approved_at": approved_at or datetime.now(),
+                                "notes": notes
+                            }
+                        )
+                        await session.commit()
+                        logger.info(f"Thêm người dùng được phê duyệt: {user_id}")
+                    except Exception as inner_e:
+                        logger.error(f"Lỗi khi thêm người dùng bằng SQL trực tiếp: {str(inner_e)}")
+                        # Nếu không thành công với SQL trực tiếp, thử cách ORM
+                        await session.rollback()
+                        try:
+                            new_user = ApprovedUser(
+                                user_id=str(user_id),
+                                approved_at=approved_at or datetime.now(),
+                                notes=notes
+                            )
+                            session.add(new_user)
+                            await session.commit()
+                            logger.info(f"Thêm người dùng được phê duyệt (qua ORM): {user_id}")
+                        except Exception as orm_e:
+                            logger.error(f"Lỗi khi thêm người dùng qua ORM: {str(orm_e)}")
+                            await session.rollback()
+                            raise
         except Exception as e:
             logger.error(f"Lỗi thêm người dùng: {str(e)}")
             raise
@@ -1050,11 +1079,29 @@ class DBManager:
     async def update_user_last_active(self, user_id) -> None:
         try:
             async with self.Session() as session:
-                result = await session.execute(select(ApprovedUser).filter_by(user_id=str(user_id)))
-                user = result.scalar_one_or_none()
-                if user:
-                    user.last_active = datetime.now()
-                    await session.commit()
+                # Kiểm tra người dùng tồn tại
+                query = select(ApprovedUser.id).filter_by(user_id=str(user_id))
+                result = await session.execute(query)
+                user_id_exists = result.scalar_one_or_none()
+                
+                if user_id_exists:
+                    try:
+                        # Cập nhật last_active sử dụng SQL trực tiếp để tránh lỗi ORM
+                        update_stmt = text("""
+                            UPDATE approved_users 
+                            SET last_active = :now 
+                            WHERE user_id = :user_id
+                        """)
+                        await session.execute(
+                            update_stmt, 
+                            {"now": datetime.now(), "user_id": str(user_id)}
+                        )
+                        await session.commit()
+                    except Exception as e:
+                        # Nếu có lỗi khi cập nhật last_active, có thể là do cột không tồn tại
+                        # Ghi log và tiếp tục, không cần dừng chương trình
+                        logger.warning(f"Không thể cập nhật last_active (có thể cột chưa tồn tại): {str(e)}")
+                        await session.rollback()
         except Exception as e:
             logger.error(f"Lỗi cập nhật trạng thái người dùng: {str(e)}")
 
@@ -2605,6 +2652,37 @@ async def migrate_database():
             logger.error(traceback.format_exc())
     else:
         logger.info("Không tìm thấy cơ sở dữ liệu cũ, bỏ qua quá trình di chuyển.")
+    
+    # Kiểm tra và thêm cột last_active nếu chưa tồn tại
+    try:
+        from sqlalchemy import inspect, text
+        
+        # Sử dụng engine từ db.Session
+        async with db.Session() as session:
+            # Kiểm tra xem cột last_active đã tồn tại chưa
+            connection = await session.connection()
+            insp = inspect(connection)
+            has_last_active = False
+            
+            # Lấy thông tin các cột trong bảng approved_users
+            columns_info = await connection.run_sync(lambda conn: insp.get_columns('approved_users'))
+            column_names = [col['name'] for col in columns_info]
+            
+            if 'last_active' not in column_names:
+                logger.info("Cột last_active chưa tồn tại, đang thêm vào...")
+                # Thêm cột last_active vào bảng
+                add_column_sql = text("""
+                    ALTER TABLE approved_users 
+                    ADD COLUMN last_active TIMESTAMP NULL
+                """)
+                await session.execute(add_column_sql)
+                await session.commit()
+                logger.info("Đã thêm cột last_active vào bảng approved_users")
+            else:
+                logger.info("Cột last_active đã tồn tại")
+    except Exception as e:
+        logger.error(f"Lỗi khi kiểm tra/thêm cột last_active: {str(e)}")
+        logger.error(traceback.format_exc())
 
 def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
     """
