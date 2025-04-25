@@ -2659,33 +2659,49 @@ async def migrate_database():
         
         # Sử dụng engine từ db.Session
         async with db.Session() as session:
-            # Kiểm tra xem cột last_active đã tồn tại chưa
+            # Lấy connection
             connection = await session.connection()
-            insp = inspect(connection)
             
             # Kiểm tra bảng approved_users
-            approved_users_columns = await connection.run_sync(lambda conn: insp.get_columns('approved_users'))
-            approved_users_column_names = [col['name'] for col in approved_users_columns]
-            
-            if 'last_active' not in approved_users_column_names:
-                logger.info("Cột last_active chưa tồn tại, đang thêm vào...")
-                # Thêm cột last_active vào bảng
-                add_column_sql = text("""
-                    ALTER TABLE approved_users 
-                    ADD COLUMN last_active TIMESTAMP NULL
+            try:
+                # Kiểm tra xem bảng approved_users có tồn tại không và có cột last_active không
+                has_last_active = False
+                
+                # Sử dụng raw SQL để kiểm tra cột trong bảng approved_users
+                check_column_sql = text("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'approved_users' AND column_name = 'last_active'
                 """)
-                await session.execute(add_column_sql)
-                await session.commit()
-                logger.info("Đã thêm cột last_active vào bảng approved_users")
-            else:
-                logger.info("Cột last_active đã tồn tại")
+                result = await session.execute(check_column_sql)
+                columns = result.fetchall()
+                
+                if not columns:
+                    logger.info("Cột last_active chưa tồn tại, đang thêm vào...")
+                    # Thêm cột last_active vào bảng
+                    add_column_sql = text("""
+                        ALTER TABLE approved_users 
+                        ADD COLUMN last_active TIMESTAMP NULL
+                    """)
+                    await session.execute(add_column_sql)
+                    await session.commit()
+                    logger.info("Đã thêm cột last_active vào bảng approved_users")
+                else:
+                    logger.info("Cột last_active đã tồn tại")
+            except Exception as e:
+                logger.error(f"Lỗi khi kiểm tra/thêm cột last_active: {str(e)}")
+                logger.error(traceback.format_exc())
                 
             # Kiểm tra bảng report_history
             try:
-                report_history_columns = await connection.run_sync(lambda conn: insp.get_columns('report_history'))
-                report_history_column_names = [col['name'] for col in report_history_columns]
+                # Kiểm tra xem bảng report_history có tồn tại không và có cột timeframe không
+                check_column_sql = text("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'report_history' AND column_name = 'timeframe'
+                """)
+                result = await session.execute(check_column_sql)
+                columns = result.fetchall()
                 
-                if 'timeframe' not in report_history_column_names:
+                if not columns:
                     logger.info("Cột timeframe chưa tồn tại trong bảng report_history, đang thêm vào...")
                     # Thêm cột timeframe vào bảng
                     add_timeframe_sql = text("""
