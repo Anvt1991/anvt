@@ -1201,19 +1201,53 @@ class AIAnalyzer:
             "temperature": 0.2
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as resp:
-                text = await resp.text()
-                try:
-                    result = json.loads(text)
-                    content = result['choices'][0]['message']['content']
-                    return json.loads(content)
-                except json.JSONDecodeError:
-                    logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                    return {}
-                except KeyError:
-                    logger.error(f"Phản hồi thiếu trường cần thiết: {text}")
-                    return {}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=30) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Lỗi OpenRouter API, mã trạng thái: {resp.status}")
+                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
+                        
+                    text = await resp.text()
+                    if not text or text.isspace():
+                        logger.error("OpenRouter trả về phản hồi trống")
+                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
+                        
+                    try:
+                        result = json.loads(text)
+                        if 'choices' not in result or not result['choices'] or 'message' not in result['choices'][0]:
+                            logger.error(f"Cấu trúc phản hồi từ OpenRouter không hợp lệ: {text}")
+                            return {"support_levels": [], "resistance_levels": [], "patterns": []}
+                            
+                        content = result['choices'][0]['message']['content']
+                        if not content or content.isspace():
+                            logger.error("Nội dung phản hồi OpenRouter trống")
+                            return {"support_levels": [], "resistance_levels": [], "patterns": []}
+                            
+                        try:
+                            parsed_content = json.loads(content)
+                            # Đảm bảo các khóa dự kiến tồn tại
+                            if not isinstance(parsed_content, dict):
+                                raise json.JSONDecodeError("Phản hồi không phải là đối tượng JSON", content, 0)
+                                
+                            result_dict = {
+                                "support_levels": parsed_content.get("support_levels", []),
+                                "resistance_levels": parsed_content.get("resistance_levels", []),
+                                "patterns": parsed_content.get("patterns", [])
+                            }
+                            return result_dict
+                        except json.JSONDecodeError:
+                            logger.error(f"Nội dung không thể phân tích thành JSON: {content}")
+                            return {"support_levels": [], "resistance_levels": [], "patterns": []}
+                    except json.JSONDecodeError:
+                        logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
+                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
+                    except KeyError as e:
+                        logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
+                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
+        except Exception as e:
+            logger.error(f"Lỗi kết nối OpenRouter: {str(e)}")
+            return {"support_levels": [], "resistance_levels": [], "patterns": []}
 
     async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
         try:
@@ -1348,10 +1382,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_admin_new_user(update, context)
         return
 
+    # Hiển thị các khung thời gian được hỗ trợ
+    valid_timeframes = ", ".join(sorted([key for key in DataValidator.VALID_TIMEFRAMES.keys()]))
+
     await update.message.reply_text(
-        "🚀 **V18.8 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
+        "🚀 **V18.9 - PHÂN TÍCH CHỨNG KHOÁN TOÀN DIỆN!**\n"
         "📊 **Lệnh**:\n"
-        "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
+        "- /analyze [Mã] [Số nến] [Khung thời gian] - Phân tích đa khung.\n"
+        f"  (Khung thời gian hỗ trợ: {valid_timeframes})\n"
         "- /getid - Lấy ID.\n"
         "- /approve [user_id] - Duyệt người dùng (admin).\n"
         "💡 **Bắt đầu nào!**"
@@ -1380,8 +1418,8 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tech_analyzer = TechnicalAnalyzer()
         ai_analyzer = AIAnalyzer()
         
-        # Tải dữ liệu cho các khung thời gian khác nhau
-        timeframes = ['1D', '1W', '1M']
+        # Tải dữ liệu cho các khung thời gian khác nhau - luôn sử dụng các giá trị chuẩn hóa
+        standard_timeframes = ['1D', '1W', '1M']  # Đảm bảo các khung thời gian này tồn tại trong DataValidator.VALID_TIMEFRAMES
         dfs = {}
         outlier_reports = {}
         
@@ -1389,11 +1427,17 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Tải dữ liệu song song
         async def load_timeframe_data(tf):
-            df, outlier_report = await loader.load_data(symbol, tf, num_candles)
-            processed_df = tech_analyzer.calculate_indicators(df)
-            return tf, processed_df, outlier_report
+            try:
+                # Đảm bảo khung thời gian đã được xác thực
+                validated_tf = DataValidator.validate_timeframe(tf)
+                df, outlier_report = await loader.load_data(symbol, validated_tf, num_candles)
+                processed_df = tech_analyzer.calculate_indicators(df)
+                return validated_tf, processed_df, outlier_report
+            except Exception as e:
+                logger.error(f"Lỗi xử lý khung thời gian {tf}: {str(e)}")
+                raise e
             
-        tasks = [load_timeframe_data(tf) for tf in timeframes]
+        tasks = [load_timeframe_data(tf) for tf in standard_timeframes]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for result in results:
