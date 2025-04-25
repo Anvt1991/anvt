@@ -2,89 +2,116 @@
 # -*- coding: utf-8 -*-
 
 """
-Bot Chứng Khoán Toàn Diện Phiên Bản V18.9 (Nâng cấp):
-- Tích hợp AI OpenRouter cho phân tích mẫu hình, sóng, và nến nhật.
-- Sử dụng mô hình deepseek/deepseek-chat-v3-0324:free.
-- Nâng cấp bộ xác thực và chuẩn hóa dữ liệu đầu vào (DataValidator).
-- Cải tiến hệ thống tải dữ liệu với hỗ trợ đa khung thời gian (5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M).
-- Bổ sung xử lý dữ liệu thông minh: phát hiện và xử lý outlier, chuẩn hóa DataFrame.
-- Cấu hình webhook độc quyền cho Render, không sử dụng fallback polling.
-- Sửa lỗi cảnh báo datetime với isin và lỗi event loop.
-- Tăng cường JSON response formatting và xử lý lỗi với OpenRouter API.
-- Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng.
+Bot Chứng Khoán Toàn Diện Phiên Bản Local (Nâng cấp từ V18.9):
+- Tải dữ liệu chứng khoán qua VNStock/Yahoo Finance với cache bằng cachetools.
+- Hợp nhất, chuẩn hóa dữ liệu, bổ sung khung thời gian (1w, 1mo), phát hiện bất thường.
+- Phân tích kỹ thuật đa khung thời gian (SMA, RSI, MACD, ...).
+- Thu thập tin tức từ nhiều nguồn RSS (async).
+- Phân tích cơ bản nâng cao, phân biệt cổ phiếu/chỉ số.
+- Dự báo giá (Prophet) và tín hiệu giao dịch (XGBoost) làm đầu vào cho Gemini AI.
+- Báo cáo phân tích bằng Gemini AI (fallback sang Groq), lưu lịch sử vào SQLite (async).
+- Tích hợp Telegram với các lệnh: /start, /analyze, /getid, /approve.
+- Auto training mô hình theo lịch định kỳ (mỗi ngày 2h sáng).
+- Tối ưu chạy local với polling, xử lý async hoàn toàn.
+- Nâng cấp từ 18.9 lên 19.2:
+  - Thêm lớp Validate/Normalize toàn diện với xác thực dữ liệu, căn chỉnh chuỗi thời gian
+  - Mở rộng hỗ trợ đa khung thời gian (5m, 15m, 30m, 1h, 4h, và legacy) với đồng bộ hóa
+  - Nâng cấp từ SQLite đến aiosqlite với migrations, theo dõi version và lịch sử mô hình
+  - Cải thiện xử lý lỗi và logging với truy xuất nguồn gốc và stack chi tiết
+  - Tối ưu hóa hiệu suất phân tích đa khung thời gian và dự báo
 """
 
+# Standard library imports
 import os
-import sys
 import io
+import json
+import html
 import logging
-import pickle
-from datetime import datetime, timedelta
 import asyncio
+import inspect
+import traceback
+import sqlite3  # Needed for migration
+import re  # For regex pattern matching
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 
+# Data processing imports
 import pandas as pd
 import numpy as np
+
+# Environment setup
+import pytz
 from dotenv import load_dotenv
+
+# Telegram bot imports
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# Data fetching and analysis imports
 import yfinance as yf
 from vnstock import Vnstock
 import google.generativeai as genai
-
+import xgboost as xgb
+from prophet import Prophet
 from ta import trend, momentum, volatility
 from ta.volume import MFIIndicator
 import feedparser
+import holidays
+from sklearn.metrics import accuracy_score
 
+# Async and persistence imports
+import aiohttp
+import pickle
+from tenacity import retry, stop_after_attempt, wait_exponential
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# Database imports
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary
+from sqlalchemy import Column, Integer, String, Float, Text, DateTime, select, LargeBinary, TIMESTAMP, func
 
-import xgboost as xgb
-from sklearn.metrics import accuracy_score
-from prophet import Prophet
-
-import matplotlib.pyplot as plt
-import holidays
-import html
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from tenacity import retry, stop_after_attempt, wait_exponential
-
-import aiohttp
-import json
-import traceback
-import re
+# In-memory cache dictionary
+cache = {}
 
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-REDIS_URL = os.getenv("REDIS_URL")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL_NAME = "deepseek-r1-distill-llama-70b"  # Model ổn định từ bot 1.5
 ADMIN_ID = os.getenv("ADMIN_ID", "1225226589")
+# Database URLs
+DATABASE_URL = os.getenv("DATABASE_URL")          # ví dụ: postgres://user:pass@hostname:port/dbname
+REDIS_URL = os.getenv("REDIS_URL")                # ví dụ: redis://:pass@hostname:port/0
+# Render deployment variables
 PORT = int(os.environ.get("PORT", 10000))
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 RENDER_SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME", "")
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# Thiết lập logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding='utf-8')
+    ]
+)
 logger = logging.getLogger(__name__)
 
-CACHE_EXPIRE_SHORT = 1800
-CACHE_EXPIRE_MEDIUM = 3600
-CACHE_EXPIRE_LONG = 86400
-NEWS_CACHE_EXPIRE = 900
+# Các hằng số và cấu hình
+CACHE_EXPIRE_SHORT = 1800   # 30 phút
+CACHE_EXPIRE_MEDIUM = 3600  # 1 giờ
+CACHE_EXPIRE_LONG = 86400   # 1 ngày
+NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
-
-executor = ThreadPoolExecutor(max_workers=5)
-
-async def run_in_thread(func, *args, **kwargs):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+TZ = pytz.timezone('Asia/Bangkok')
+VERSION = "V19.2"           # Phiên bản ứng dụng
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -119,6 +146,12 @@ class RedisManager:
 
 redis_manager = RedisManager()
 
+executor = ThreadPoolExecutor(max_workers=5)
+
+async def run_in_thread(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+
 # ---------- KẾT NỐI POSTGRESQL (Async) ----------
 Base = declarative_base()
 
@@ -127,11 +160,14 @@ class ApprovedUser(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(String, unique=True, nullable=False)
     approved_at = Column(DateTime, default=datetime.now)
+    last_active = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
 
 class ReportHistory(Base):
     __tablename__ = 'report_history'
     id = Column(Integer, primary_key=True)
     symbol = Column(String, nullable=False)
+    timeframe = Column(String, nullable=False, default='1D')
     date = Column(String, nullable=False)
     report = Column(Text, nullable=False)
     close_today = Column(Float, nullable=False)
@@ -142,10 +178,12 @@ class TrainedModel(Base):
     __tablename__ = 'trained_models'
     id = Column(Integer, primary_key=True)
     symbol = Column(String, nullable=False)
-    model_type = Column(String, nullable=False)
+    model_type = Column(String, nullable=False)   # 'prophet' hoặc 'xgboost'
     model_blob = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime, default=datetime.now)
     performance = Column(Float, nullable=True)
+    version = Column(String, nullable=False, default="1.0")
+    params = Column(Text, nullable=True)  # JSON string của các tham số mô hình
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
@@ -154,7 +192,830 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+# ---------- LỚP VALIDATE/NORMALIZE TOÀN DIỆN ----------
+class DataValidator:
+    """
+    Lớp xác thực và chuẩn hóa dữ liệu toàn diện.
+    Cung cấp các phương thức để xác thực, chuẩn hóa và căn chỉnh dữ liệu chứng khoán.
+    """
+    # Danh sách khung thời gian hợp lệ
+    VALID_TIMEFRAMES = [
+        '5m', '15m', '30m', '1h', '4h',  # Khung thời gian mới
+        '1D', '1W', '1M'                 # Khung thời gian legacy
+    ]
+    
+    # Danh sách các mã chỉ số
+    INDICES = ['VNINDEX', 'VN30', 'HNX30', 'HNXINDEX', 'UPCOM']
+    
+    # Định dạng mã hợp lệ
+    TICKER_PATTERN = r'^[A-Z0-9]{3,6}$'
+    
+    @staticmethod
+    def is_valid_timeframe(timeframe: str) -> bool:
+        """Kiểm tra tính hợp lệ của khung thời gian"""
+        return timeframe.upper() in [tf.upper() for tf in DataValidator.VALID_TIMEFRAMES]
+    
+    @staticmethod
+    def normalize_timeframe(timeframe: str) -> str:
+        """Chuẩn hóa khung thời gian"""
+        mapping = {
+            '1d': '1D', '1day': '1D', 'daily': '1D', 'd': '1D', 'day': '1D',
+            '1w': '1W', '1week': '1W', 'weekly': '1W', 'w': '1W', 'week': '1W',
+            '1m': '1M', '1month': '1M', 'monthly': '1M', 'm': '1M', 'month': '1M',
+            '5m': '5m', '5min': '5m', '5': '5m',
+            '15m': '15m', '15min': '15m', '15': '15m',
+            '30m': '30m', '30min': '30m', '30': '30m',
+            '1h': '1h', '1hour': '1h', 'h': '1h', 'hour': '1h',
+            '4h': '4h', '4hour': '4h'
+        }
+        normalized = mapping.get(timeframe.lower(), timeframe)
+        
+        # Kiểm tra xem có phải định dạng timeframe hợp lệ không (thêm logic mở rộng)
+        if DataValidator.is_valid_timeframe(normalized):
+            return normalized
+            
+        # Nếu không phải timeframe đã biết, kiểm tra xem có định dạng phổ biến không
+        # Ví dụ "2h", "8h" vẫn có thể được coi là hợp lệ nếu theo quy ước
+        import re
+        tf_pattern = r'^(\d+)([mhdwM])$'  # Patterns như "2h", "6h", "8h", "45m"
+        match = re.match(tf_pattern, normalized)
+        if match:
+            # Giữ nguyên định dạng nhưng đăng ký vào log để sau này có thể bổ sung
+            logger.info(f"Khung thời gian mới phát hiện: {normalized}, sẽ sử dụng nguyên bản.")
+            return normalized
+            
+        # Nếu không khớp với bất kỳ định dạng nào, mới báo lỗi
+        raise ValueError(f"Khung thời gian không hợp lệ: {timeframe}")
+    
+    @staticmethod
+    def validate_ticker(ticker: str) -> str:
+        """Xác thực mã chứng khoán"""
+        import re
+        ticker = ticker.upper().strip()
+        # Kiểm tra xem ticker có phải là chỉ số không
+        if ticker in DataValidator.INDICES:
+            return ticker
+        # Nếu không phải chỉ số, kiểm tra định dạng
+        if re.match(DataValidator.TICKER_PATTERN, ticker):
+            return ticker
+        raise ValueError(f"Mã chứng khoán không hợp lệ: {ticker}")
+    
+    @staticmethod
+    def is_index(ticker: str) -> bool:
+        """Kiểm tra xem mã có phải là chỉ số hay không"""
+        return ticker.upper() in DataValidator.INDICES
+    
+    @staticmethod
+    def validate_candles(num_candles: int) -> int:
+        """Xác thực số lượng nến"""
+        if 20 <= num_candles <= 1000:
+            return num_candles
+        raise ValueError(f"Số lượng nến phải từ 20 đến 1000, nhận được: {num_candles}")
+    
+    @staticmethod
+    def validate_date_range(start_date: str, end_date: str) -> tuple:
+        """Xác thực khoảng thời gian"""
+        try:
+            start = pd.to_datetime(start_date)
+            end = pd.to_datetime(end_date)
+            if start >= end:
+                raise ValueError("Ngày bắt đầu phải trước ngày kết thúc")
+            if end > datetime.now(TZ):
+                end = datetime.now(TZ)
+            return start, end
+        except Exception as e:
+            raise ValueError(f"Khoảng thời gian không hợp lệ: {str(e)}")
+    
+    @staticmethod
+    def align_timestamps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+        """Căn chỉnh dấu thời gian theo khung thời gian chính xác"""
+        if df.empty:
+            return df
+        
+        df = df.copy()
+        # Đảm bảo index là datetime và có múi giờ
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        
+        # Nếu không có múi giờ, giả định là múi giờ Bangkok
+        if df.index.tz is None:
+            df.index = df.index.tz_localize(TZ)
+        
+        # Căn chỉnh timestamp dựa trên khung thời gian
+        if timeframe == '1D':
+            # Đối với dữ liệu ngày, lấy giá mỗi ngày lúc EOD (15:00)
+            df.index = df.index.normalize() + pd.Timedelta(hours=15)
+        elif timeframe == '1W':
+            # Đối với dữ liệu tuần, lấy giá vào cuối tuần (Thứ 6, 15:00)
+            df.index = df.index.to_period('W').to_timestamp() + pd.Timedelta(days=4, hours=15)
+        elif timeframe == '1M':
+            # Đối với dữ liệu tháng, lấy giá vào cuối tháng
+            df.index = df.index.to_period('M').to_timestamp() + pd.Timedelta(hours=15)
+        elif timeframe == '5m':
+            # Căn chỉnh theo mỗi 5 phút
+            df.index = df.index.floor('5min')
+        elif timeframe == '15m':
+            # Căn chỉnh theo mỗi 15 phút
+            df.index = df.index.floor('15min')
+        elif timeframe == '30m':
+            # Căn chỉnh theo mỗi 30 phút
+            df.index = df.index.floor('30min')
+        elif timeframe == '1h':
+            # Căn chỉnh theo mỗi giờ
+            df.index = df.index.floor('H')
+        elif timeframe == '4h':
+            # Căn chỉnh theo mỗi 4 giờ
+            df.index = df.index.floor('4H')
+        
+        # Sắp xếp theo thời gian tăng dần
+        df = df.sort_index()
+        
+        return df
+    
+    @staticmethod
+    def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        """Chuẩn hóa DataFrame với xử lý giá trị thiếu, outlier và định dạng cột"""
+        if df.empty:
+            return df
+        
+        df = df.copy()
+        
+        # Chuẩn hóa tên cột
+        column_mapping = {
+            'time': 'date', 'Time': 'date', 'DATE': 'date', 'Date': 'date',
+            'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
+            'Adj Close': 'adj_close', 'Adjusted_close': 'adj_close'
+        }
+        df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
+        
+        # Đảm bảo các cột bắt buộc
+        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"DataFrame thiếu cột bắt buộc: {col}")
+        
+        # Xử lý giá trị null: lấp đầy giá trị thiếu trong chuỗi thời gian
+        if any(df.isnull().sum()):
+            # Phương pháp điền: forward fill cho giá mở/đóng/cao/thấp, không điền cho khối lượng
+            df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].fillna(method='ffill')
+            
+            # Các giá trị vẫn còn thiếu (ở đầu chuỗi) sẽ được điền bằng backward fill
+            df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].fillna(method='bfill')
+            
+            # Khối lượng thiếu được điền 0
+            df['volume'] = df['volume'].fillna(0)
+        
+        # Kiểm tra tính nhất quán của dữ liệu
+        # - Giá cao >= giá đóng, mở, thấp
+        # - Giá thấp <= giá đóng, mở, cao
+        df['high'] = df[['high', 'open', 'close']].max(axis=1)
+        df['low'] = df[['low', 'open', 'close']].min(axis=1)
+        
+        # Chuyển đổi kiểu dữ liệu
+        for col in required_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Loại bỏ các hàng có giá trị âm trong giá
+        df = df[(df['open'] > 0) & (df['high'] > 0) & (df['low'] > 0) & (df['close'] > 0)]
+        
+        # Thêm cột ngày giao dịch nếu đang dùng cột date là index
+        if 'date' not in df.columns and isinstance(df.index, pd.DatetimeIndex):
+            df['date'] = df.index
+        
+        return df
+    
+    @staticmethod
+    def detect_and_handle_outliers(df: pd.DataFrame, method: str = 'iqr', threshold: float = 3.0) -> tuple[pd.DataFrame, str]:
+        """
+        Phát hiện và xử lý giá trị ngoại lệ (outlier) trong dữ liệu
+        
+        Args:
+            df: DataFrame cần xử lý
+            method: Phương pháp phát hiện ('iqr' hoặc 'zscore')
+            threshold: Ngưỡng phát hiện
+            
+        Returns:
+            DataFrame đã xử lý và báo cáo về outliers
+        """
+        if df.empty:
+            return df, "DataFrame rỗng, không thể phát hiện outlier"
+        
+        df = df.copy()
+        outlier_report = "Phát hiện outlier:\n"
+        outliers_found = False
+        
+        # Cột cần kiểm tra outlier
+        cols_to_check = ['open', 'high', 'low', 'close', 'volume']
+        cols_to_check = [col for col in cols_to_check if col in df.columns]
+        
+        if method == 'iqr':
+            for col in cols_to_check:
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                
+                lower_bound = Q1 - threshold * IQR
+                upper_bound = Q3 + threshold * IQR
+                
+                outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)]
+                if not outliers.empty:
+                    outliers_found = True
+                    outlier_report += f"\n{col}: {len(outliers)} giá trị ngoại lệ\n"
+                    for idx, row in outliers.iterrows():
+                        date_str = idx.strftime('%Y-%m-%d %H:%M') if isinstance(idx, pd.Timestamp) else str(idx)
+                        outlier_report += f"  - {date_str}: {row[col]:.2f}\n"
+                    
+                    # Xử lý outlier bằng cách clip giới hạn
+                    df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
+        
+        elif method == 'zscore':
+            from scipy import stats
+            for col in cols_to_check:
+                z_scores = stats.zscore(df[col])
+                abs_z_scores = np.abs(z_scores)
+                outliers_mask = abs_z_scores > threshold
+                outliers = df[outliers_mask]
+                
+                if not outliers.empty:
+                    outliers_found = True
+                    outlier_report += f"\n{col}: {len(outliers)} giá trị ngoại lệ\n"
+                    for idx, row in outliers.iterrows():
+                        date_str = idx.strftime('%Y-%m-%d %H:%M') if isinstance(idx, pd.Timestamp) else str(idx)
+                        z = z_scores[df.index.get_loc(idx)]
+                        outlier_report += f"  - {date_str}: {row[col]:.2f} (z={z:.2f})\n"
+                    
+                    # Xử lý outlier: thay thế bằng giá trị trung bình
+                    mean_val = df[~outliers_mask][col].mean()
+                    df.loc[outliers_mask, col] = mean_val
+        
+        if not outliers_found:
+            outlier_report = "Không phát hiện giá trị ngoại lệ"
+        
+        return df, outlier_report
+    
+    @staticmethod
+    def validate_fundamental_data(data: dict) -> dict:
+        """Xác thực dữ liệu cơ bản của cổ phiếu"""
+        if not data:
+            return {"error": "Không có dữ liệu cơ bản"}
+        
+        valid_data = {}
+        # Danh sách các chỉ số cơ bản và phạm vi hợp lệ
+        key_ranges = {
+            'EPS': (-1000, 100000),
+            'P/E': (0, 1000),
+            'P/B': (0, 100),
+            'ROE': (-100, 100),
+            'ROA': (-100, 100),
+            'Dividend Yield': (0, 100),
+            'Market Cap': (0, 1e12),
+            'Revenue': (0, 1e12),
+            'Profit': (-1e12, 1e12)
+        }
+        
+        # Chuẩn hóa tên key
+        key_mapping = {
+            'earningPerShare': 'EPS',
+            'eps': 'EPS',
+            'priceToEarning': 'P/E',
+            'pe': 'P/E',
+            'priceToBook': 'P/B',
+            'pb': 'P/B',
+            'returnOnEquity': 'ROE',
+            'roe': 'ROE',
+            'returnOnAsset': 'ROA',
+            'roa': 'ROA',
+            'dividendYield': 'Dividend Yield',
+            'dividend': 'Dividend Yield',
+            'marketCap': 'Market Cap',
+            'market_cap': 'Market Cap',
+            'revenue': 'Revenue',
+            'profit': 'Profit'
+        }
+        
+        # Chuẩn hóa và xác thực dữ liệu
+        for key, value in data.items():
+            normalized_key = key_mapping.get(key.lower(), key)
+            
+            # Nếu là key quan trọng, kiểm tra phạm vi
+            if normalized_key in key_ranges:
+                min_val, max_val = key_ranges[normalized_key]
+                try:
+                    # Chuyển đổi sang float
+                    numeric_value = float(value)
+                    if min_val <= numeric_value <= max_val:
+                        valid_data[normalized_key] = numeric_value
+                    else:
+                        logger.warning(f"Dữ liệu '{normalized_key}' = {numeric_value} ngoài phạm vi hợp lệ ({min_val}, {max_val})")
+                except (ValueError, TypeError):
+                    logger.warning(f"Không thể chuyển đổi '{normalized_key}' = {value} sang số")
+            else:
+                # Các key khác giữ nguyên
+                valid_data[normalized_key] = value
+        
+        return valid_data
+    
+    @staticmethod
+    def calculate_trading_days(start_date: datetime, end_date: datetime, country: str = 'VN') -> pd.DatetimeIndex:
+        """Tính toán các ngày giao dịch trong khoảng thời gian, loại bỏ ngày nghỉ và cuối tuần"""
+        if start_date >= end_date:
+            raise ValueError("Ngày bắt đầu phải trước ngày kết thúc")
+        
+        # Lấy danh sách ngày nghỉ lễ
+        country_holidays = holidays.country_holidays(country, years=range(start_date.year, end_date.year + 1))
+        
+        # Tạo DatetimeIndex với tần suất ngày làm việc (loại bỏ cuối tuần)
+        business_days = pd.date_range(start=start_date, end=end_date, freq='B')
+        
+        # Loại bỏ ngày nghỉ lễ
+        trading_days = [day for day in business_days if day not in country_holidays]
+        
+        return pd.DatetimeIndex(trading_days)
+    
+    @staticmethod
+    def validate_api_response(response: dict, expected_keys: list) -> bool:
+        """Xác thực phản hồi API có đầy đủ các trường dữ liệu cần thiết hay không"""
+        if not response:
+            return False
+        return all(key in response for key in expected_keys)
+
+# ---------- KẾT NỐI AIOSQLITE & MIGRATIONS (DEPRECATED) ----------
+# class AsyncDBManager:
+#     """
+#     Quản lý cơ sở dữ liệu bất đồng bộ sử dụng aiosqlite với migrations và theo dõi lịch sử.
+#     """
+#     VERSION = "1.0.0"  # Schema version
+#     DB_FILE = 'bot_sieucap_v19.db'
+#     
+#     def __init__(self, db_file=None):
+#         self.db_file = db_file or self.DB_FILE
+#         self.conn = None
+#         self.migrations = [
+#             self._migration_v1_0_0,
+#         ]
+#     
+#     async def connect(self):
+#         """Kết nối đến cơ sở dữ liệu"""
+#         self.conn = await aiosqlite.connect(self.db_file)
+#         # Để nhận kết quả dưới dạng dict
+#         self.conn.row_factory = lambda cursor, row: {
+#             col[0]: row[idx] for idx, col in enumerate(cursor.description)
+#         }
+#         # Kiểm tra và áp dụng migrations nếu cần
+#         await self._check_and_migrate()
+#     
+#     async def _check_and_migrate(self):
+#         """Kiểm tra phiên bản schema và áp dụng migrations nếu cần"""
+#         try:
+#             # Kiểm tra bảng schema_version tồn tại chưa
+#             async with self.conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'") as cursor:
+#                 table_exists = await cursor.fetchone()
+#             
+#             if not table_exists:
+#                 # Nếu không tồn tại, tạo bảng schema_version và áp dụng tất cả migrations
+#                 await self.conn.execute("""
+#                     CREATE TABLE schema_version (
+#                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                         version TEXT NOT NULL,
+#                         applied_at TEXT NOT NULL
+#                     )
+#                 """)
+#                 for migration in self.migrations:
+#                     await migration()
+#                 await self.conn.execute(
+#                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+#                     (self.VERSION, datetime.now(TZ).isoformat())
+#                 )
+#             else:
+#                 # Nếu đã tồn tại, kiểm tra phiên bản hiện tại
+#                 async with self.conn.execute("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1") as cursor:
+#                     result = await cursor.fetchone()
+#                     current_version = result["version"] if result else "0.0.0"
+#                 
+#                 # Áp dụng migrations cần thiết
+#                 applied = False
+#                 for migration in self.migrations:
+#                     # Lấy phiên bản từ tên hàm migration (vd: _migration_v1_0_0 -> 1.0.0)
+#                     migration_version = migration.__name__.split('_v')[1].replace('_', '.')
+#                     if self._compare_versions(migration_version, current_version) > 0:
+#                         logger.info(f"Áp dụng migration {migration_version}")
+#                         await migration()
+#                         await self.conn.execute(
+#                             "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+#                             (migration_version, datetime.now(TZ).isoformat())
+#                         )
+#                         applied = True
+#                 
+#                 if applied:
+#                     await self.conn.commit()
+#                     
+#         except Exception as e:
+#             logger.error(f"Lỗi kiểm tra/áp dụng migrations: {str(e)}")
+#             # Rollback trong trường hợp lỗi
+#             await self.conn.rollback()
+#             raise
+#     
+#     def _compare_versions(self, version1, version2):
+#         """So sánh hai phiên bản semantically (1.0.0 > 0.9.0)"""
+#         v1_parts = list(map(int, version1.split('.')))
+#         v2_parts = list(map(int, version2.split('.')))
+#         
+#         for i in range(min(len(v1_parts), len(v2_parts))):
+#             if v1_parts[i] > v2_parts[i]:
+#                 return 1
+#             elif v1_parts[i] < v2_parts[i]:
+#                 return -1
+#         
+#         # Nếu các phần bằng nhau, so sánh độ dài
+#         if len(v1_parts) > len(v2_parts):
+#             return 1
+#         elif len(v1_parts) < len(v2_parts):
+#             return -1
+#         else:
+#             return 0
+#     
+#     async def _migration_v1_0_0(self):
+#         """Migration ban đầu để tạo cấu trúc cơ sở dữ liệu"""
+#         await self.conn.executescript("""
+#             -- Bảng người dùng đã được phê duyệt
+#             CREATE TABLE IF NOT EXISTS approved_users (
+#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                 user_id TEXT UNIQUE,
+#                 approved_at TEXT NOT NULL,
+#                 last_active TEXT,
+#                 notes TEXT
+#             );
+#             
+#             -- Bảng lịch sử báo cáo
+#             CREATE TABLE IF NOT EXISTS report_history (
+#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                 symbol TEXT NOT NULL,
+#                 date TEXT NOT NULL,
+#                 report TEXT NOT NULL,
+#                 close_today REAL NOT NULL,
+#                 close_yesterday REAL NOT NULL,
+#                 timestamp TEXT NOT NULL,
+#                 timeframe TEXT DEFAULT '1D'
+#             );
+#             
+#             -- Bảng mô hình đã huấn luyện (với version tracking)
+#             CREATE TABLE IF NOT EXISTS trained_models (
+#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                 symbol TEXT NOT NULL,
+#                 model_type TEXT NOT NULL,
+#                 model_blob BLOB NOT NULL,
+#                 created_at TEXT NOT NULL,
+#                 performance REAL,
+#                 version TEXT NOT NULL,
+#                 params TEXT,
+#                 UNIQUE(symbol, model_type, version)
+#             );
+#             
+#             -- Bảng lịch sử hiệu suất mô hình
+#             CREATE TABLE IF NOT EXISTS model_performance_history (
+#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+#                 model_id INTEGER NOT NULL,
+#                 evaluated_at TEXT NOT NULL,
+#                 metric_name TEXT NOT NULL,
+#                 metric_value REAL NOT NULL,
+#                 FOREIGN KEY (model_id) REFERENCES trained_models (id)
+#             );
+#             
+#             -- Chỉ mục để cải thiện hiệu suất truy vấn
+#             CREATE INDEX IF NOT EXISTS idx_report_history_symbol ON report_history (symbol);
+#             CREATE INDEX IF NOT EXISTS idx_report_history_date ON report_history (date);
+#             CREATE INDEX IF NOT EXISTS idx_trained_models_symbol ON trained_models (symbol);
+#             CREATE INDEX IF NOT EXISTS idx_trained_models_model_type ON trained_models (model_type);
+#         """)
+#         await self.conn.commit()
+#     
+#     async def is_user_approved(self, user_id: str) -> bool:
+#         """Kiểm tra người dùng đã được phê duyệt chưa"""
+#         if not self.conn:
+#             await self.connect()
+#         
+#         if user_id == ADMIN_ID:
+#             return True
+#             
+#         async with self.conn.execute(
+#             "SELECT * FROM approved_users WHERE user_id = ?", (user_id,)
+#         ) as cursor:
+#             result = await cursor.fetchone()
+#             return result is not None
+#     
+#     async def add_approved_user(self, user_id: str, approved_at: str = None, notes: str = None):
+#         """Thêm người dùng vào danh sách được phê duyệt"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         is_approved = await self.is_user_approved(user_id)
+#         if not is_approved and user_id != ADMIN_ID:
+#             approved_at = approved_at or datetime.now(TZ).isoformat()
+#             try:
+#                 await self.conn.execute(
+#                     "INSERT INTO approved_users (user_id, approved_at, notes) VALUES (?, ?, ?)",
+#                     (user_id, approved_at, notes)
+#                 )
+#                 await self.conn.commit()
+#                 logger.info(f"Thêm người dùng được phê duyệt: {user_id}")
+#             except Exception as e:
+#                 logger.error(f"Lỗi thêm người dùng {user_id}: {str(e)}")
+#                 await self.conn.rollback()
+#     
+#     async def update_user_last_active(self, user_id: str):
+#         """Cập nhật thời gian hoạt động gần nhất của người dùng"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             # Kiểm tra xem user có tồn tại trong hệ thống không
+#             async with self.conn.execute(
+#                 "SELECT 1 FROM approved_users WHERE user_id = ?", (user_id,)
+#             ) as cursor:
+#                 user_exists = await cursor.fetchone()
+#                 
+#             # Nếu user không tồn tại, không cần cập nhật
+#             if not user_exists:
+#                 logger.info(f"Không cập nhật last_active: User {user_id} không tồn tại trong database")
+#                 return
+#                 
+#             # Cập nhật trường last_active
+#             now = datetime.now(TZ).isoformat()
+#             await self.conn.execute(
+#                 "UPDATE approved_users SET last_active = ? WHERE user_id = ?",
+#                 (now, user_id)
+#             )
+#             await self.conn.commit()
+#         except Exception as e:
+#             logger.error(f"Lỗi cập nhật last_active cho {user_id}: {str(e)}")
+#             await self.conn.rollback()
+#     
+#     async def load_report_history(self, symbol: str, timeframe: str = '1D', limit: int = 10) -> list:
+#         """Tải lịch sử báo cáo"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             query = """
+#                 SELECT * FROM report_history 
+#                 WHERE symbol = ? AND timeframe = ? 
+#                 ORDER BY id DESC LIMIT ?
+#             """
+#             async with self.conn.execute(query, (symbol, timeframe, limit)) as cursor:
+#                 rows = await cursor.fetchall()
+#                 return rows if rows else []
+#         except Exception as e:
+#             logger.error(f"Lỗi tải lịch sử báo cáo: {str(e)}")
+#             return []
+#     
+#     async def save_report_history(self, symbol: str, report: str, close_today: float, 
+#                              close_yesterday: float, timeframe: str = '1D'):
+#         """Lưu báo cáo vào lịch sử"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             date_str = datetime.now(TZ).strftime('%Y-%m-%d')
+#             timestamp = datetime.now(TZ).isoformat()
+#             query = """
+#                 INSERT INTO report_history 
+#                 (symbol, date, report, close_today, close_yesterday, timestamp, timeframe) 
+#                 VALUES (?, ?, ?, ?, ?, ?, ?)
+#             """
+#             await self.conn.execute(
+#                 query, 
+#                 (symbol, date_str, report, close_today, close_yesterday, timestamp, timeframe)
+#             )
+#             await self.conn.commit()
+#             logger.info(f"Lưu báo cáo mới cho {symbol} ({timeframe})")
+#         except Exception as e:
+#             logger.error(f"Lỗi lưu báo cáo: {str(e)}")
+#             await self.conn.rollback()
+#             raise
+#     
+#     async def store_trained_model(self, symbol: str, model_type: str, model, 
+#                              performance: float = None, version: str = "1.0",
+#                              params: dict = None):
+#         """Lưu mô hình đã huấn luyện vào cơ sở dữ liệu"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             # Chuyển đổi model thành binary
+#             model_binary = pickle.dumps(model)
+#             params_json = json.dumps(params) if params else None
+#             created_at = datetime.now(TZ).isoformat()
+#             
+#             # Kiểm tra xem mô hình đã tồn tại chưa
+#             async with self.conn.execute(
+#                 "SELECT id FROM trained_models WHERE symbol = ? AND model_type = ? AND version = ?",
+#                 (symbol, model_type, version)
+#             ) as cursor:
+#                 existing = await cursor.fetchone()
+#             
+#             if existing:
+#                 # Cập nhật mô hình hiện có
+#                 query = """
+#                     UPDATE trained_models 
+#                     SET model_blob = ?, created_at = ?, performance = ?, params = ?
+#                     WHERE id = ?
+#                 """
+#                 await self.conn.execute(
+#                     query, 
+#                     (model_binary, created_at, performance, params_json, existing["id"])
+#                 )
+#             else:
+#                 # Thêm mô hình mới
+#                 query = """
+#                     INSERT INTO trained_models 
+#                     (symbol, model_type, model_blob, created_at, performance, version, params) 
+#                     VALUES (?, ?, ?, ?, ?, ?, ?)
+#                 """
+#                 await self.conn.execute(
+#                     query, 
+#                     (symbol, model_type, model_binary, created_at, performance, version, params_json)
+#                 )
+#                 
+#             await self.conn.commit()
+#             logger.info(f"Lưu mô hình {model_type} v{version} cho {symbol} thành công với hiệu suất: {performance}")
+#         except Exception as e:
+#             logger.error(f"Lỗi lưu mô hình: {str(e)}")
+#             await self.conn.rollback()
+#             raise
+#     
+#     async def load_trained_model(self, symbol: str, model_type: str, version: str = None):
+#         """Tải mô hình đã huấn luyện từ cơ sở dữ liệu"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             if version:
+#                 # Tải mô hình theo version cụ thể
+#                 query = """
+#                     SELECT * FROM trained_models 
+#                     WHERE symbol = ? AND model_type = ? AND version = ?
+#                     ORDER BY created_at DESC LIMIT 1
+#                 """
+#                 async with self.conn.execute(query, (symbol, model_type, version)) as cursor:
+#                     model_record = await cursor.fetchone()
+#             else:
+#                 # Tải mô hình mới nhất
+#                 query = """
+#                     SELECT * FROM trained_models 
+#                     WHERE symbol = ? AND model_type = ?
+#                     ORDER BY created_at DESC LIMIT 1
+#                 """
+#                 async with self.conn.execute(query, (symbol, model_type)) as cursor:
+#                     model_record = await cursor.fetchone()
+#             
+#             if model_record:
+#                 model = pickle.loads(model_record["model_blob"])
+#                 performance = model_record["performance"]
+#                 version = model_record["version"]
+#                 created_at = model_record["created_at"]
+#                 params = json.loads(model_record["params"]) if model_record["params"] else None
+#                 
+#                 logger.info(f"Tải mô hình {model_type} v{version} cho {symbol} thành công")
+#                 return model, performance, version, created_at, params
+#             
+#             logger.warning(f"Không tìm thấy mô hình {model_type} cho {symbol}")
+#             return None, None, None, None, None
+#             
+#         except Exception as e:
+#             logger.error(f"Lỗi tải mô hình: {str(e)}")
+#             return None, None, None, None, None
+#     
+#     async def get_model_versions(self, symbol: str, model_type: str) -> list:
+#         """Lấy danh sách các phiên bản của mô hình"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             query = """
+#                 SELECT version, created_at, performance 
+#                 FROM trained_models 
+#                 WHERE symbol = ? AND model_type = ?
+#                 ORDER BY created_at DESC
+#             """
+#             async with self.conn.execute(query, (symbol, model_type)) as cursor:
+#                 versions = await cursor.fetchall()
+#                 return versions if versions else []
+#         except Exception as e:
+#             logger.error(f"Lỗi lấy versions của mô hình: {str(e)}")
+#             return []
+#     
+#     async def get_training_symbols(self) -> list:
+#         """Lấy danh sách các mã đã có trong lịch sử training"""
+#         if not self.conn:
+#             await self.connect()
+#             
+#         try:
+#             # Lấy các mã từ bảng report_history
+#             query = "SELECT DISTINCT symbol FROM report_history"
+#             async with self.conn.execute(query) as cursor:
+#                 symbols = await cursor.fetchall()
+#                 return [record["symbol"] for record in symbols] if symbols else []
+#         except Exception as e:
+#             logger.error(f"Lỗi lấy danh sách symbols: {str(e)}")
+#             return []
+#     
+#     async def migrate_from_sync_db(self, sync_db_file: str = 'bot_sieucap_v18.db'):
+#         """Di chuyển dữ liệu từ cơ sở dữ liệu đồng bộ (SQLite) cũ sang cơ sở dữ liệu bất đồng bộ mới"""
+#         if not os.path.exists(sync_db_file):
+#             logger.warning(f"Không tìm thấy file cơ sở dữ liệu cũ: {sync_db_file}")
+#             return
+#             
+#         if not self.conn:
+#             await self.connect()
+#             
+#         logger.info(f"Bắt đầu di chuyển dữ liệu từ {sync_db_file}...")
+#         
+#         try:
+#             # Mở kết nối đến cơ sở dữ liệu cũ
+#             old_conn = sqlite3.connect(sync_db_file)
+#             old_conn.row_factory = sqlite3.Row
+#             
+#             # Di chuyển approved_users
+#             cur = old_conn.execute("SELECT user_id, approved_at FROM approved_users")
+#             users = cur.fetchall()
+#             for user in users:
+#                 user_id = user['user_id']
+#                 approved_at = user['approved_at']
+#                 notes = "Migrated from legacy database"
+#                 
+#                 # Kiểm tra xem user đã tồn tại trong cơ sở dữ liệu mới chưa
+#                 query = "SELECT 1 FROM approved_users WHERE user_id = ?"
+#                 async with self.conn.execute(query, (user_id,)) as cursor:
+#                     exists = await cursor.fetchone()
+#                     
+#                 if not exists:
+#                     query = "INSERT INTO approved_users (user_id, approved_at, notes) VALUES (?, ?, ?)"
+#                     await self.conn.execute(query, (user_id, approved_at, notes))
+#             
+#             # Di chuyển report_history
+#             cur = old_conn.execute("SELECT symbol, date, report, close_today, close_yesterday, timestamp FROM report_history")
+#             reports = cur.fetchall()
+#             for report in reports:
+#                 symbol = report['symbol']
+#                 date = report['date']
+#                 report_text = report['report']
+#                 close_today = report['close_today']
+#                 close_yesterday = report['close_yesterday']
+#                 timestamp = report['timestamp']
+#                 timeframe = '1D'  # Mặc định cho dữ liệu cũ
+#                 
+#                 query = """
+#                     INSERT INTO report_history 
+#                     (symbol, date, report, close_today, close_yesterday, timestamp, timeframe) 
+#                     VALUES (?, ?, ?, ?, ?, ?, ?)
+#                 """
+#                 await self.conn.execute(query, (symbol, date, report_text, close_today, close_yesterday, timestamp, timeframe))
+#             
+#             # Di chuyển trained_models
+#             try:
+#                 cur = old_conn.execute("SELECT symbol, model_type, model_blob, created_at, performance FROM trained_models")
+#                 models = cur.fetchall()
+#                 for model in models:
+#                     symbol = model['symbol']
+#                     model_type = model['model_type']
+#                     model_blob = model['model_blob']
+#                     created_at = model['created_at'] or datetime.now(TZ).isoformat()
+#                     performance = model['performance']
+#                     version = "1.0"  # Mặc định cho dữ liệu cũ
+#                     
+#                     query = """
+#                         INSERT INTO trained_models 
+#                         (symbol, model_type, model_blob, created_at, performance, version) 
+#                         VALUES (?, ?, ?, ?, ?, ?)
+#                     """
+#                     await self.conn.execute(query, (symbol, model_type, model_blob, created_at, performance, version))
+#             except sqlite3.OperationalError:
+#                 logger.warning("Bảng trained_models không tồn tại trong cơ sở dữ liệu cũ, bỏ qua.")
+#             
+#             # Lưu các thay đổi
+#             await self.conn.commit()
+#             old_conn.close()
+#             logger.info("Di chuyển dữ liệu thành công.")
+#         except Exception as e:
+#             logger.error(f"Lỗi di chuyển dữ liệu: {str(e)}")
+#             await self.conn.rollback()
+#             raise
+#     
+#     async def close(self):
+#         """Đóng kết nối cơ sở dữ liệu"""
+#         if self.conn:
+#             await self.conn.close()
+#             self.conn = None
+
+# Sử dụng PostgreSQL cho database thay vì SQLite
+# async_db = AsyncDBManager()
+
+# DB Manager để tương tác với PostgreSQL
 class DBManager:
+    """
+    Quản lý cơ sở dữ liệu PostgreSQL thông qua SQLAlchemy
+    Cung cấp các phương thức để tương tác với cơ sở dữ liệu theo mô hình bất đồng bộ
+    """
     def __init__(self):
         self.Session = SessionLocal
 
@@ -169,28 +1030,46 @@ class DBManager:
             return False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def add_approved_user(self, user_id, approved_at=None) -> None:
+    async def add_approved_user(self, user_id, approved_at=None, notes=None) -> None:
         try:
             async with self.Session() as session:
                 if not await self.is_user_approved(user_id) and str(user_id) != ADMIN_ID:
-                    new_user = ApprovedUser(user_id=str(user_id), approved_at=approved_at or datetime.now())
+                    new_user = ApprovedUser(
+                        user_id=str(user_id),
+                        approved_at=approved_at or datetime.now(),
+                        notes=notes
+                    )
                     session.add(new_user)
                     await session.commit()
                     logger.info(f"Thêm người dùng được phê duyệt: {user_id}")
         except Exception as e:
             logger.error(f"Lỗi thêm người dùng: {str(e)}")
             raise
-
+    
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def load_report_history(self, symbol: str) -> list:
+    async def update_user_last_active(self, user_id) -> None:
         try:
             async with self.Session() as session:
-                reports = await session.execute(select(ReportHistory).filter_by(symbol=symbol).order_by(ReportHistory.id.asc()))
+                result = await session.execute(select(ApprovedUser).filter_by(user_id=str(user_id)))
+                user = result.scalar_one_or_none()
+                if user:
+                    user.last_active = datetime.now()
+                    await session.commit()
+        except Exception as e:
+            logger.error(f"Lỗi cập nhật trạng thái người dùng: {str(e)}")
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def load_report_history(self, symbol: str, timeframe: str = '1D', limit: int = 10) -> list:
+        try:
+            async with self.Session() as session:
+                query = select(ReportHistory).filter_by(symbol=symbol, timeframe=timeframe).order_by(ReportHistory.id.desc()).limit(limit)
+                reports = await session.execute(query)
                 reports = reports.scalars().all()
                 return [
                     {
                         "id": report.id,
                         "symbol": report.symbol,
+                        "timeframe": report.timeframe,
                         "date": report.date,
                         "report": report.report,
                         "close_today": report.close_today,
@@ -204,553 +1083,422 @@ class DBManager:
             return []
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
+    async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float, timeframe: str = '1D') -> None:
         try:
             async with self.Session() as session:
                 date_str = datetime.now().strftime('%Y-%m-%d')
-                standardized_data = standardize_data_for_db({
-                    'symbol': symbol,
-                    'date': date_str,
-                    'report': report,
-                    'close_today': close_today,
-                    'close_yesterday': close_yesterday
-                })
-                new_report = ReportHistory(**standardized_data)
+                new_report = ReportHistory(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    date=date_str,
+                    report=report,
+                    close_today=close_today,
+                    close_yesterday=close_yesterday
+                )
                 session.add(new_report)
                 await session.commit()
-                logger.info(f"Lưu báo cáo mới cho {symbol}")
+                logger.info(f"Lưu báo cáo mới cho {symbol} ({timeframe})")
         except Exception as e:
             logger.error(f"Lỗi lưu báo cáo: {str(e)}")
             raise
 
-db = DBManager()
-
-# ---------- QUẢN LÝ MÔ HÌNH (Prophet & XGBoost) ----------
-class ModelDBManager:
-    def __init__(self):
-        self.Session = SessionLocal
-
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def store_trained_model(self, symbol: str, model_type: str, model, performance: float = None):
+    async def store_trained_model(self, symbol: str, model_type: str, model, performance: float = None, version: str = "1.0", params: dict = None):
         try:
             model_blob = pickle.dumps(model)
+            params_json = json.dumps(params) if params else None
+            
             async with self.Session() as session:
-                result = await session.execute(select(TrainedModel).filter_by(symbol=symbol, model_type=model_type))
+                # Kiểm tra xem đã có mô hình chưa (với cùng symbol, model_type, version)
+                result = await session.execute(
+                    select(TrainedModel).filter_by(
+                        symbol=symbol, 
+                        model_type=model_type, 
+                        version=version
+                    )
+                )
                 existing = result.scalar_one_or_none()
+                
                 if existing:
+                    # Cập nhật mô hình hiện có
                     existing.model_blob = model_blob
                     existing.created_at = datetime.now()
                     existing.performance = performance
+                    existing.params = params_json
                 else:
-                    new_model = TrainedModel(symbol=symbol, model_type=model_type, model_blob=model_blob, performance=performance)
+                    # Tạo mô hình mới
+                    new_model = TrainedModel(
+                        symbol=symbol, 
+                        model_type=model_type, 
+                        model_blob=model_blob, 
+                        performance=performance,
+                        version=version,
+                        params=params_json
+                    )
                     session.add(new_model)
+                
                 await session.commit()
-            logger.info(f"Lưu mô hình {model_type} cho {symbol} thành công với hiệu suất: {performance}")
+                logger.info(f"Lưu mô hình {model_type} v{version} cho {symbol} thành công với hiệu suất: {performance}")
+                
         except Exception as e:
             logger.error(f"Lỗi lưu mô hình {model_type} cho {symbol}: {str(e)}")
+            raise
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def load_trained_model(self, symbol: str, model_type: str):
+    async def load_trained_model(self, symbol: str, model_type: str, version: str = None):
         try:
             async with self.Session() as session:
-                result = await session.execute(select(TrainedModel).filter_by(symbol=symbol, model_type=model_type))
+                if version:
+                    # Nếu chỉ định version, lấy mô hình với version đó
+                    query = select(TrainedModel).filter_by(symbol=symbol, model_type=model_type, version=version)
+                else:
+                    # Nếu không, lấy mô hình mới nhất
+                    subquery = select(
+                        TrainedModel.symbol,
+                        TrainedModel.model_type,
+                        func.max(TrainedModel.created_at).label('max_date')
+                    ).filter_by(symbol=symbol, model_type=model_type).group_by(TrainedModel.symbol, TrainedModel.model_type).subquery()
+                    
+                    query = select(TrainedModel).join(
+                        subquery,
+                        (TrainedModel.symbol == subquery.c.symbol) &
+                        (TrainedModel.model_type == subquery.c.model_type) &
+                        (TrainedModel.created_at == subquery.c.max_date)
+                    )
+                
+                result = await session.execute(query)
                 model_record = result.scalar_one_or_none()
+                
                 if model_record:
-                    model = pickle.loads(model_record.model_blob)
-                    return model, model_record.performance
-            return None, None
+                    logger.info(f"Tải mô hình {model_type} v{model_record.version} cho {symbol} thành công")
+                    return {
+                        'model': pickle.loads(model_record.model_blob),
+                        'performance': model_record.performance,
+                        'version': model_record.version,
+                        'created_at': model_record.created_at,
+                        'params': json.loads(model_record.params) if model_record.params else None
+                    }
+                return None, None, None, None, None
+                
         except Exception as e:
             logger.error(f"Lỗi tải mô hình {model_type} cho {symbol}: {str(e)}")
-            return None, None
+            return None, None, None, None, None
 
-model_db_manager = ModelDBManager()
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def get_model_versions(self, symbol: str, model_type: str) -> list:
+        try:
+            async with self.Session() as session:
+                query = select(
+                    TrainedModel.version,
+                    TrainedModel.created_at,
+                    TrainedModel.performance
+                ).filter_by(symbol=symbol, model_type=model_type).order_by(TrainedModel.created_at.desc())
+                
+                result = await session.execute(query)
+                versions = result.all()
+                
+                return [
+                    {
+                        'version': v.version,
+                        'created_at': v.created_at.isoformat(),
+                        'performance': v.performance
+                    }
+                    for v in versions
+                ]
+        except Exception as e:
+            logger.error(f"Lỗi lấy versions mô hình cho {symbol}: {str(e)}")
+            return []
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    async def get_training_symbols(self) -> list:
+        try:
+            async with self.Session() as session:
+                query = select(TrainedModel.symbol).distinct()
+                result = await session.execute(query)
+                symbols = result.scalars().all()
+                return list(symbols)
+        except Exception as e:
+            logger.error(f"Lỗi lấy danh sách symbol đã train: {str(e)}")
+            return []
+
+db = DBManager()
 
 # ---------- HÀM HỖ TRỢ ----------
 def is_index(symbol: str) -> bool:
-    indices = ['VNINDEX', 'VN30', 'HNX30', 'HNXINDEX', 'UPCOM']
-    return symbol.upper() in indices
+    """Kiểm tra xem một mã có phải là chỉ số hay không (tương thích ngược)"""
+    return DataValidator.is_index(symbol)
 
 async def is_user_approved(user_id) -> bool:
-    return await db.is_user_approved(user_id)
+    """Wrapper function để kiểm tra người dùng đã được phê duyệt chưa"""
+    return await db.is_user_approved(str(user_id))
 
-def standardize_data_for_db(data: dict) -> dict:
-    standardized_data = {}
-    for key, value in data.items():
-        if isinstance(value, np.float64):
-            standardized_data[key] = float(value)
-        elif isinstance(value, np.int64):
-            standardized_data[key] = int(value)
-        elif isinstance(value, pd.Timestamp):
-            standardized_data[key] = value.to_pydatetime()
-        else:
-            standardized_data[key] = value
-    return standardized_data
-
-# ---------- HÀM HỖ TRỢ: LỌC NGÀY GIAO DỊCH -----------
-def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    df = df[df.index.weekday < 5]
-    years = df.index.year.unique()
-    vn_holidays = holidays.Vietnam(years=years)
-    holiday_dates = set(vn_holidays.keys())
-    
-    # Sửa lỗi deprecation: chuyển đổi rõ ràng để tránh cảnh báo isin với datetime64
-    date_indexes = pd.to_datetime(df.index.date)
-    holiday_dates_dt = pd.to_datetime(list(holiday_dates))
-    
-    # Phương pháp an toàn hơn: sử dụng list comprehension thay vì isin
-    df = df[[d not in holiday_dates for d in df.index.date]]
-    
-    return df
-
-# ---------- XÁC THỰC VÀ CHUẨN HÓA DỮ LIỆU ----------
-class DataValidator:
-    """Xác thực và chuẩn hóa dữ liệu đầu vào cho các phân tích chứng khoán."""
-    
-    VALID_TIMEFRAMES = {
-        "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h", 
-        "1d": "1D", "1D": "1D", "1w": "1W", "1W": "1W", "1mo": "1M", "1M": "1M"
-    }
-    
-    VALID_SYMBOLS = {
-        "indices": ["VNINDEX", "VN30", "HNX30", "HNXINDEX", "UPCOM"],
-        "min_length": 3,
-        "max_length": 10
-    }
-    
-    @classmethod
-    def validate_symbol(cls, symbol: str) -> str:
-        """Xác thực và chuẩn hóa mã chứng khoán."""
-        if not symbol:
-            raise ValueError("Mã chứng khoán không được để trống")
-        
-        normalized = symbol.strip().upper()
-        
-        if not 2 <= len(normalized) <= cls.VALID_SYMBOLS["max_length"]:
-            raise ValueError(f"Mã chứng khoán phải có từ 2 đến {cls.VALID_SYMBOLS['max_length']} ký tự")
-            
-        if not normalized.isalnum():
-            raise ValueError("Mã chứng khoán chỉ được chứa chữ cái và số")
-            
-        return normalized
-    
-    @classmethod
-    def validate_timeframe(cls, timeframe: str) -> str:
-        """Xác thực và chuẩn hóa khung thời gian."""
-        if not timeframe:
-            return DEFAULT_TIMEFRAME
-            
-        normalized = timeframe.lower().strip()
-        
-        if normalized not in cls.VALID_TIMEFRAMES:
-            valid_options = ", ".join(sorted(set(cls.VALID_TIMEFRAMES.keys())))
-            raise ValueError(f"Khung thời gian không hợp lệ. Các lựa chọn: {valid_options}")
-            
-        return cls.VALID_TIMEFRAMES[normalized]
-    
-    @classmethod
-    def validate_candles(cls, candles: str, default: int = DEFAULT_CANDLES) -> int:
-        """Xác thực và chuẩn hóa số lượng nến."""
-        if not candles:
-            return default
-            
-        try:
-            num_candles = int(candles)
-        except ValueError:
-            raise ValueError("Số lượng nến phải là số nguyên")
-            
-        if num_candles < 20:
-            raise ValueError("Số lượng nến phải ít nhất là 20 để tính toán chỉ báo")
-            
-        if num_candles > 500:
-            raise ValueError("Số lượng nến không được vượt quá 500")
-            
-        return num_candles
-    
-    @classmethod
-    def validate_date_range(cls, start_date: str = None, end_date: str = None) -> tuple:
-        """Xác thực và chuẩn hóa khoảng thời gian."""
-        today = datetime.now()
-        
-        if not end_date:
-            end_date = today.strftime('%Y-%m-%d')
-        else:
-            try:
-                end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
-                if end_date_obj > today:
-                    end_date = today.strftime('%Y-%m-%d')
-            except ValueError:
-                raise ValueError("Định dạng ngày không hợp lệ. Sử dụng YYYY-MM-DD")
-                
-        if not start_date:
-            start_date = (today - timedelta(days=365)).strftime('%Y-%m-%d')
-        else:
-            try:
-                start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
-                end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
-                
-                if start_date_obj > end_date_obj:
-                    raise ValueError("Ngày bắt đầu phải trước ngày kết thúc")
-                
-                date_diff = (end_date_obj - start_date_obj).days
-                if date_diff > 365 * 5:
-                    raise ValueError("Khoảng thời gian không được vượt quá 5 năm")
-            except ValueError as e:
-                if "Định dạng ngày không hợp lệ" not in str(e):
-                    raise ValueError("Định dạng ngày không hợp lệ. Sử dụng YYYY-MM-DD")
-                else:
-                    raise e
-                    
-        return start_date, end_date
-    
-    @classmethod
-    def validate_inputs(cls, symbol: str, timeframe: str = None, candles: str = None, 
-                       start_date: str = None, end_date: str = None) -> dict:
-        """Xác thực và chuẩn hóa tất cả đầu vào."""
-        validated = {
-            "symbol": cls.validate_symbol(symbol),
-            "timeframe": cls.validate_timeframe(timeframe or DEFAULT_TIMEFRAME),
-            "num_candles": cls.validate_candles(candles),
-        }
-        
-        start, end = cls.validate_date_range(start_date, end_date)
-        validated["start_date"] = start
-        validated["end_date"] = end
-        
-        return validated
+def get_vn_trading_days(start_date, end_date):
+    """Hàm giữ lại để tương thích với code cũ"""
+    return DataValidator.calculate_trading_days(start_date, end_date)
 
 # ---------- TẢI DỮ LIỆU (NÂNG CẤP) ----------
 class DataLoader:
     def __init__(self, source: str = 'vnstock'):
         self.source = source
-        
-    async def load_raw_data(self, symbol: str, timeframe: str, num_candles: int, 
-                          start_date: str = None, end_date: str = None) -> (pd.DataFrame, str):
-        """Tải dữ liệu thô từ nguồn chính, với fallback nếu cần."""
-        # Xác thực đầu vào
-        try:
-            inputs = DataValidator.validate_inputs(symbol, timeframe, str(num_candles), start_date, end_date)
-            symbol = inputs["symbol"]
-            timeframe = inputs["timeframe"]
-            num_candles = inputs["num_candles"]
-            start_date = inputs["start_date"]
-            end_date = inputs["end_date"]
-        except ValueError as e:
-            logger.error(f"Đầu vào không hợp lệ: {str(e)}")
-            raise
-            
-        # Kiểm tra cache
-        cache_key = f"raw_data_{self.source}_{symbol}_{timeframe}_{num_candles}_{start_date}_{end_date}"
-        cached_data = await redis_manager.get(cache_key)
-        if cached_data is not None:
-            logger.info(f"Lấy dữ liệu từ cache cho {symbol} [{timeframe}]")
-            return cached_data, "Dữ liệu từ cache"
-            
-        # Xác định thời gian hết hạn cache dựa trên khung thời gian
-        expire_map = {
-            "5m": 300,      # 5 phút
-            "15m": 900,     # 15 phút
-            "30m": 1800,    # 30 phút
-            "1h": 3600,     # 1 giờ
-            "4h": 14400,    # 4 giờ
-            "1D": CACHE_EXPIRE_SHORT,     # 30 phút
-            "1W": CACHE_EXPIRE_MEDIUM,    # 1 giờ
-            "1M": CACHE_EXPIRE_LONG       # 1 ngày
-        }
-        expire = expire_map.get(timeframe, CACHE_EXPIRE_SHORT)
-        
-        # Thử tải từ nguồn chính (VNStock)
-        try:
-            df = await self._load_from_vnstock(symbol, timeframe, num_candles, start_date, end_date)
-            if df is not None and not df.empty and len(df) >= 10:
-                await redis_manager.set(cache_key, df, expire=expire)
-                return df, "Dữ liệu từ VNStock"
-        except Exception as e:
-            logger.warning(f"Không thể tải dữ liệu từ VNStock cho {symbol}: {str(e)}")
-        
-        # Fallback sang Yahoo Finance
-        try:
-            df = await self._load_from_yahoo(symbol, timeframe, num_candles, start_date, end_date)
-            if df is not None and not df.empty and len(df) >= 10:
-                await redis_manager.set(cache_key, df, expire=expire)
-                return df, "Dữ liệu từ Yahoo Finance"
-            else:
-                raise ValueError(f"Không đủ dữ liệu cho {symbol} từ Yahoo Finance")
-        except Exception as e:
-            logger.error(f"Không thể tải dữ liệu từ Yahoo Finance cho {symbol}: {str(e)}")
-            raise ValueError(f"Không thể tải dữ liệu cho {symbol}: {str(e)}")
-            
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def _load_from_vnstock(self, symbol: str, timeframe: str, num_candles: int, 
-                               start_date: str, end_date: str) -> pd.DataFrame:
-        """Tải dữ liệu từ VNStock."""
-        def fetch_vnstock():
-            try:
-                stock = Vnstock().stock(symbol=symbol, source='TCBS')
-                # VNStock chỉ hỗ trợ khung thời gian cụ thể
-                supported_timeframes = {'1D', '1W', '1M'}
-                
-                if timeframe not in supported_timeframes:
-                    logger.warning(f"VNStock không hỗ trợ khung thời gian {timeframe}, sử dụng Yahoo Finance thay thế")
-                    return None
-                    
-                df = stock.quote.history(start=start_date, end=end_date, interval=timeframe)
-                
-                if df is None or df.empty:
-                    logger.warning(f"VNStock trả về dữ liệu rỗng cho {symbol}")
-                    return None
-                    
-                df = df.rename(columns={'time': 'date', 'open': 'open', 'high': 'high',
-                                      'low': 'low', 'close': 'close', 'volume': 'volume'})
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date')
-                df.index = df.index.tz_localize('Asia/Bangkok')
-                df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
-                
-                # Kiểm tra tính hợp lệ của dữ liệu
-                if not (df['high'] >= df['low']).all() or not ((df['close'] >= df['low']) & (df['close'] <= df['high'])).all():
-                    logger.warning(f"Dữ liệu không hợp lệ cho {symbol} từ VNStock")
-                    return None
-                    
-                return df.tail(num_candles)
-            except Exception as e:
-                logger.error(f"Lỗi khi tải dữ liệu từ VNStock: {str(e)}")
-                return None
-                
-        return await run_in_thread(fetch_vnstock)
-        
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def _load_from_yahoo(self, symbol: str, timeframe: str, num_candles: int, 
-                             start_date: str, end_date: str) -> pd.DataFrame:
-        """Tải dữ liệu từ Yahoo Finance."""
-        # Chuyển đổi khung thời gian sang định dạng Yahoo Finance
-        yahoo_timeframe_map = {
-            '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h', '4h': '4h',
-            '1D': '1d', '1W': '1wk', '1M': '1mo'
-        }
-        
-        if timeframe not in yahoo_timeframe_map:
-            raise ValueError(f"Khung thời gian {timeframe} không được hỗ trợ bởi Yahoo Finance")
-            
-        yahoo_interval = yahoo_timeframe_map[timeframe]
-        
-        # Xác định symbol cho Yahoo Finance
-        yahoo_symbol = f"{symbol}.VN" if not is_index(symbol) else symbol
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                start_ts = int(datetime.strptime(start_date, '%Y-%m-%d').timestamp())
-                end_ts = int(datetime.strptime(end_date, '%Y-%m-%d').timestamp())
-                
-                url = (f"https://query1.finance.yahoo.com/v7/finance/download/{yahoo_symbol}"
-                     f"?period1={start_ts}&period2={end_ts}&interval={yahoo_interval}&events=history")
-                     
-                async with asyncio.wait_for(session.get(url), timeout=15) as response:
-                    if response.status != 200:
-                        raise ValueError(f"Không thể tải dữ liệu từ Yahoo, HTTP {response.status}")
-                        
-                    text = await response.text()
-                    df = pd.read_csv(io.StringIO(text))
-                    
-                    if df.empty:
-                        raise ValueError("Dữ liệu Yahoo rỗng")
-                        
-                    df['Date'] = pd.to_datetime(df['Date'])
-                    df = df.set_index('Date')
-                    df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
-                                          'Close': 'close', 'Volume': 'volume'})
-                    df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
-                    
-                    # Kiểm tra tính hợp lệ của dữ liệu
-                    if not (df['high'] >= df['low']).all() or not ((df['close'] >= df['low']) & (df['close'] <= df['high'])).all():
-                        logger.warning(f"Dữ liệu không hợp lệ cho {symbol} từ Yahoo Finance")
-                        raise ValueError(f"Dữ liệu không hợp lệ cho {symbol}")
-                        
-                    return df.tail(num_candles)
-        except asyncio.TimeoutError:
-            logger.error("Timeout khi tải dữ liệu từ Yahoo Finance.")
-            raise
-        except Exception as e:
-            logger.error(f"Lỗi tải dữ liệu Yahoo: {str(e)}")
-            raise
-            
-    async def detect_and_handle_outliers(self, df: pd.DataFrame, method: str = 'z-score', 
-                                       threshold: float = 3.0, handle: str = 'flag') -> (pd.DataFrame, str):
-        """Phát hiện và xử lý dữ liệu ngoại lai."""
-        if df is None or df.empty or 'close' not in df.columns:
-            return df, "Không đủ dữ liệu để phát hiện outlier"
-            
-        df = df.copy()
-        outlier_report = "Không có giá trị bất thường"
-        
-        if method == 'z-score':
-            z_scores = np.abs((df['close'] - df['close'].mean()) / df['close'].std())
-            df['is_outlier'] = z_scores > threshold
-        elif method == 'iqr':
-            q1 = df['close'].quantile(0.25)
-            q3 = df['close'].quantile(0.75)
-            iqr = q3 - q1
-            lower_bound = q1 - (threshold * iqr)
-            upper_bound = q3 + (threshold * iqr)
-            df['is_outlier'] = (df['close'] < lower_bound) | (df['close'] > upper_bound)
-        else:
-            raise ValueError(f"Phương pháp không hỗ trợ: {method}")
-            
-        outliers = df[df['is_outlier']]
-        
-        if not outliers.empty:
-            outlier_report = f"Phát hiện {len(outliers)} giá trị bất thường trong dữ liệu:\n"
-            for idx, row in outliers.iterrows():
-                outlier_report += f"- {idx.strftime('%Y-%m-%d')}: {row['close']:.2f}\n"
-                
-            # Xử lý ngoại lai theo yêu cầu
-            if handle == 'remove':
-                df = df[~df['is_outlier']]
-                outlier_report += "Đã loại bỏ các giá trị ngoại lai.\n"
-            elif handle == 'interpolate':
-                # Lưu chỉ số ngoại lai
-                outlier_indices = df[df['is_outlier']].index
-                
-                # Nội suy giá trị
-                for col in ['open', 'high', 'low', 'close']:
-                    df.loc[outlier_indices, col] = df[col].interpolate(method='time')
-                
-                df.loc[outlier_indices, 'is_outlier'] = False
-                outlier_report += "Đã nội suy các giá trị ngoại lai.\n"
-            elif handle == 'flag':
-                # Chỉ đánh dấu, không thay đổi
-                outlier_report += "Các giá trị ngoại lai đã được đánh dấu nhưng không thay đổi.\n"
-                
-        return df, outlier_report
-        
-    def normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Chuẩn hóa DataFrame để đảm bảo định dạng nhất quán."""
-        if df is None or df.empty:
-            return df
-            
-        df = df.copy()
-        
-        # Đảm bảo tên cột nhất quán
-        required_columns = ['open', 'high', 'low', 'close', 'volume']
-        
-        # Kiểm tra xem có tất cả cột cần thiết không
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Thiếu các cột: {', '.join(missing_columns)}")
-            
-        # Loại bỏ hàng có giá trị NaN
-        df = df[required_columns].dropna()
-        
-        # Kiểm tra tính hợp lệ của dữ liệu giá
-        if not (df['high'] >= df['low']).all():
-            invalid_rows = df[~(df['high'] >= df['low'])]
-            logger.warning(f"Có {len(invalid_rows)} hàng với giá cao thấp hơn giá thấp")
-            # Sửa lỗi bằng cách hoán đổi giá trị
-            df.loc[~(df['high'] >= df['low']), ['high', 'low']] = df.loc[~(df['high'] >= df['low']), ['low', 'high']].values
-            
-        # Kiểm tra giá đóng cửa nằm trong khoảng cao-thấp
-        invalid_close = ~((df['close'] >= df['low']) & (df['close'] <= df['high']))
-        if invalid_close.any():
-            logger.warning(f"Có {invalid_close.sum()} hàng với giá đóng cửa nằm ngoài khoảng cao-thấp")
-            # Sửa giá đóng cửa để nằm trong khoảng
-            df.loc[invalid_close, 'close'] = df.loc[invalid_close].apply(
-                lambda row: min(row['high'], max(row['low'], row['close'])), axis=1
-            )
-            
-        # Đảm bảo khối lượng không âm
-        if (df['volume'] < 0).any():
-            logger.warning("Phát hiện khối lượng âm, đang chuyển thành giá trị tuyệt đối")
-            df['volume'] = df['volume'].abs()
-            
-        return df
-        
-    def align_timestamps(self, df: pd.DataFrame, timezone: str = 'Asia/Bangkok') -> pd.DataFrame:
-        """Căn chỉnh timestamp để đảm bảo nhất quán múi giờ."""
-        if df is None or df.empty:
-            return df
-            
-        df = df.copy()
-        
-        # Xử lý index là timestamp
-        if not isinstance(df.index, pd.DatetimeIndex):
-            logger.warning("Index không phải là DatetimeIndex, đang chuyển đổi")
-            df.index = pd.to_datetime(df.index)
-            
-        # Đảm bảo múi giờ nhất quán
-        if df.index.tz is None:
-            df.index = df.index.tz_localize(timezone)
-        elif str(df.index.tz) != timezone:
-            logger.info(f"Chuyển đổi múi giờ từ {df.index.tz} sang {timezone}")
-            df.index = df.index.tz_convert(timezone)
-            
-        # Sắp xếp theo thời gian tăng dần
-        df = df.sort_index()
-        
-        return df
-        
-    def calculate_trading_days(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Lọc ngày giao dịch thực tế."""
-        return filter_trading_days(df)
-        
-    async def clean_data(self, df: pd.DataFrame, detect_outliers: bool = True, 
-                        filter_days: bool = True) -> (pd.DataFrame, str):
-        """Làm sạch dữ liệu bằng cách áp dụng tất cả các bước tiền xử lý."""
-        if df is None or df.empty:
-            return df, "Dữ liệu rỗng"
-            
+        self.validator = DataValidator
+
+    def detect_outliers(self, df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+        """Hàm giữ lại để tương thích với code cũ"""
+        return self.validator.detect_and_handle_outliers(df, method='iqr')
+
+    async def clean_data(self, df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, str]:
+        """Làm sạch dữ liệu với xác thực validator"""
         # Chuẩn hóa DataFrame
+        df = self.validator.normalize_dataframe(df)
+        
+        # Phát hiện và xử lý outlier
+        df_cleaned, outlier_report = self.validator.detect_and_handle_outliers(df)
+        
+        # Đảm bảo đủ ngày giao dịch
+        if len(df_cleaned) > 5:  # Chỉ thực hiện nếu có đủ dữ liệu
+            try:
+                trading_days = self.validator.calculate_trading_days(
+                    df_cleaned.index.min(), 
+                    df_cleaned.index.max()
+                )
+                df_cleaned = df_cleaned[df_cleaned.index.isin(trading_days)]
+            except Exception as e:
+                logger.warning(f"Không thể lọc theo ngày giao dịch: {str(e)}")
+        
+        return df_cleaned, outlier_report
+
+    async def load_raw_data(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
+        """Tải dữ liệu thô với validator và hỗ trợ đa khung thời gian"""
+        # Chuẩn hóa tham số đầu vào
+        symbol = self.validator.validate_ticker(symbol)
+        timeframe = self.validator.normalize_timeframe(timeframe)
+        num_candles = self.validator.validate_candles(num_candles)
+        
+        # Ánh xạ khung thời gian cho các nguồn dữ liệu khác nhau
+        timeframe_map = {'1d': '1D', '1w': '1W', '1mo': '1M'}
+        vnstock_tf = timeframe_map.get(timeframe.lower(), timeframe).upper()
+        
+        # Tạo khóa cache
+        cache_key = f"raw_data_{self.source}_{symbol}_{timeframe}_{num_candles}"
+        
+        # Kiểm tra cache thường
+        if cache_key in cache:
+            cached_data = cache.get(cache_key)
+            if cached_data is not None:
+                return cached_data
+                
+        # Kiểm tra cache Redis
         try:
-            df = self.normalize_dataframe(df)
-        except ValueError as e:
-            logger.error(f"Lỗi chuẩn hóa DataFrame: {str(e)}")
-            return df, f"Lỗi chuẩn hóa dữ liệu: {str(e)}"
-            
-        # Căn chỉnh timestamp
-        df = self.align_timestamps(df)
-        
-        # Lọc ngày giao dịch nếu cần
-        if filter_days:
-            df = self.calculate_trading_days(df)
-            
-        # Phát hiện và xử lý outlier nếu cần
-        if detect_outliers:
-            df, outlier_report = await self.detect_and_handle_outliers(df, handle='flag')
-        else:
-            outlier_report = "Bỏ qua phát hiện outlier theo yêu cầu"
-            
-        return df, outlier_report
-        
-    async def load_data(self, symbol: str, timeframe: str, num_candles: int) -> (pd.DataFrame, str):
-        """Phương thức load_data nâng cấp, sử dụng luồng mới."""
-        # Tải dữ liệu thô
-        raw_df, source_info = await self.load_raw_data(
-            symbol, 
-            timeframe, 
-            num_candles,
-            (datetime.now() - timedelta(days=num_candles * 3)).strftime('%Y-%m-%d'),
-            datetime.now().strftime('%Y-%m-%d')
-        )
-        
-        # Làm sạch dữ liệu
-        clean_df, outlier_report = await self.clean_data(raw_df)
-        
-        return clean_df, outlier_report
+            cached_data = await redis_manager.get(cache_key)
+            if cached_data is not None:
+                # Lưu vào cache thường để truy cập nhanh hơn lần sau
+                cache[cache_key] = cached_data
+                return cached_data
+        except Exception as e:
+            logger.warning(f"Không thể lấy dữ liệu từ Redis cache: {str(e)}")
 
-    def detect_outliers(self, df: pd.DataFrame) -> (pd.DataFrame, str):
-        """Phương thức cũ để tương thích, sử dụng phương thức mới."""
-        loop = asyncio.get_event_loop()
-        df_result, report = loop.run_until_complete(self.detect_and_handle_outliers(df))
-        return df_result, report
+        try:
+            if self.source == 'vnstock':
+                # Xử lý khung thời gian intraday (mới)
+                if timeframe in ['5m', '15m', '30m', '1h', '4h']:
+                    stock = Vnstock().stock(symbol=symbol, source='TCBS')
+                    end_date = datetime.now(TZ).strftime('%Y-%m-%d')
+                    # Tính số ngày cần tải dựa trên khung thời gian
+                    if timeframe == '5m':
+                        days_back = 5  # 5 phút chỉ có dữ liệu 5 ngày gần nhất
+                    elif timeframe in ['15m', '30m']:
+                        days_back = 10  # 15-30 phút có 10 ngày
+                    elif timeframe == '1h':
+                        days_back = 15  # 1h có 15 ngày
+                    else:  # 4h
+                        days_back = 30  # 4h có 30 ngày
+                    
+                    start_date = (datetime.now(TZ) - timedelta(days=days_back)).strftime('%Y-%m-%d')
+                    
+                    # Chuyển đổi timeframe sang định dạng phù hợp với API
+                    api_tf_map = {
+                        '5m': '5', '15m': '15', '30m': '30', 
+                        '1h': '60', '4h': '240'
+                    }
+                    
+                    # Gọi API intraday
+                    df = stock.quote.intraday(start=start_date, end=end_date, 
+                                              interval=api_tf_map[timeframe])
+                    
+                    if df is None or df.empty:
+                        raise ValueError(f"Không có dữ liệu intraday cho {symbol} với tf={timeframe}")
+                    
+                    # Chuẩn hóa cột
+                    df = df.rename(columns={'time': 'date', 'open': 'open', 'high': 'high',
+                                          'low': 'low', 'close': 'close', 'volume': 'volume'})
+                    df['date'] = pd.to_datetime(df['date']).dt.tz_localize(TZ)
+                    df = df.set_index('date')
+                    # Căn chỉnh thời gian
+                    df = self.validator.align_timestamps(df, timeframe)
+                    
+                else:
+                    # Dữ liệu OHLC thông thường (ngày, tuần, tháng)
+                    stock = Vnstock().stock(symbol=symbol, source='TCBS')
+                    end_date = datetime.now(TZ).strftime('%Y-%m-%d')
+                    start_date = (datetime.now(TZ) - timedelta(days=(num_candles + 1) * 3)).strftime('%Y-%m-%d')
+                    df = stock.quote.history(start=start_date, end=end_date, interval=vnstock_tf)
+                    if df is None or df.empty or len(df) < 20:
+                        raise ValueError(f"Không đủ dữ liệu từ VNStock cho {symbol}")
+                    df = df.rename(columns={'time': 'date', 'open': 'open', 'high': 'high',
+                                          'low': 'low', 'close': 'close', 'volume': 'volume'})
+                    df['date'] = pd.to_datetime(df['date']).dt.tz_localize(TZ)
+                    df = df.set_index('date')
+                
+                # Chuẩn hóa dữ liệu
+                df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
+                df = df.tail(num_candles + 1)
+                
+            elif self.source == 'yahoo':
+                # Ánh xạ khung thời gian cho Yahoo Finance
+                yahoo_period_map = {
+                    '1D': 'd', '1W': 'wk', '1M': 'mo',
+                    '5m': '5m', '15m': '15m', '30m': '30m',
+                    '1h': '60m', '4h': '4h'
+                }
+                df = await self._download_yahoo_data(
+                    symbol, 
+                    num_candles + 1, 
+                    yahoo_period_map.get(timeframe, 'd')
+                )
+                
+                if df is None or df.empty or len(df) < 20:
+                    raise ValueError(f"Không đủ dữ liệu cho {symbol} từ Yahoo Finance")
+                df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
+                                      'Close': 'close', 'Volume': 'volume'})
+                df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
+                df.index = df.index.tz_localize(TZ)
+                
+                # Căn chỉnh thời gian
+                df = self.validator.align_timestamps(df, timeframe)
+            else:
+                raise ValueError(f"Nguồn dữ liệu không hỗ trợ: {self.source}")
+            
+            # Thêm vào cache
+            cache[cache_key] = df
+            
+            # Lưu vào Redis cache nếu có thể
+            try:
+                await redis_manager.set(cache_key, df, CACHE_EXPIRE_MEDIUM)
+            except Exception as e:
+                logger.warning(f"Không thể lưu dữ liệu vào Redis cache: {str(e)}")
+                
+            return df
+        except Exception as e:
+            if self.source == 'vnstock':
+                logger.warning(f"Không thể lấy dữ liệu từ VNStock cho {symbol}: {str(e)}. Thử Yahoo Finance...")
+                self.source = 'yahoo'
+                return await self.load_raw_data(symbol, timeframe, num_candles)
+            else:
+                raise Exception(f"Không thể tải dữ liệu: {str(e)}")
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=4, max=60))
+    async def _download_yahoo_data(self, symbol: str, num_candles: int, period: str) -> pd.DataFrame:
+        """Tải dữ liệu từ Yahoo Finance với retry logic"""
+        async with aiohttp.ClientSession() as session:
+            # Đối với dữ liệu intraday, cần tính toán khoảng thời gian phù hợp
+            is_intraday = period in ['5m', '15m', '30m', '60m', '90m', '1h', '4h']
+            
+            if is_intraday:
+                # Yahoo chỉ cho phép tải dữ liệu intraday trong khoảng thời gian giới hạn
+                # Ví dụ: 5m chỉ có thể tải tối đa 7 ngày gần nhất
+                days_back = {
+                    '5m': 7, '15m': 7, '30m': 7,
+                    '60m': 14, '90m': 14, '1h': 14, '4h': 30
+                }.get(period, 7)
+                
+                start_ts = int((datetime.now(TZ) - timedelta(days=days_back)).timestamp())
+            else:
+                # Dữ liệu ngày, tuần, tháng có thể tải trong khoảng thời gian dài hơn
+                start_ts = int((datetime.now(TZ) - timedelta(days=num_candles * 3)).timestamp())
+            
+            end_ts = int(datetime.now(TZ).timestamp())
+            
+            # Xây dựng URL dựa trên khung thời gian
+            if is_intraday:
+                url = (f"https://query1.finance.yahoo.com/v7/finance/download/{symbol}"
+                      f"?period1={start_ts}&period2={end_ts}&interval={period}&events=history")
+            else:
+                url = (f"https://query1.finance.yahoo.com/v7/finance/download/{symbol}"
+                      f"?period1={start_ts}&period2={end_ts}&interval=1{period}&events=history")
+            
+            async with session.get(url) as response:
+                if response.status == 429:
+                    logger.warning(f"HTTP 429 từ Yahoo Finance cho {symbol}. Thử lại sau...")
+                    raise Exception("HTTP 429: Too Many Requests")
+                if response.status != 200:
+                    raise ValueError(f"Không thể tải dữ liệu cho {symbol} từ Yahoo, HTTP {response.status}")
+                text = await response.text()
+                df = pd.read_csv(io.StringIO(text))
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df.set_index('Date')
+                return df.tail(num_candles)
+
+    async def load_data(self, symbol: str, timeframe: str, num_candles: int) -> tuple:
+        """Tải và xử lý dữ liệu toàn diện với validator"""
+        raw_df = await self.load_raw_data(symbol, timeframe, num_candles)
+        cleaned_df, outlier_report = await self.clean_data(raw_df, symbol)
+        return raw_df, cleaned_df, outlier_report
+
+    async def get_fundamental_data(self, symbol: str) -> dict:
+        """Lấy dữ liệu cơ bản với validator"""
+        if self.validator.is_index(symbol):
+            return {"error": f"{symbol} là chỉ số, không có dữ liệu cơ bản"}
+            
+        cache_key = f"fundamental_{symbol}_{datetime.now(TZ).strftime('%Y%m%d')}"
+        
+        # Kiểm tra cache thường
+        if cache_key in cache:
+            cached_data = cache.get(cache_key)
+            if cached_data is not None:
+                return cached_data
+                
+        # Kiểm tra Redis cache
+        try:
+            cached_data = await redis_manager.get(cache_key)
+            if cached_data is not None:
+                # Lưu vào cache thường để truy cập nhanh hơn lần sau
+                cache[cache_key] = cached_data
+                return cached_data
+        except Exception as e:
+            logger.warning(f"Không thể lấy dữ liệu cơ bản từ Redis cache: {str(e)}")
+            
+        fundamental_data = await self.fetch_fundamental_data_vnstock(symbol)
+        if fundamental_data and any(v is not None for v in fundamental_data.values()):
+            # Xác thực dữ liệu trước khi lưu cache
+            valid_data = self.validator.validate_fundamental_data(fundamental_data)
+            cache[cache_key] = valid_data
+            
+            # Lưu vào Redis cache nếu có thể
+            try:
+                await redis_manager.set(cache_key, valid_data, CACHE_EXPIRE_LONG)
+            except Exception as e:
+                logger.warning(f"Không thể lưu dữ liệu cơ bản vào Redis cache: {str(e)}")
+                
+            return valid_data
+            
+        fundamental_data = await self.fetch_fundamental_data_yahoo(symbol)
+        if fundamental_data and any(v is not None for v in fundamental_data.values()):
+            # Xác thực dữ liệu trước khi lưu cache
+            valid_data = self.validator.validate_fundamental_data(fundamental_data)
+            cache[cache_key] = valid_data
+            
+            # Lưu vào Redis cache nếu có thể
+            try:
+                await redis_manager.set(cache_key, valid_data, CACHE_EXPIRE_LONG)
+            except Exception as e:
+                logger.warning(f"Không thể lưu dữ liệu cơ bản vào Redis cache: {str(e)}")
+                
+            return valid_data
+            
+        return {"error": f"Không có dữ liệu cơ bản cho {symbol}"}
+
     async def fetch_fundamental_data_vnstock(self, symbol: str) -> dict:
-        cache_key = f"fundamental_vnstock_{symbol}"
-        cached_data = await redis_manager.get(cache_key)
-        if cached_data is not None:
-            return cached_data
-
-        def fetch():
+        try:
             stock = Vnstock().stock(symbol=symbol, source='TCBS')
             fundamental_data = {}
             ratios = stock.finance.ratio()
@@ -763,23 +1511,12 @@ class DataLoader:
             if not fundamental_data:
                 raise ValueError("Không có dữ liệu cơ bản từ VNStock")
             return fundamental_data
-
-        try:
-            fundamental_data = await run_in_thread(fetch)
-            await redis_manager.set(cache_key, fundamental_data, expire=86400)
-            return fundamental_data
         except Exception as e:
             logger.error(f"Lỗi lấy dữ liệu cơ bản từ VNStock: {str(e)}")
             return {}
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def fetch_fundamental_data_yahoo(self, symbol: str) -> dict:
-        cache_key = f"fundamental_yahoo_{symbol}"
-        cached_data = await redis_manager.get(cache_key)
-        if cached_data is not None:
-            return cached_data
-
-        def fetch():
+        try:
             stock = yf.Ticker(f"{symbol}.VN")
             info = stock.info
             fundamental_data = {
@@ -794,160 +1531,719 @@ class DataLoader:
             if all(v is None for v in fundamental_data.values()):
                 raise ValueError("Không có dữ liệu cơ bản từ Yahoo Finance")
             return fundamental_data
-
-        try:
-            fundamental_data = await run_in_thread(fetch)
-            await redis_manager.set(cache_key, fundamental_data, expire=86400)
-            return fundamental_data
         except Exception as e:
             logger.error(f"Lỗi lấy dữ liệu cơ bản từ Yahoo: {str(e)}")
             return {}
 
-    async def get_fundamental_data(self, symbol: str) -> dict:
-        if is_index(symbol):
-            return {"error": f"{symbol} là chỉ số, không có dữ liệu cơ bản"}
-        fundamental_data = await self.fetch_fundamental_data_vnstock(symbol)
-        if fundamental_data and any(v is not None for v in fundamental_data.values()):
-            return fundamental_data
-        fundamental_data = await self.fetch_fundamental_data_yahoo(symbol)
-        if fundamental_data and any(v is not None for v in fundamental_data.values()):
-            return fundamental_data
-        return {"error": f"Không có dữ liệu cơ bản cho {symbol}"}
-
 # ---------- PHÂN TÍCH KỸ THUẬT ----------
 class TechnicalAnalyzer:
-    @staticmethod
-    def _calculate_common_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty:
-            raise ValueError("DataFrame rỗng, không thể tính toán chỉ báo")
-        if 'close' not in df.columns:
-            raise ValueError("Dữ liệu không có cột 'close' cần thiết để tính toán chỉ báo")
-        if len(df) < 20:
-            raise ValueError("Không đủ dữ liệu để tính toán SMA20 (cần ít nhất 20 nến)")
-        try:
-            df['sma20'] = trend.SMAIndicator(df['close'], window=20).sma_indicator()
-            df['sma50'] = trend.SMAIndicator(df['close'], window=50).sma_indicator()
-            df['sma200'] = trend.SMAIndicator(df['close'], window=200).sma_indicator() if len(df) >= 200 else np.nan
-            df['rsi'] = momentum.RSIIndicator(df['close'], window=14).rsi() if len(df) >= 14 else np.nan
-            macd = trend.MACD(df['close'])
-            df['macd'] = macd.macd()
-            df['signal'] = macd.macd_signal()
-            bb = volatility.BollingerBands(df['close'])
-            df['bb_high'] = bb.bollinger_hband()
-            df['bb_low'] = bb.bollinger_lband()
-            ichimoku = trend.IchimokuIndicator(df['high'], df['low'])
-            df['ichimoku_a'] = ichimoku.ichimoku_a()
-            df['ichimoku_b'] = ichimoku.ichimoku_b()
-            df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-            df['mfi'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).money_flow_index()
-            ichimoku_short = trend.IchimokuIndicator(df['high'], df['low'], window1=9, window2=26)
-            df['tenkan_sen'] = ichimoku_short.ichimoku_a()
-            ichimoku_medium = trend.IchimokuIndicator(df['high'], df['low'], window1=26, window2=52)
-            df['kijun_sen'] = ichimoku_medium.ichimoku_b()
-            df['chikou_span'] = df['close'].shift(-26) if len(df) > 26 else np.nan
-            high_price = df['high'].max()
-            low_price = df['low'].min()
-            diff = high_price - low_price
-            df['fib_0.0'] = high_price
-            df['fib_23.6'] = high_price - 0.236 * diff
-            df['fib_38.2'] = high_price - 0.382 * diff
-            df['fib_50.0'] = high_price - 0.5 * diff
-            df['fib_61.8'] = high_price - 0.618 * diff
-            df['fib_100.0'] = low_price
-            return df
-        except Exception as e:
-            logger.error(f"Lỗi tính toán chỉ số kỹ thuật: {str(e)}")
-            raise
+    def calculate_common_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or len(df) < 20:
+            raise ValueError("Không đủ dữ liệu để tính toán chỉ báo")
+        df = df.copy()
+        df['sma20'] = trend.SMAIndicator(df['close'], window=20).sma_indicator()
+        df['sma50'] = trend.SMAIndicator(df['close'], window=50).sma_indicator()
+        df['sma200'] = trend.SMAIndicator(df['close'], window=min(200, len(df)-1)).sma_indicator()
+        df['rsi'] = momentum.RSIIndicator(df['close'], window=14).rsi()
+        macd = trend.MACD(df['close'])
+        df['macd'] = macd.macd()
+        df['signal'] = macd.macd_signal()
+        bb = volatility.BollingerBands(df['close'])
+        df['bb_high'] = bb.bollinger_hband()
+        df['bb_low'] = bb.bollinger_lband()
+        ichimoku = trend.IchimokuIndicator(df['high'], df['low'])
+        df['ichimoku_a'] = ichimoku.ichimoku_a()
+        df['ichimoku_b'] = ichimoku.ichimoku_b()
+        df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+        df['mfi'] = MFIIndicator(high=df['high'], low=df['low'], close=df['close'], volume=df['volume']).money_flow_index()
+        high_price = df['high'].max()
+        low_price = df['low'].min()
+        diff = high_price - low_price
+        df['fib_0.0'] = high_price
+        df['fib_23.6'] = high_price - 0.236 * diff
+        df['fib_38.2'] = high_price - 0.382 * diff
+        df['fib_50.0'] = high_price - 0.5 * diff
+        df['fib_61.8'] = high_price - 0.618 * diff
+        df['fib_100.0'] = low_price
+        return df
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        return self._calculate_common_indicators(df)
+        return self.calculate_common_indicators(df)
 
     def calculate_multi_timeframe_indicators(self, dfs: dict) -> dict:
         indicators = {}
-        for timeframe, df in dfs.items():
-            try:
-                df_processed = self._calculate_common_indicators(df)
-                indicators[timeframe] = df_processed.tail(1).to_dict(orient='records')[0]
-            except Exception as e:
-                logger.error(f"Lỗi tính toán cho khung {timeframe}: {str(e)}")
-                indicators[timeframe] = {}
+        for timeframe, (_, cleaned_df) in dfs.items():
+            df_processed = self.calculate_common_indicators(cleaned_df)
+            if df_processed.empty:
+                continue
+            indicators[timeframe] = df_processed.tail(1).to_dict(orient='records')[0]
         return indicators
 
-# ---------- THU THẬP TIN TỨC (SỬA LỖI) ----------
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-async def fetch_rss_feed(url: str) -> str:
-    import aiohttp
-    try:
+# ---------- DỰ BÁO GIÁ ----------
+class EnhancedPredictor:
+    """
+    Lớp dự báo nâng cao sử dụng nhiều mô hình để dự đoán giá và tín hiệu giao dịch.
+    Hỗ trợ mô hình lai, đánh giá hiệu suất và sanity check.
+    """
+    def hybrid_predict(self, df: pd.DataFrame, days: int = 5):
+        """
+        Dự báo giá bằng mô hình lai kết hợp nhiều phương pháp
+        
+        Args:
+            df: DataFrame chứa dữ liệu giá
+            days: Số ngày cần dự báo
+            
+        Returns:
+            Tuple gồm mảng dự báo và dictionary các kịch bản
+        """
+        if df.empty or len(df) < 50:
+            raise ValueError("Không đủ dữ liệu để dự báo (cần ít nhất 50 điểm dữ liệu)")
+        df = df.copy()
+        if getattr(df.index, 'tz', None) is not None:
+            df.index = df.index.tz_convert(None)
+            df.index = df.index.tz_localize(None)
+        
+        # Fix for "cannot insert date, already exists" error
+        if 'date' in df.columns:
+            # If 'date' is already a column, use it directly
+            df_prophet = df.copy()
+            df_prophet.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+        else:
+            # Otherwise reset the index as before
+            df_prophet = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+            
+        df_prophet['ds'] = pd.to_datetime(df_prophet['ds']).dt.tz_localize(None)
+        
+        # Cải thiện mô hình Prophet với các tham số điều chỉnh
+        model = Prophet(
+            changepoint_prior_scale=0.05,  # Giảm để giới hạn sự biến động
+            seasonality_prior_scale=10,    # Tăng trọng số cho yếu tố mùa vụ
+            seasonality_mode='multiplicative'  # Phù hợp hơn với dữ liệu tài chính
+        )
+        
+        # Thêm mùa vụ tuần và tháng phù hợp với thị trường chứng khoán
+        model.add_seasonality(name='weekly', period=5, fourier_order=5)
+        model.add_seasonality(name='monthly', period=21, fourier_order=5)
+        
+        # Đặt giới hạn tăng trưởng cho mô hình
+        last_value = df['close'].iloc[-1]
+        growth_cap = last_value * 1.5  # Không dự báo tăng quá 50%
+        growth_floor = last_value * 0.5  # Không dự báo giảm quá 50%
+        df_prophet['cap'] = growth_cap
+        df_prophet['floor'] = growth_floor
+        
+        model.fit(df_prophet[['ds', 'y', 'cap', 'floor']])
+        future = model.make_future_dataframe(periods=days)
+        future['cap'] = growth_cap
+        future['floor'] = growth_floor
+        forecast = model.predict(future)
+        
+        # Lấy kết quả dự báo
+        raw_predictions = forecast.tail(days)['yhat'].values
+        
+        # Áp dụng bộ lọc sanity check để giới hạn dự báo phi lý
+        predictions = self._apply_sanity_checks(raw_predictions, last_value)
+        
+        # Tính toán xác suất các kịch bản dựa trên dự báo đã điều chỉnh
+        last_close = df['close'].iloc[-1]
+        volatility = df['close'].pct_change().std() * 100
+        
+        # Điều chỉnh xác suất dựa trên độ biến động thực tế và giá trị dự báo
+        trend_strength = (predictions[-1] - last_close) / last_close
+        
+        # Xác định xác suất các kịch bản
+        if abs(trend_strength) < 0.02:  # Dự báo sideway
+            sideway_prob = 60
+            breakout_prob = 20 if trend_strength > 0 else 10
+            breakdown_prob = 20 if trend_strength < 0 else 10
+        elif trend_strength > 0:  # Dự báo tăng
+            breakout_prob = min(70, 40 + abs(trend_strength) * 100)
+            breakdown_prob = max(10, 30 - abs(trend_strength) * 50)
+            sideway_prob = 100 - breakout_prob - breakdown_prob
+        else:  # Dự báo giảm
+            breakdown_prob = min(70, 40 + abs(trend_strength) * 100)
+            breakout_prob = max(10, 30 - abs(trend_strength) * 50)
+            sideway_prob = 100 - breakout_prob - breakdown_prob
+        
+        # Điều chỉnh dựa trên độ biến động
+        volatility_factor = min(1.5, max(0.5, volatility / 2))
+        sideway_prob = sideway_prob * (1 / volatility_factor)
+        
+        # Đảm bảo tổng xác suất là 100%
+        total = breakout_prob + breakdown_prob + sideway_prob
+        breakout_prob = breakout_prob / total * 100
+        breakdown_prob = breakdown_prob / total * 100
+        sideway_prob = 100 - breakout_prob - breakdown_prob
+
+        return predictions, {
+            "Breakout": {"prob": breakout_prob, "target": last_close * 1.05},
+            "Breakdown": {"prob": breakdown_prob, "target": last_close * 0.95},
+            "Sideway": {"prob": sideway_prob, "target": last_close}
+        }
+    
+    def _apply_sanity_checks(self, predictions, last_value):
+        """
+        Áp dụng kiểm tra hợp lý cho dự báo để loại bỏ giá trị phi lý.
+        
+        Args:
+            predictions: Mảng các giá trị dự báo
+            last_value: Giá trị gần nhất
+            
+        Returns:
+            Mảng các giá trị dự báo đã điều chỉnh
+        """
+        adjusted_predictions = np.array(predictions)
+        
+        # Lọc 1: Giới hạn biến động tối đa mỗi bước (không quá 5%)
+        max_change_per_step = 0.05
+        for i in range(1, len(adjusted_predictions)):
+            max_change = last_value * max_change_per_step
+            if abs(adjusted_predictions[i] - adjusted_predictions[i-1]) > max_change:
+                direction = 1 if adjusted_predictions[i] > adjusted_predictions[i-1] else -1
+                adjusted_predictions[i] = adjusted_predictions[i-1] + direction * max_change
+        
+        # Lọc 2: Giới hạn biến động tổng thể so với giá hiện tại
+        max_total_change_pct = 0.15  # Giới hạn 15% tổng biến động
+        for i in range(len(adjusted_predictions)):
+            max_total_change = last_value * max_total_change_pct
+            if abs(adjusted_predictions[i] - last_value) > max_total_change:
+                direction = 1 if adjusted_predictions[i] > last_value else -1
+                adjusted_predictions[i] = last_value + direction * max_total_change
+        
+        # Lọc 3: Không cho phép giá âm
+        adjusted_predictions = np.maximum(adjusted_predictions, 0)
+        
+        return adjusted_predictions
+
+    def evaluate_prophet_performance(self, df: pd.DataFrame, forecast: pd.DataFrame) -> float:
+        """
+        Đánh giá hiệu suất của mô hình Prophet
+        
+        Args:
+            df: DataFrame chứa dữ liệu thực tế
+            forecast: DataFrame chứa dự báo từ Prophet
+            
+        Returns:
+            Điểm hiệu suất từ 0 đến 1
+        """
+        if df.empty or forecast.empty:
+            logger.warning("DataFrame df hoặc forecast rỗng, trả về hiệu suất 0.0")
+            return 0.0
+        
+        # Extract actual values
+        actual = df['close'].values
+        
+        # Prepare forecast DataFrame for matching with actual dates
+        forecast_df = forecast.copy()
+        forecast_df['ds'] = pd.to_datetime(forecast_df['ds'])
+        forecast_df = forecast_df.set_index('ds')
+        
+        try:
+            # Convert df.index to datetime if it's not already
+            date_index = pd.to_datetime(df.index)
+            
+            # Safer approach: manually build arrays of matching dates
+            matched_actual = []
+            matched_predicted = []
+            
+            for i, date in enumerate(date_index):
+                # Try to find the closest date in forecast
+                date_str = pd.to_datetime(date).strftime('%Y-%m-%d')
+                matching_dates = forecast_df.index[forecast_df.index.strftime('%Y-%m-%d') == date_str]
+                
+                if not matching_dates.empty:
+                    matched_actual.append(actual[i])
+                    matched_predicted.append(forecast_df.loc[matching_dates[0], 'yhat'])
+            
+            if not matched_actual:
+                # If no exact matches, try a more flexible approach with date strings
+                logger.warning("Không tìm thấy ngày trùng khớp, thử phương pháp linh hoạt hơn...")
+                df_dates = pd.Series(date_index.strftime('%Y-%m-%d'))
+                forecast_dates = pd.Series(forecast_df.index.strftime('%Y-%m-%d'))
+                
+                # Find common dates as strings
+                common_date_strs = set(df_dates).intersection(set(forecast_dates))
+                
+                if not common_date_strs:
+                    logger.error("Không thể đồng bộ ngày giữa df và forecast: không có ngày trùng khớp")
+                    return 0.0
+                
+                # Get values for common dates
+                for date_str in common_date_strs:
+                    # Get df indices with this date
+                    df_idx = df_dates[df_dates == date_str].index
+                    # Get forecast indices with this date
+                    forecast_idx = forecast_dates[forecast_dates == date_str].index
+                    
+                    if not df_idx.empty and not forecast_idx.empty:
+                        # Add to our lists
+                        matched_actual.append(df.iloc[df_idx[0]]['close'])
+                        matched_predicted.append(forecast_df.iloc[forecast_idx[0]]['yhat'])
+                
+                if not matched_actual:
+                    logger.error("Không thể đồng bộ ngày giữa df và forecast: không có ngày trùng khớp sau khi kiểm tra")
+                    return 0.0
+            
+            # Convert to numpy arrays
+            actual = np.array(matched_actual)
+            predicted = np.array(matched_predicted)
+                
+        except KeyError as e:
+            logger.error(f"Không thể đồng bộ ngày giữa df và forecast: {str(e)}")
+            return 0.0
+        except Exception as e:
+            logger.error(f"Lỗi khi đánh giá hiệu suất Prophet: {str(e)}")
+            return 0.0
+        
+        if len(actual) != len(predicted):
+            logger.error(f"Kích thước không khớp: actual ({len(actual)}), predicted ({len(predicted)})")
+            return 0.0
+        
+        if len(actual) < 10:
+            logger.warning(f"Quá ít điểm dữ liệu cho đánh giá chính xác: {len(actual)} điểm")
+            return 0.3  # Return a moderate score
+        
+        # Tính toán các chỉ số hiệu suất
+        mse = np.mean((actual - predicted) ** 2)
+        mae = np.mean(np.abs(actual - predicted))
+        mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+        
+        # Phát hiện dự báo phi lý
+        avg_price = np.mean(actual)
+        is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in predicted)
+        
+        # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
+        if is_unrealistic:
+            logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
+            return 0.1  # Giảm mạnh điểm hiệu suất
+            
+        # Đánh giá hiệu suất dựa trên MSE và MAPE
+        # 1/(1+MSE) cho giá trị từ 0-1, càng gần 1 càng tốt
+        mse_score = 1 / (1 + mse)
+        # MAPE < 10% là tốt, >30% là kém
+        mape_score = max(0, 1 - (mape / 30))
+        
+        # Kết hợp hai điểm số (70% MSE, 30% MAPE)
+        performance = 0.7 * mse_score + 0.3 * mape_score
+        
+        return performance
+
+    def forecast_with_prophet(self, df: pd.DataFrame, periods: int = 7):
+        """
+        Dự báo giá bằng mô hình Prophet với các cải tiến
+        
+        Args:
+            df: DataFrame chứa dữ liệu giá
+            periods: Số kỳ cần dự báo
+            
+        Returns:
+            Tuple gồm forecast, model và hiệu suất
+        """
+        if df.empty or len(df) < 50:
+            raise ValueError("Không đủ dữ liệu để dự báo Prophet (cần ít nhất 50 điểm dữ liệu)")
+        df = df.copy()
+        if getattr(df.index, 'tz', None) is not None:
+            df.index = df.index.tz_convert(None)
+            df.index = df.index.tz_localize(None)
+            
+        # Fix for "cannot insert date, already exists" error
+        if 'date' in df.columns:
+            # If 'date' is already a column, use it directly
+            df_reset = df.copy()
+            df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+        else:
+            # Otherwise reset the index as before
+            df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+            
+        df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
+        
+        # Cải thiện mô hình Prophet với các tham số điều chỉnh
+        model = Prophet(
+            changepoint_prior_scale=0.05,
+            seasonality_prior_scale=10,
+            seasonality_mode='multiplicative'
+        )
+        
+        # Thêm các tham số mùa vụ phù hợp với thị trường chứng khoán
+        model.add_seasonality(name='weekly', period=5, fourier_order=5)
+        model.add_seasonality(name='monthly', period=21, fourier_order=5)
+        
+        # Thêm giới hạn tăng trưởng
+        last_value = df['close'].iloc[-1]
+        growth_cap = last_value * 1.5
+        growth_floor = last_value * 0.5
+        df_reset['cap'] = growth_cap
+        df_reset['floor'] = growth_floor
+        
+        # Huấn luyện mô hình với các ràng buộc
+        model.fit(df_reset[['ds', 'y', 'cap', 'floor']])
+        
+        # Tạo dữ liệu dự báo
+        future = model.make_future_dataframe(periods=periods)
+        future['cap'] = growth_cap
+        future['floor'] = growth_floor
+        
+        # Dự báo
+        forecast = model.predict(future)
+        
+        # Đánh giá hiệu suất
+        performance = self.evaluate_prophet_performance(df, forecast)
+        
+        # Kiểm tra và điều chỉnh dự báo phi lý
+        if performance < 0.3:  # Hiệu suất kém
+            logger.warning("Hiệu suất Prophet thấp, áp dụng lọc dự báo phi lý")
+            # Điều chỉnh dự báo: Sử dụng phương pháp hồi quy tuyến tính đơn giản thay thế
+            last_n = min(30, len(df))
+            X = np.arange(last_n).reshape(-1, 1)
+            y = df['close'].tail(last_n).values
+            from sklearn.linear_model import LinearRegression
+            reg = LinearRegression().fit(X, y)
+            future_idx = np.arange(last_n, last_n + periods).reshape(-1, 1)
+            linear_pred = reg.predict(future_idx)
+            
+            # Giới hạn dự báo trong phạm vi hợp lý
+            for i in range(len(linear_pred)):
+                day = i + 1
+                max_change = last_value * (0.02 * day)  # Tối đa 2% mỗi ngày
+                if abs(linear_pred[i] - last_value) > max_change:
+                    direction = 1 if linear_pred[i] > last_value else -1
+                    linear_pred[i] = last_value + direction * max_change
+            
+            # Ghi đè giá trị dự báo
+            future_indices = forecast.index[-periods:]
+            forecast.loc[future_indices, 'yhat'] = linear_pred
+            forecast.loc[future_indices, 'yhat_lower'] = linear_pred * 0.95
+            forecast.loc[future_indices, 'yhat_upper'] = linear_pred * 1.05
+            
+            performance = 0.5  # Đặt hiệu suất mặc định cho mô hình hồi quy tuyến tính
+        
+        return forecast, model, performance
+
+    def predict_xgboost_signal(self, df: pd.DataFrame, features: list):
+        """
+        Dự báo tín hiệu giao dịch bằng XGBoost
+        
+        Args:
+            df: DataFrame chứa dữ liệu đã tính toán chỉ báo kỹ thuật
+            features: Danh sách các đặc trưng sử dụng để dự báo
+            
+        Returns:
+            Tuple của tín hiệu dự báo và độ chính xác
+        """
+        if df.empty or len(df) < 50:
+            raise ValueError("Không đủ dữ liệu để dự báo XGBoost (cần ít nhất 50 điểm dữ liệu)")
+        df = df.copy()
+        df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
+        X = df[features].shift(1)
+        y = df['target']
+        valid_idx = X.notna().all(axis=1) & y.notna()
+        X = X[valid_idx]
+        y = y[valid_idx]
+        if len(X) < 50:
+            return "Không đủ dữ liệu để dự báo XGBoost", 0.0
+        X_train = X.iloc[:-1]
+        y_train = y.iloc[:-1]
+        model = xgb.XGBClassifier()
+        model.fit(X_train, y_train)
+        pred = model.predict(X.iloc[-1:])[0]
+        actual = y.iloc[-1]
+        accuracy = 1 if pred == actual else 0
+        return "Tăng" if pred == 1 else "Giảm", accuracy
+
+# ---------- AI & BÁO CÁO ----------
+class AIAnalyzer:
+    def __init__(self):
+        genai.configure(api_key=GEMINI_API_KEY)
+        self.gemini_model = genai.GenerativeModel('gemini-1.5-pro')
+        self.tech_analyzer = TechnicalAnalyzer()
+        self.predictor = EnhancedPredictor()
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def generate_content(self, prompt):
+        return await self.gemini_model.generate_content_async(prompt)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def analyze_with_groq(self, technical_data: dict) -> dict:
+        if not GROQ_API_KEY:
+            logger.error("GROQ_API_KEY không được thiết lập")
+            return {}
+        
+        class CustomJSONEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, (pd.Timestamp, datetime)):
+                    return obj.strftime('%Y-%m-%d')
+                elif isinstance(obj, pd.Series):
+                    return obj.to_dict()
+                elif isinstance(obj, (np.int64, np.int32)):
+                    return int(obj)
+                elif isinstance(obj, (np.float64, np.float32)):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                return super().default(obj)
+        
+        # Chuẩn bị dữ liệu kỹ thuật
+        prompt = """
+        Phân tích dữ liệu kỹ thuật sau đây để nhận diện mô hình giá (pattern) theo Elliott Wave, Wyckoff, và các mô hình nến Nhật.
+        Hãy xác định chính xác các mô hình đang xuất hiện trên biểu đồ dựa trên dữ liệu được cung cấp.
+        
+        Dữ liệu:
+        {}
+        
+        Trả về kết quả dưới dạng JSON với định dạng:
+        ```json
+        {{
+          "patterns": [
+            {{"name": "Tên Mô Hình 1", "description": "Mô tả ngắn gọn"}},
+            {{"name": "Tên Mô Hình 2", "description": "Mô tả ngắn gọn"}}
+          ]
+        }}
+        ```
+        
+        Chỉ trả lại JSON, không cần giải thích thêm.
+        """.format(json.dumps(technical_data, ensure_ascii=False, cls=CustomJSONEncoder))
+        
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": GROQ_MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 800
+        }
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    return await response.text()
-                else:
-                    raise ValueError(f"HTTP {response.status} khi lấy RSS từ {url}")
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout khi lấy RSS từ {url}")
-    except Exception as e:
-        logger.error(f"Lỗi lấy RSS từ {url}: {str(e)}")
-    return None
+            async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
+                if resp.status != 200:
+                    error_content = await resp.text()
+                    logger.error(f"Groq API trả về lỗi {resp.status} khi phân tích dữ liệu kỹ thuật. Nội dung lỗi: {error_content}")
+                    if resp.status == 429:
+                        logger.warning("Gặp lỗi 429 - Quá nhiều yêu cầu, thử lại...")
+                    return {}
+                result_text = await resp.text()
+                try:
+                    result = json.loads(result_text)
+                    # Extract the content from the message
+                    message_content = result['choices'][0]['message']['content']
+                    
+                    # Extract JSON portion from the content (between triple backticks)
+                    import re
+                    
+                    # First, check if there's a <think> tag and extract content after it
+                    think_match = re.search(r'<think>[\s\S]*?</think>([\s\S]*)', message_content)
+                    if think_match:
+                        # Use the content after </think> tag
+                        message_content = think_match.group(1).strip()
+                    
+                    # Try to find JSON in code blocks
+                    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', message_content)
+                    if json_match:
+                        json_text = json_match.group(1).strip()
+                        return json.loads(json_text)
+                    
+                    # Try to find JSON in any code blocks
+                    json_match = re.search(r'```\s*([\s\S]*?)\s*```', message_content)
+                    if json_match:
+                        json_text = json_match.group(1).strip()
+                        if json_text.startswith('{') and ('}' in json_text):
+                            return json.loads(json_text)
+                    
+                    # Try to find JSON directly in the content
+                    json_match = re.search(r'({[\s\S]*})', message_content)
+                    if json_match:
+                        json_text = json_match.group(1).strip()
+                        return json.loads(json_text)
+                        
+                    # If message is already JSON formatted
+                    if message_content.strip().startswith('{') and message_content.strip().endswith('}'):
+                        return json.loads(message_content)
+                    
+                    logger.error(f"Không thể tìm thấy phần JSON trong nội dung phản hồi: {message_content}")
+                    return {"patterns": [{"name": "JSON không đúng định dạng", "description": "Không thể tìm thấy JSON trong nội dung phản hồi"}]}
+                except (KeyError, json.JSONDecodeError) as e:
+                    logger.error(f"Lỗi parsing phản hồi từ Groq: {str(e)}. Nội dung phản hồi: {result_text}")
+                    return {"patterns": [{"name": "Lỗi parsing", "description": "Không thể phân tích phản hồi từ Groq"}]}
 
-async def get_news(symbol: str = None, limit: int = 3) -> list:
-    cache_key = f"news_{symbol}_{limit}" if symbol else f"news_market_{limit}"
-    cached_news = await redis_manager.get(cache_key)
-    if cached_news is not None:
-        return cached_news
+    async def generate_report_with_groq(self, prompt: str) -> str:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": GROQ_MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 2048
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(3):  # Giới hạn thử lại
+                async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        try:
+                            return result['choices'][0]['message']['content']
+                        except KeyError as e:
+                            logger.error(f"Lỗi truy cập phản hồi Groq: {str(e)}")
+                            raise Exception("Không thể lấy nội dung từ phản hồi Groq")
+                    elif resp.status == 429:
+                        logger.warning(f"HTTP 429 từ Groq API (lần thử {attempt + 1}). Thử lại sau {2 ** attempt}s...")
+                        await asyncio.sleep(2 ** attempt)  # Backoff theo lũy thừa 2
+                    else:
+                        logger.error(f"Groq API trả về lỗi: {resp.status}")
+                        raise Exception(f"Lỗi gọi Groq API: {resp.status}")
+            logger.error("Không thể tạo báo cáo với Groq sau nhiều lần thử.")
+            raise Exception("Không thể hoàn thành yêu cầu với Groq API")
 
-    rss_urls = [
-        "https://cafef.vn/thi-truong-chung-khoan.rss",
-        "https://cafef.vn/smart-money.rss",
-        "https://cafef.vn/tai-chinh-ngan-hang.rss",
-        "https://cafef.vn/doanh-nghiep.rss",
-        "https://vnexpress.net/rss/kinh-doanh.rss",
-        "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-        "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
-        "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml"
-    ]
+    async def try_gemini_then_groq(self, prompt: str) -> str:
+        try:
+            response = await self.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            logger.error(f"⚠️ Gemini lỗi ({e}) → fallback Groq...")
+            return await self.generate_report_with_groq(prompt)
 
-    market_keywords = ["market", "stock", "index", "economy", "thị trường", "chứng khoán", "lãi suất", "vnindex"]
-    symbol_keywords = [symbol.lower(), f"{symbol.lower()} ", f"mã {symbol.lower()}"] if symbol else []
+    def analyze_price_action(self, df: pd.DataFrame) -> str:
+        if df.empty or len(df) < 6:
+            return "Không đủ dữ liệu để phân tích."
+        last_5 = df['close'].tail(5).pct_change().dropna()
+        summary = []
+        for i, change in enumerate(last_5):
+            if change > 0:
+                summary.append(f"Ngày -{4-i}: Tăng {change*100:.2f}%")
+            elif change < 0:
+                summary.append(f"Ngày -{4-i}: Giảm {-change*100:.2f}%")
+            else:
+                summary.append(f"Ngày -{4-i}: Không đổi")
+        consecutive_up = consecutive_down = 0
+        for change in last_5[::-1]:
+            if change > 0:
+                consecutive_up += 1
+                consecutive_down = 0
+            elif change < 0:
+                consecutive_down += 1
+                consecutive_up = 0
+            else:
+                break
+        if consecutive_up >= 3:
+            return f"✅ Giá tăng {consecutive_up} phiên liên tiếp.\n" + "\n".join(summary)
+        elif consecutive_down >= 3:
+            return f"⚠️ Giá giảm {consecutive_down} phiên liên tiếp.\n" + "\n".join(summary)
+        return "🔍 Xu hướng chưa rõ.\n" + "\n".join(summary)
 
-    news_list = []
-    tasks = [fetch_rss_feed(url) for url in rss_urls]
-    rss_results = await asyncio.gather(*tasks)
-    for rss_text in rss_results:
-        if rss_text is None:
-            continue
-        feed = parse_rss_content(rss_text)
-        if not feed or not feed.entries:
-            continue
-        for entry in feed.entries[:2]:
-            title = entry.get("title", "").strip()
-            link = entry.get("link", "")
-            summary = entry.get("summary", entry.get("description", "")).strip()
-            pub_date = entry.get("published", datetime.now().isoformat())
-            content = f"{title} {summary}".lower()
-            match = False
-            if symbol and any(kw in content for kw in symbol_keywords):
-                match = True
-            elif not symbol and any(kw in content for kw in market_keywords):
-                match = True
-            if match:
-                news_list.append({
-                    "title": title,
-                    "link": link,
-                    "summary": summary[:200] + "..." if len(summary) > 200 else summary,
-                    "published": pub_date
-                })
-    unique_news = sorted(news_list, key=lambda x: x.get("published", ""), reverse=True)[:limit]
-    result = unique_news if unique_news else [{"title": "⚠️ Không có tin tức", "link": "#", "summary": ""}]
-    await redis_manager.set(cache_key, result, expire=NEWS_CACHE_EXPIRE)
-    return result
+    async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
+        try:
+            raw_df_1d, cleaned_df_1d = dfs.get('1D')
+            if raw_df_1d is None or raw_df_1d.empty or len(raw_df_1d) < 2:
+                raise ValueError("Không đủ dữ liệu cho phân tích 1D.")
 
-def parse_rss_content(rss_text: str):
-    try:
-        return feedparser.parse(rss_text) if rss_text else None
-    except Exception as e:
-        logger.error(f"Lỗi phân tích RSS: {str(e)}")
-        return None
+            close_today = raw_df_1d['close'].iloc[-1]
+            close_yesterday = raw_df_1d['close'].iloc[-2]
+            price_action = self.analyze_price_action(raw_df_1d)
+
+            # Lịch sử báo cáo - sử dụng PostgreSQL DB
+            history = await db.load_report_history(symbol)
+            past_report = ""
+            if history:
+                last = history[0]  # Lấy báo cáo gần nhất (đã sắp xếp DESC)
+                past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
+                past_report = f"📜 **Báo cáo trước** ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
+
+            fundamental_report = deep_fundamental_analysis(fundamental_data)
+
+            # Chỉ báo đa khung thời gian
+            multi_indicators = self.tech_analyzer.calculate_multi_timeframe_indicators(dfs)
+
+            # Hybrid prediction
+            hybrid_preds, scenarios = self.predictor.hybrid_predict(cleaned_df_1d, days=5)
+
+            # Prophet forecast
+            forecast, _, prophet_perf = self.predictor.forecast_with_prophet(cleaned_df_1d, periods=7)
+            next_day_pred = forecast.tail(7).iloc[0]['yhat']
+            day7_pred = forecast.tail(1)['yhat'].iloc[0]
+
+            # Chuẩn hóa DataFrame với chỉ báo cho XGBoost
+            indicators_df_1d = self.tech_analyzer.calculate_common_indicators(cleaned_df_1d)
+            features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b']
+            xgb_signal, xgb_accuracy = self.predictor.predict_xgboost_signal(indicators_df_1d, features)
+
+            # Chuẩn bị data cho Groq & tin tức
+            technical_data = {
+                "candlestick_data": raw_df_1d.tail(50).to_dict(orient="records"),
+                "technical_indicators": multi_indicators.get("1D", {})
+            }
+            groq_annotation = await self.analyze_with_groq(technical_data)
+
+            news = await get_news(symbol=symbol)
+            news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}\n📝 {n['summary']}" for n in news])
+            outlier_text = "\n".join([f"**{tf}**: {report_text}" for tf, report_text in outlier_reports.items()])
+
+            # Tạo chuỗi prompt cho AI
+            prompt = f"""
+Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
+
+**Thông tin cơ bản:**
+- Ngày: {datetime.now(TZ).strftime('%d/%m/%Y')}
+- Giá hôm qua: {close_yesterday:.2f}
+- Giá hôm nay: {close_today:.2f}
+
+**Hành động giá:**
+{price_action}
+
+**Lịch sử dự đoán:**
+{past_report}
+
+**Chất lượng dữ liệu:**
+{outlier_text}
+
+**Chỉ số kỹ thuật:**
+"""
+            for tf, ind in multi_indicators.items():
+                prompt += f"\n--- {tf} ---\n"
+                prompt += f"- Close: {ind.get('close', 0):.2f}\n"
+                prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
+                prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
+                prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
+                prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
+                prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
+                prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
+
+            prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
+            prompt += f"\n**Tin tức:**\n{news_text}\n"
+            prompt += f"\n**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_accuracy:.2f}): {xgb_signal}\n"
+            prompt += f"\n**Dự báo giá (Prophet)** (Hiệu suất: {prophet_perf:.2f}):\n"
+            prompt += f"- Ngày tiếp theo: {next_day_pred:.2f}\n"
+            prompt += f"- Sau 7 ngày: {day7_pred:.2f}\n"
+            prompt += f"- Kịch bản:\n"
+            prompt += f"  + Breakout: {scenarios['Breakout']['prob']:.1f}%, Mục tiêu: {scenarios['Breakout']['target']:.2f}\n"
+            prompt += f"  + Breakdown: {scenarios['Breakdown']['prob']:.1f}%, Mục tiêu: {scenarios['Breakdown']['target']:.2f}\n"
+            prompt += f"  + Sideway: {scenarios['Sideway']['prob']:.1f}%, Mục tiêu: {scenarios['Sideway']['target']:.2f}\n"
+            prompt += f"\n**Phân tích Groq:**\n{json.dumps(groq_annotation, ensure_ascii=False) if groq_annotation else 'Không có dữ liệu từ Groq'}\n"
+            prompt += """
+**Yêu cầu:**
+1. Tóm tắt tổng quan.
+2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
+3. Đánh giá các chỉ số kỹ thuật, mẫu hình, sóng, mô hình nến. Động lực thị trường.
+4. Xác định Hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
+5. Đề xuất phương án giao dịch (ngắn hạn, trung hạn, dài hạn) với % tin cậy.
+6. Đánh giá rủi ro và tỷ lệ risk/reward.
+7. Đưa ra nhận định.
+8. Trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
+
+**Hướng dẫn bổ sung:**
+- Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
+- VNINDEX, VN30 là chỉ số, không phải mã cổ phiếu, bỏ qua chỉ số cơ bản, không mua/bán ( VNINDEX có phái sinh).
+"""
+            # Tạo báo cáo
+            report = await self.try_gemini_then_groq(prompt)
+            
+            # Lưu báo cáo vào lịch sử (đã được chuyển sang analyze_command)
+            return report
+        except Exception as e:
+            logger.error(f"Lỗi tạo báo cáo: {str(e)}")
+            logger.error(traceback.format_exc())
+            return f"❌ Lỗi tạo báo cáo: {str(e)}"
 
 # ---------- PHÂN TÍCH CƠ BẢN ----------
 def deep_fundamental_analysis(fundamental_data: dict) -> str:
@@ -987,87 +2283,425 @@ def deep_fundamental_analysis(fundamental_data: dict) -> str:
 
     return report
 
-# ---------- HUẤN LUYỆN VÀ LƯU MÔ HÌNH ----------
-def prepare_data_for_prophet(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        raise ValueError("DataFrame rỗng, không thể dự báo")
-    df_reset = df.reset_index()
-    df_reset['date'] = df_reset['date'].dt.tz_localize(None)
-    df_reset = df_reset.rename(columns={'date': 'ds', 'close': 'y'})
-    return df_reset[['ds', 'y']]
+# ---------- THU THẬP TIN TỨC ----------
+async def get_news(symbol: str = None, limit: int = 3) -> list:
+    """
+    Thu thập tin tức liên quan đến chứng khoán từ nhiều nguồn RSS.
+    
+    Args:
+        symbol: Mã chứng khoán cần thu thập tin tức (None để lấy tin thị trường chung)
+        limit: Số lượng tin tức tối đa cần lấy
+        
+    Returns:
+        Danh sách các tin tức đã thu thập
+    """
+    # Tạo khóa cache dựa trên symbol và ngày hiện tại
+    cache_key = f"news_{symbol}_{limit}_{datetime.now(TZ).strftime('%Y%m%d')}" if symbol else f"news_market_{limit}_{datetime.now(TZ).strftime('%Y%m%d')}"
+    
+    # Kiểm tra cache Redis
+    cached_news = await redis_manager.get(cache_key)
+    if cached_news is not None:
+        logger.debug(f"Sử dụng tin tức từ cache cho {'mã ' + symbol if symbol else 'thị trường chung'}")
+        return cached_news
+    
+    # Danh sách các nguồn RSS
+    rss_urls = [
+        # Nguồn tiếng Việt
+        "https://cafef.vn/thi-truong-chung-khoan.rss",
+        "https://cafef.vn/smart-money.rss",
+        "https://cafef.vn/tai-chinh-ngan-hang.rss",
+        "https://cafef.vn/doanh-nghiep.rss",
+        "https://vnexpress.net/rss/kinh-doanh.rss",
+        "https://vietnamnet.vn/rss/kinh-doanh.rss",     
+        # Nguồn tiếng Anh
+        "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+        "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
+        "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+    ]
+    
+    # Từ khóa tìm kiếm
+    market_keywords = [
+        # Tiếng Việt
+        "thị trường", "chứng khoán", "cổ phiếu", "vn-index", "vnindex", "vn index", 
+        "hose", "hnx", "upcom", "trái phiếu", "bluechip", "đầu tư", "tài chính",
+        # Tiếng Anh
+        "market", "stock", "index", "shares", "trading", "finance", "investment"
+    ]
+    
+    # Từ khóa cho mã cụ thể
+    symbol_keywords = []
+    if symbol:
+        symbol_lower = symbol.lower()
+        # Tạo các biến thể của mã để tăng khả năng tìm thấy
+        symbol_keywords = [
+            symbol_lower,
+            f"{symbol_lower} ",
+            f" {symbol_lower}",
+            f" {symbol_lower} ",
+            f"mã {symbol_lower}",
+            f"cổ phiếu {symbol_lower}",
+            f"{symbol_lower} stock",
+            f"{symbol.upper()}"
+        ]
+    
+    # Tạo danh sách để lưu tin tức
+    news_list = []
+    
+    # Tải và xử lý đồng thời các nguồn RSS
+    tasks = []
+    for url in rss_urls:
+        if symbol and "vietstock.vn" in url:
+            # Thêm mã vào URL của Vietstock
+            url = f"https://vietstock.vn/rss.aspx?Keyword={symbol.upper()}"
+        tasks.append(fetch_rss(url, symbol_keywords if symbol else market_keywords, symbol is not None))
+    
+    # Thực hiện tất cả các yêu cầu một cách đồng thời
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Kết hợp kết quả
+    for result in results:
+        if isinstance(result, list):
+            news_list.extend(result)
+    
+    # Loại bỏ các tin trùng lặp dựa trên URL
+    unique_urls = set()
+    unique_news = []
+    for news in news_list:
+        if news['link'] not in unique_urls:
+            unique_urls.add(news['link'])
+            unique_news.append(news)
+    
+    # Sắp xếp theo thời gian (mới nhất trước)
+    sorted_news = sorted(unique_news, key=lambda x: x.get("published", ""), reverse=True)
+    
+    # Giới hạn số lượng tin tức
+    limited_news = sorted_news[:limit]
+    
+    # Nếu không có tin tức, trả về thông báo
+    result = limited_news if limited_news else [{"title": "⚠️ Không có tin tức", "link": "#", "summary": ""}]
+    
+    # Lưu vào cache Redis
+    await redis_manager.set(cache_key, result, NEWS_CACHE_EXPIRE)
+    
+    return result
 
-def get_vietnam_holidays(years) -> pd.DataFrame:
-    holiday_list = []
-    for year in years:
-        vn_holidays = holidays.Vietnam(years=year)
-        for date, name in vn_holidays.items():
-            holiday_list.append({'ds': pd.to_datetime(date), 'holiday': name})
-    holiday_df = pd.DataFrame(holiday_list)
-    holiday_df['ds'] = holiday_df['ds'].dt.tz_localize(None)
-    return holiday_df
-
-def forecast_with_prophet(df: pd.DataFrame, periods: int = 7) -> (pd.DataFrame, Prophet):
+async def fetch_rss(url: str, keywords: list, is_symbol_search: bool = False) -> list:
+    """
+    Tải và phân tích nguồn RSS cụ thể
+    
+    Args:
+        url: URL của nguồn RSS
+        keywords: Danh sách từ khóa cần tìm kiếm
+        is_symbol_search: True nếu đang tìm kiếm cho một mã cụ thể
+        
+    Returns:
+        Danh sách các tin tức phù hợp
+    """
+    news_items = []
     try:
-        data = prepare_data_for_prophet(df)
-        if data.empty:
-            raise ValueError("Không đủ dữ liệu để dự báo Prophet.")
-        current_year = datetime.now().year
-        holiday_df = get_vietnam_holidays(range(current_year-1, current_year+2))
-        model = Prophet(holidays=holiday_df)
-        model.fit(data)
-        future = model.make_future_dataframe(periods=periods)
-        forecast = model.predict(future)
-        return forecast, model
+        # Thiết lập timeout để tránh chờ quá lâu
+        timeout = aiohttp.ClientTimeout(total=10)
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.warning(f"Không thể tải RSS từ {url}, mã trạng thái: {response.status}")
+                    return []
+                
+                text = await response.text()
+                feed = feedparser.parse(text)
+                
+                if not feed.entries:
+                    logger.debug(f"Không có mục nào trong feed từ {url}")
+                    return []
+                
+                # Giới hạn số lượng mục để xử lý (để tránh quá tải)
+                entries_to_process = feed.entries[:10]
+                
+                for entry in entries_to_process:
+                    title = entry.get("title", "").strip()
+                    link = entry.get("link", "")
+                    
+                    # Lấy tóm tắt hoặc mô tả
+                    summary = entry.get("summary", entry.get("description", "")).strip()
+                    
+                    # Cắt ngắn tóm tắt nếu quá dài
+                    if len(summary) > 200:
+                        summary = summary[:197] + "..."
+                    
+                    # Xử lý thời gian xuất bản
+                    published = entry.get("published", entry.get("pubDate", datetime.now(TZ).isoformat()))
+                    
+                    # Kết hợp nội dung để tìm kiếm từ khóa
+                    content = f"{title} {summary}".lower()
+                    
+                    # Kiểm tra khớp với từ khóa
+                    match = False
+                    
+                    if is_symbol_search:
+                        # Khi tìm kiếm mã cụ thể, cần khớp với ít nhất một từ khóa
+                        if any(kw in content for kw in keywords):
+                            match = True
+                    else:
+                        # Khi tìm kiếm tin thị trường, cần khớp với ít nhất một từ khóa
+                        if any(kw in content for kw in keywords):
+                            match = True
+                    
+                    if match:
+                        # Làm sạch HTML trong tóm tắt
+                        if "<" in summary and ">" in summary:
+                            from bs4 import BeautifulSoup
+                            try:
+                                summary = BeautifulSoup(summary, "html.parser").get_text()
+                            except Exception as e:
+                                logger.warning(f"Không thể phân tích HTML trong tóm tắt: {str(e)}")
+                        
+                        news_items.append({
+                            "title": title,
+                            "link": link,
+                            "summary": summary,
+                            "published": published,
+                            "source": url.split('/')[2]  # Lấy domain làm nguồn
+                        })
+        
+        return news_items
     except Exception as e:
-        logger.error(f"Lỗi dự báo Prophet: {str(e)}")
-        raise
+        logger.error(f"Lỗi khi tải RSS từ {url}: {str(e)}")
+        return []
 
-def evaluate_prophet_performance(df: pd.DataFrame, forecast: pd.DataFrame) -> float:
-    actual = df['close'].iloc[-len(forecast):].values
-    predicted = forecast['yhat'].values[:len(actual)]
-    if len(actual) < 1 or len(predicted) < 1:
-        return 0.0
-    mse = np.mean((actual - predicted) ** 2)
-    return 1 / (1 + mse)
+# ---------- AUTO TRAINING ----------
+async def auto_train_models():
+    """
+    Tự động huấn luyện mô hình cho các mã đã có trong lịch sử báo cáo.
+    Sử dụng PostgreSQL database.
+    """
+    # Lấy danh sách mã cần training
+    symbols = await db.get_training_symbols()
+    if not symbols:
+        logger.info("Không có mã nào trong ReportHistory, bỏ qua auto training.")
+        return
+        
+    for symbol in symbols:
+        try:
+            logger.info(f"Bắt đầu auto training cho mã: {symbol}")
+            loader = DataLoader()
+            tech_analyzer = TechnicalAnalyzer()
+            raw_df, cleaned_df, _ = await loader.load_data(symbol, '1D', 500)
+            df = tech_analyzer.calculate_indicators(cleaned_df)
+            features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
+            
+            # Huấn luyện mô hình
+            prophet_model, prophet_perf = await run_in_thread(train_prophet_model, df)
+            xgb_model, xgb_perf = await run_in_thread(train_xgboost_model, df, features)
+            
+            # Chuẩn bị tham số
+            prophet_params = {
+                'changepoint_prior_scale': 0.05,
+                'seasonality_prior_scale': 10,
+                'seasonality_mode': 'multiplicative'
+            }
+            xgb_params = {
+                'features': features,
+                'data_points': len(df)
+            }
+            
+            # Lưu mô hình với thông tin version và params
+            await db.store_trained_model(
+                symbol, 'prophet', prophet_model, prophet_perf, 
+                version="1.1", params=prophet_params
+            )
+            await db.store_trained_model(
+                symbol, 'xgboost', xgb_model, xgb_perf,
+                version="1.1", params=xgb_params
+            )
+            
+            logger.info(f"Auto training cho {symbol} hoàn tất.")
+        except Exception as e:
+            logger.error(f"Lỗi auto training cho {symbol}: {str(e)}")
+            logger.error(traceback.format_exc())  # Thêm stack trace đầy đủ
 
-def predict_xgboost_signal(df: pd.DataFrame, features: list) -> (int, float):
-    if df is None or df.empty:
-        return "Dữ liệu rỗng", 0.0
+async def migrate_database():
+    """
+    Di chuyển dữ liệu từ cơ sở dữ liệu cũ sang mới, sử dụng trong quá trình cập nhật.
+    Cập nhật: Sử dụng SQLAlchemy trực tiếp thay vì AsyncDBManager đã bị loại bỏ.
+    """
+    old_db_file = 'bot_sieucap_v18.db'
+    
+    # Kiểm tra xem file cơ sở dữ liệu cũ có tồn tại không
+    if os.path.exists(old_db_file):
+        logger.info(f"Phát hiện cơ sở dữ liệu cũ ({old_db_file}), bắt đầu di chuyển dữ liệu...")
+        try:
+            # Sử dụng SQLite trực tiếp để đọc dữ liệu cũ
+            import sqlite3
+            old_conn = sqlite3.connect(old_db_file)
+            old_conn.row_factory = sqlite3.Row
+            
+            # Khởi tạo PostgreSQL trước
+            await init_db()
+            
+            # Di chuyển approved_users
+            cur = old_conn.execute("SELECT user_id, approved_at FROM approved_users")
+            users = cur.fetchall()
+            for user in users:
+                user_id = user['user_id']
+                approved_at = user['approved_at'] or datetime.now().isoformat()
+                notes = "Migrated from legacy database"
+                
+                # Dùng DBManager hiện tại thay vì async_db đã bị comment
+                await db.add_approved_user(user_id, approved_at, notes)
+            
+            # Di chuyển report_history
+            try:
+                cur = old_conn.execute("SELECT symbol, date, report, close_today, close_yesterday, timestamp FROM report_history")
+                reports = cur.fetchall()
+                for report in reports:
+                    symbol = report['symbol']
+                    date = report['date']
+                    report_text = report['report']
+                    close_today = report['close_today']
+                    close_yesterday = report['close_yesterday']
+                    timeframe = '1D'  # Mặc định cho dữ liệu cũ
+                    
+                    # Lưu báo cáo vào PostgreSQL
+                    await db.save_report_history(
+                        symbol, report_text, close_today, close_yesterday, timeframe
+                    )
+            except sqlite3.OperationalError:
+                logger.warning("Bảng report_history không tồn tại trong cơ sở dữ liệu cũ, bỏ qua.")
+            
+            # Di chuyển trained_models
+            try:
+                cur = old_conn.execute("SELECT symbol, model_type, model_blob, created_at, performance FROM trained_models")
+                models = cur.fetchall()
+                for model in models:
+                    symbol = model['symbol']
+                    model_type = model['model_type']
+                    model_blob = model['model_blob']
+                    created_at = model['created_at'] or datetime.now().isoformat()
+                    performance = model['performance']
+                    version = "1.0"  # Mặc định cho dữ liệu cũ
+                    
+                    # Giải mã và lưu mô hình
+                    try:
+                        model_obj = pickle.loads(model_blob)
+                        # Lưu mô hình vào PostgreSQL
+                        await db.store_trained_model(
+                            symbol, model_type, model_obj, performance, version
+                        )
+                    except Exception as e:
+                        logger.error(f"Lỗi khi giải mã mô hình {symbol}/{model_type}: {str(e)}")
+            except sqlite3.OperationalError:
+                logger.warning("Bảng trained_models không tồn tại trong cơ sở dữ liệu cũ, bỏ qua.")
+            
+            # Đóng kết nối SQLite
+            old_conn.close()
+            
+            # Đổi tên file cũ để tránh di chuyển lại
+            backup_file = f"{old_db_file}.bak"
+            os.rename(old_db_file, backup_file)
+            logger.info(f"Di chuyển dữ liệu thành công, đã sao lưu cơ sở dữ liệu cũ tại {backup_file}")
+        except Exception as e:
+            logger.error(f"Lỗi khi di chuyển dữ liệu: {str(e)}")
+            logger.error(traceback.format_exc())
+    else:
+        logger.info("Không tìm thấy cơ sở dữ liệu cũ, bỏ qua quá trình di chuyển.")
+
+def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
+    """
+    Huấn luyện mô hình Prophet cho dự báo giá
+    
+    Args:
+        df: DataFrame chứa dữ liệu giá
+        
+    Returns:
+        Tuple gồm model Prophet và điểm hiệu suất
+    """
+    if df.empty or len(df) < 50:
+        raise ValueError("Không đủ dữ liệu để huấn luyện Prophet (cần ít nhất 50 điểm dữ liệu)")
     df = df.copy()
-    df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
-    X = df[features].shift(1)
-    y = df['target']
-    valid_idx = X.notna().all(axis=1) & y.notna()
-    X = X[valid_idx]
-    y = y[valid_idx]
-    if len(X) < 100:
-        return "Không đủ dữ liệu", 0.0
-    X_train = X.iloc[:-1]
-    y_train = y.iloc[:-1]
-    X_pred = X.iloc[-1:]
-    y_test = y.iloc[-1:]
-    model = xgb.XGBClassifier()
-    model.fit(X_train, y_train)
-    pred = model.predict(X_pred)[0]
-    accuracy = accuracy_score(y_test, [pred])
-    return pred, accuracy
-
-def train_prophet_model(df: pd.DataFrame) -> (Prophet, float):
-    data = prepare_data_for_prophet(df)
-    if data.empty:
-        raise ValueError("Không đủ dữ liệu để huấn luyện Prophet")
-    current_year = datetime.now().year
-    holiday_df = get_vietnam_holidays(range(current_year-1, current_year+2))
-    model = Prophet(holidays=holiday_df)
-    model.fit(data)
+    if getattr(df.index, 'tz', None) is not None:
+        df.index = df.index.tz_convert(None)
+        df.index = df.index.tz_localize(None)
+    
+    # Fix for "cannot insert date, already exists" error
+    if 'date' in df.columns:
+        # If 'date' is already a column, use it directly
+        df_reset = df.copy()
+        df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+    else:
+        # Otherwise reset the index as before
+        df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+    
+    df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
+    
+    # Thêm các tham số điều chỉnh Prophet cho quá trình training
+    model = Prophet(
+        changepoint_prior_scale=0.05,
+        seasonality_prior_scale=10,
+        seasonality_mode='multiplicative'
+    )
+    
+    # Thêm các tham số mùa vụ phù hợp với thị trường chứng khoán
+    model.add_seasonality(name='weekly', period=5, fourier_order=5)
+    model.add_seasonality(name='monthly', period=21, fourier_order=5)
+    
+    # Thêm các ràng buộc tăng trưởng để tránh dự báo phi lý
+    last_value = df['close'].iloc[-1]
+    growth_cap = last_value * 1.5
+    growth_floor = last_value * 0.5
+    df_reset['cap'] = growth_cap
+    df_reset['floor'] = growth_floor
+    
+    model.fit(df_reset[['ds', 'y', 'cap', 'floor']])
     future = model.make_future_dataframe(periods=0)
+    future['cap'] = growth_cap
+    future['floor'] = growth_floor
     forecast = model.predict(future)
-    performance = evaluate_prophet_performance(df, forecast)
+    
+    # Đánh giá hiệu suất với nhiều chỉ số
+    actual = df['close'].values
+    predicted = forecast['yhat'].values
+    if len(actual) != len(predicted):
+        logger.error(f"Kích thước không khớp trong train_prophet_model: actual ({len(actual)}), predicted ({len(predicted)})")
+        return model, 0.0
+        
+    # Đánh giá bằng nhiều chỉ số
+    mse = np.mean((actual - predicted) ** 2)
+    mae = np.mean(np.abs(actual - predicted))
+    mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+    
+    # Kiểm tra dự báo phi lý
+    is_unrealistic = False
+    avg_price = np.mean(actual)
+    max_deviation = np.max(np.abs(predicted - actual) / actual)
+    if max_deviation > 0.5:  # Nếu có dự báo lệch quá 50%
+        is_unrealistic = True
+        logger.warning(f"Phát hiện dự báo phi lý trong quá trình training: độ lệch tối đa {max_deviation:.2f}")
+    
+    # Tính toán điểm hiệu suất tổng hợp
+    mse_score = 1 / (1 + mse)
+    mape_score = max(0, 1 - (mape / 30))
+    performance = 0.7 * mse_score + 0.3 * mape_score
+    
+    # Giảm điểm nếu có dự báo phi lý
+    if is_unrealistic:
+        performance *= 0.5
+    
     return model, performance
 
-def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClassifier, float):
-    if df is None or df.empty:
-        raise ValueError("DataFrame rỗng, không thể huấn luyện XGBoost")
+def train_xgboost_model(df: pd.DataFrame, features: list) -> tuple[xgb.XGBClassifier, float]:
+    """
+    Huấn luyện mô hình XGBoost cho dự báo tín hiệu giao dịch
+    
+    Args:
+        df: DataFrame chứa dữ liệu đã có chỉ báo kỹ thuật
+        features: Danh sách các đặc trưng sử dụng để huấn luyện
+        
+    Returns:
+        Tuple gồm model XGBoost và điểm hiệu suất
+    """
+    if df.empty or len(df) < 100:
+        raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost (cần ít nhất 100 điểm dữ liệu)")
     df = df.copy()
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
     X = df[features].shift(1)
@@ -1085,628 +2719,338 @@ def train_xgboost_model(df: pd.DataFrame, features: list) -> (xgb.XGBClassifier,
     performance = accuracy_score(y_train, y_pred)
     return model, performance
 
-# ---------- AUTO TRAINING ----------
-async def get_training_symbols() -> list:
-    try:
-        async with SessionLocal() as session:
-            result = await session.execute(select(ReportHistory.symbol).distinct())
-            symbols = [row[0] for row in result.fetchall()]
-            logger.info(f"Các mã được lấy từ lịch sử báo cáo: {symbols}")
-            return symbols
-    except Exception as e:
-        logger.error(f"Lỗi truy vấn symbols từ ReportHistory: {str(e)}")
-        return []
-
-async def train_models_for_symbol(symbol: str):
-    try:
-        logger.info(f"Bắt đầu auto training cho mã: {symbol}")
-        loader = DataLoader()
-        tech_analyzer = TechnicalAnalyzer()
-        df, _ = await loader.load_data(symbol, '1D', 500)
-        df = tech_analyzer.calculate_indicators(df)
-        features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal',
-                    'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-        task_prophet = asyncio.to_thread(train_prophet_model, df)
-        task_xgb = asyncio.to_thread(train_xgboost_model, df, features)
-        (prophet_model, prophet_perf), (xgb_model, xgb_perf) = await asyncio.gather(task_prophet, task_xgb)
-        await model_db_manager.store_trained_model(symbol, 'prophet', prophet_model, prophet_perf)
-        await model_db_manager.store_trained_model(symbol, 'xgboost', xgb_model, xgb_perf)
-        logger.info(f"Auto training cho {symbol} hoàn tất.")
-    except Exception as e:
-        logger.error(f"Lỗi auto training cho {symbol}: {str(e)}")
-
-async def auto_train_models():
-    try:
-        symbols = await get_training_symbols()
-        if not symbols:
-            logger.info("Không có mã nào trong ReportHistory, bỏ qua auto training.")
-            return
-        tasks = [train_models_for_symbol(symbol) for symbol in symbols]
-        await asyncio.gather(*tasks)
-    except Exception as e:
-        logger.error(f"Lỗi auto training: {str(e)}")
-
-# ---------- AI VÀ BÁO CÁO ----------
-class AIAnalyzer:
-    def __init__(self):
-        genai.configure(api_key=GEMINI_API_KEY)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-    async def generate_content(self, prompt):
-        return await self.model.generate_content_async(prompt)
-
-    async def load_report_history(self, symbol: str) -> list:
-        return await db.load_report_history(symbol)
-
-    async def save_report_history(self, symbol: str, report: str, close_today: float, close_yesterday: float) -> None:
-        await db.save_report_history(symbol, report, close_today, close_yesterday)
-
-    def analyze_price_action(self, df: pd.DataFrame) -> str:
-        if len(df) < 6:
-            return "Không đủ dữ liệu để phân tích."
-        last_5_days = df['close'].tail(5)
-        changes = last_5_days.pct_change().dropna()
-        trend_summary = []
-        for i, change in enumerate(changes):
-            date = last_5_days.index[i+1].strftime('%Y-%m-%d')
-            if df.loc[last_5_days.index[i+1], 'is_outlier']:
-                outlier_note = " (⚠️ outlier)"
-            else:
-                outlier_note = ""
-            if change > 0:
-                trend_summary.append(f"{date}: Tăng {change*100:.2f}%{outlier_note}")
-            elif change < 0:
-                trend_summary.append(f"{date}: Giảm {-change*100:.2f}%{outlier_note}")
-            else:
-                trend_summary.append(f"{date}: Không đổi{outlier_note}")
-        consecutive_up = consecutive_down = 0
-        for change in changes[::-1]:
-            if change > 0:
-                consecutive_up += 1
-                consecutive_down = 0
-            elif change < 0:
-                consecutive_down += 1
-                consecutive_up = 0
-            else:
-                break
-        if consecutive_up >= 3:
-            summary = f"✅ Giá tăng {consecutive_up} phiên liên tiếp.\n"
-        elif consecutive_down >= 3:
-            summary = f"⚠️ Giá giảm {consecutive_down} phiên liên tiếp.\n"
-        else:
-            summary = "🔍 Xu hướng chưa rõ.\n"
-        summary += "\n".join(trend_summary)
-        return summary
-
-    async def analyze_with_openrouter(self, technical_data):
-        if not OPENROUTER_API_KEY:
-            raise Exception("Chưa có OPENROUTER_API_KEY")
-
-        prompt = (
-            "Bạn là chuyên gia phân tích kỹ thuật chứng khoán. "
-            "Nhiệm vụ của bạn là phân tích dữ liệu và trả về JSON hợp lệ theo định dạng cụ thể.\n\n"
-            "Dựa trên dữ liệu dưới đây, hãy nhận diện các mẫu hình nến như Doji, Hammer, Shooting Star, Engulfing, "
-            "sóng Elliott, mô hình Wyckoff, và các vùng hỗ trợ/kháng cự.\n\n"
-            "⚠️ QUAN TRỌNG: Chỉ trả về kết quả ở dạng JSON nghiêm ngặt như mẫu dưới đây, KHÔNG thêm bất kỳ văn bản nào khác trước hoặc sau JSON:\n"
-            "```json\n"
-            "{\n"
-            "  \"support_levels\": [giá1, giá2, ...],\n"
-            "  \"resistance_levels\": [giá1, giá2, ...],\n"
-            "  \"patterns\": [\n"
-            "    {\"name\": \"tên mẫu hình\", \"description\": \"giải thích ngắn\"},\n"
-            "    ...\n"
-            "  ]\n"
-            "}\n"
-            "```\n\n"
-            "Đảm bảo:\n"
-            "1. Tất cả giá trị trong 'support_levels' và 'resistance_levels' là số (không đặt trong dấu ngoặc kép)\n"
-            "2. Trường 'patterns' phải luôn là một mảng, ngay cả khi trống ([])\n"
-            "3. Mỗi phần tử trong 'patterns' phải có đủ 'name' và 'description'\n"
-            "4. Đảm bảo không có dấu phẩy thừa ở cuối mảng hoặc đối tượng\n"
-            "5. KHÔNG có văn bản nào ở bên ngoài JSON\n\n"
-            f"Dữ liệu phân tích:\n{json.dumps(technical_data, ensure_ascii=False, indent=2)}"
-        )
-
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://yourapp.com",
-            "X-Title": "Stock Analysis Bot"
-        }
-        payload = {
-            "model": "deepseek/deepseek-chat-v3-0324:free",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1024,
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"}
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=30) as resp:
-                    if resp.status != 200:
-                        logger.error(f"Lỗi OpenRouter API, mã trạng thái: {resp.status}")
-                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
-                        
-                    text = await resp.text()
-                    if not text or text.isspace():
-                        logger.error("OpenRouter trả về phản hồi trống")
-                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
-                        
-                    try:
-                        result = json.loads(text)
-                        if 'choices' not in result or not result['choices'] or 'message' not in result['choices'][0]:
-                            logger.error(f"Cấu trúc phản hồi từ OpenRouter không hợp lệ: {text}")
-                            return {"support_levels": [], "resistance_levels": [], "patterns": []}
-                            
-                        content = result['choices'][0]['message']['content']
-                        if not content or content.isspace():
-                            logger.error("Nội dung phản hồi OpenRouter trống")
-                            return {"support_levels": [], "resistance_levels": [], "patterns": []}
-                            
-                        # Xử lý các trường hợp nội dung có thể chứa markdown hoặc không phải JSON thuần túy
-                        content = self._extract_json_from_content(content)
-                            
-                        try:
-                            parsed_content = json.loads(content)
-                            # Đảm bảo các khóa dự kiến tồn tại
-                            if not isinstance(parsed_content, dict):
-                                raise json.JSONDecodeError("Phản hồi không phải là đối tượng JSON", content, 0)
-                                
-                            result_dict = {
-                                "support_levels": self._ensure_list_of_numbers(parsed_content.get("support_levels", [])),
-                                "resistance_levels": self._ensure_list_of_numbers(parsed_content.get("resistance_levels", [])),
-                                "patterns": self._validate_patterns_format(parsed_content.get("patterns", []))
-                            }
-                            return result_dict
-                        except json.JSONDecodeError:
-                            logger.error(f"Nội dung không thể phân tích thành JSON: {content}")
-                            return {"support_levels": [], "resistance_levels": [], "patterns": []}
-                    except json.JSONDecodeError:
-                        logger.error(f"Phản hồi không hợp lệ từ OpenRouter: {text}")
-                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
-                    except KeyError as e:
-                        logger.error(f"Phản hồi thiếu trường cần thiết: {e}")
-                        return {"support_levels": [], "resistance_levels": [], "patterns": []}
-        except Exception as e:
-            logger.error(f"Lỗi kết nối OpenRouter: {str(e)}")
-            return {"support_levels": [], "resistance_levels": [], "patterns": []}
-            
-    def _extract_json_from_content(self, content: str) -> str:
-        """Trích xuất JSON từ nội dung có thể chứa markdown hoặc text thừa."""
-        # Tìm JSON giữa ```json và ```
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
-        if json_match:
-            return json_match.group(1).strip()
-            
-        # Tìm bất kỳ JSON nào trong nội dung
-        json_match = re.search(r'\{\s*"[^"]+"\s*:', content)
-        if json_match:
-            # Tìm đoạn văn bản từ vị trí bắt đầu của JSON đến hết
-            start_idx = json_match.start()
-            json_content = content[start_idx:]
-            # Đếm số lượng dấu { và }
-            open_braces = 0
-            close_braces = 0
-            end_idx = len(json_content)
-            
-            for i, char in enumerate(json_content):
-                if char == '{':
-                    open_braces += 1
-                elif char == '}':
-                    close_braces += 1
-                    if open_braces == close_braces:
-                        end_idx = i + 1
-                        break
-                        
-            return json_content[:end_idx]
-            
-        # Trả về nguyên văn nếu không tìm thấy mẫu JSON
-        return content
-        
-    def _ensure_list_of_numbers(self, values) -> list:
-        """Đảm bảo giá trị là danh sách các số."""
-        if not isinstance(values, list):
-            return []
-            
-        result = []
-        for val in values:
-            try:
-                if isinstance(val, (int, float)):
-                    result.append(val)
-                elif isinstance(val, str):
-                    # Cố gắng chuyển đổi chuỗi thành số
-                    result.append(float(val.replace(',', '.')))
-            except (ValueError, TypeError):
-                # Bỏ qua các giá trị không thể chuyển thành số
-                pass
-                
-        return result
-        
-    def _validate_patterns_format(self, patterns) -> list:
-        """Xác thực và chuẩn hóa định dạng của mảng patterns."""
-        if not isinstance(patterns, list):
-            return []
-            
-        result = []
-        for pattern in patterns:
-            if isinstance(pattern, dict) and 'name' in pattern:
-                # Đảm bảo có mô tả
-                if 'description' not in pattern:
-                    pattern['description'] = ""
-                    
-                # Chỉ giữ lại các trường cần thiết
-                result.append({
-                    'name': str(pattern['name']),
-                    'description': str(pattern['description'])
-                })
-                
-        return result
-        
-    async def generate_report(self, dfs: dict, symbol: str, fundamental_data: dict, outlier_reports: dict) -> str:
-        try:
-            tech_analyzer = TechnicalAnalyzer()
-            indicators = tech_analyzer.calculate_multi_timeframe_indicators(dfs)
-            news = await get_news(symbol=symbol)
-            news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}\n📝 {n['summary']}" for n in news])
-            df_1d = dfs.get('1D')
-            close_today = df_1d['close'].iloc[-1]
-            close_yesterday = df_1d['close'].iloc[-2]
-            price_action = self.analyze_price_action(df_1d)
-            history = await self.load_report_history(symbol)
-            past_report = ""
-            if history:
-                last = history[-1]
-                past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
-                past_report = f"📜 **Báo cáo trước** ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
-            fundamental_report = deep_fundamental_analysis(fundamental_data)
-
-            # Phân tích với OpenRouter
-            technical_data = {
-                "candlestick_data": df_1d.tail(50).to_dict(orient="records"),
-                "technical_indicators": indicators['1D']
-            }
-            openrouter_result = await self.analyze_with_openrouter(technical_data)
-            support_levels = openrouter_result.get('support_levels', [])
-            resistance_levels = openrouter_result.get('resistance_levels', [])
-            patterns = openrouter_result.get('patterns', [])
-
-            forecast, prophet_model = forecast_with_prophet(df_1d, periods=7)
-            prophet_perf = evaluate_prophet_performance(df_1d, forecast)
-            future_forecast = forecast[forecast['ds'] > df_1d.index[-1].tz_localize(None)]
-            if not future_forecast.empty:
-                next_day_pred = future_forecast.iloc[0]
-                day7_pred = future_forecast.iloc[6] if len(future_forecast) >= 7 else future_forecast.iloc[-1]
-            else:
-                next_day_pred = forecast.iloc[-1]
-                day7_pred = forecast.iloc[-1]
-
-            forecast_summary = f"**Dự báo giá (Prophet)** (Hiệu suất: {prophet_perf:.2f}):\n"
-            forecast_summary += f"- Ngày tiếp theo ({next_day_pred['ds'].strftime('%d/%m/%Y')}): {next_day_pred['yhat']:.2f}\n"
-            forecast_summary += f"- Sau 7 ngày ({day7_pred['ds'].strftime('%d/%m/%Y')}): {day7_pred['yhat']:.2f}\n"
-
-            features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-            xgb_signal, xgb_perf = predict_xgboost_signal(df_1d.copy(), features)
-            if isinstance(xgb_signal, int):
-                xgb_text = "Tăng" if xgb_signal == 1 else "Giảm"
-            else:
-                xgb_text = xgb_signal
-            xgb_summary = f"**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_perf:.2f}): {xgb_text}\n"
-
-            outlier_text = "\n".join([f"**{tf}**: {report}" for tf, report in outlier_reports.items()])
-
-            prompt = f"""
-Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
-
-**Thông tin cơ bản:**
-- Ngày: {datetime.now().strftime('%d/%m/%Y')}
-- Giá hôm qua: {close_yesterday:.2f}
-- Giá hôm nay: {close_today:.2f}
-
-**Hành động giá:**
-{price_action}
-
-**Lịch sử dự đoán:**
-{past_report}
-
-**Chất lượng dữ liệu:**
-{outlier_text}
-
-**Chỉ số kỹ thuật:**
-"""
-            for tf, ind in indicators.items():
-                prompt += f"\n--- {tf} ---\n"
-                prompt += f"- Close: {ind.get('close', 0):.2f}\n"
-                prompt += f"- SMA20: {ind.get('sma20', 0):.2f}, SMA50: {ind.get('sma50', 0):.2f}, SMA200: {ind.get('sma200', 0):.2f}\n"
-                prompt += f"- RSI: {ind.get('rsi', 0):.2f}\n"
-                prompt += f"- MACD: {ind.get('macd', 0):.2f} (Signal: {ind.get('signal', 0):.2f})\n"
-                prompt += f"- Bollinger: {ind.get('bb_low', 0):.2f} - {ind.get('bb_high', 0):.2f}\n"
-                prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
-                prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
-            prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
-            prompt += f"\n**Tin tức:**\n{news_text}\n"
-            prompt += f"\n**Phân tích từ OpenRouter:**\n"
-            prompt += f"- Hỗ trợ: {', '.join(map(str, support_levels))}\n"
-            prompt += f"- Kháng cự: {', '.join(map(str, resistance_levels))}\n"
-            prompt += f"- Mẫu hình: {', '.join([p['name'] for p in patterns])}\n"
-            prompt += f"\n{xgb_summary}\n"
-            prompt += f"{forecast_summary}\n"
-            prompt += """
-**Yêu cầu:**
-1. So sánh giá/ chỉ số phiên hiện tại và phiên trước đó.
-2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
-3. Đánh giá các chỉ số kỹ thuật, động lực thị trường.
-4. Xác định hỗ trợ/kháng cự từ OpenRouter. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
-5. Đề xuất MUA/BÁN/NẮM GIỮ với % tin cậy, điểm vào, cắt lỗ, chốt lời. Phương án đi vốn, phân bổ tỷ trọng cụ thể.
-6. Đánh giá rủi ro và tỷ lệ risk/reward.
-7. Kết hợp tin tức, phân tích kỹ thuật, cơ bản và kết quả từ OpenRouter để đưa ra nhận định.
-8. Không cần theo form cố định, trình bày logic, súc tích nhưng đủ thông tin để hành động và sáng tạo với emoji.
-
-**Hướng dẫn bổ sung:**
-- Dựa vào hành động giá gần đây để xác định quán tính (momentum) hiện tại.
-- Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
-- Chú ý: VNINDEX, VN30 là chỉ số, không phải cổ phiếu.
-"""
-            response = await self.generate_content(prompt)
-            report = response.text
-            await self.save_report_history(symbol, report, close_today, close_yesterday)
-            return report
-        except Exception as e:
-            logger.error(f"Lỗi tạo báo cáo: {str(e)}")
-            return f"❌ Lỗi tạo báo cáo: {str(e)}"
-
-# ---------- TELEGRAM COMMANDS ----------
+# ---------- TELEGRAM COMMAND HANDLERS ----------
 async def notify_admin_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Thông báo cho admin khi có người dùng mới"""
     user = update.message.from_user
-    user_id = user.id
-    if not await is_user_approved(user_id):
-        message = f"🔔 Người dùng mới:\nID: {user_id}\nUsername: {user.username}\nTên: {user.full_name}\nDuyệt: /approve {user_id}"
-        await context.bot.send_message(chat_id=ADMIN_ID, text=message)
-        await update.message.reply_text("⏳ Chờ admin duyệt!")
+    user_id = str(user.id)
+    username = user.username or "Không có username"
+    name = f"{user.first_name} {user.last_name if user.last_name else ''}".strip()
+    
+    try:
+        # Chỉ thông báo cho admin nếu người dùng chưa được phê duyệt
+        if not await db.is_user_approved(user_id):
+            admin_message = (
+                f"👤 Người dùng mới yêu cầu truy cập:\n"
+                f"ID: {user_id}\n"
+                f"Username: @{username}\n"
+                f"Tên: {name}\n\n"
+                f"Để phê duyệt, sử dụng lệnh:\n"
+                f"/approve {user_id}"
+            )
+            # Gửi thông báo cho admin
+            try:
+                await context.bot.send_message(chat_id=ADMIN_ID, text=admin_message)
+                logger.info(f"Đã thông báo admin về người dùng mới: {user_id}")
+            except Exception as e:
+                logger.error(f"Không thể gửi thông báo đến admin: {str(e)}")
+            
+            # Thông báo cho người dùng rằng yêu cầu đã được gửi
+            await update.message.reply_text(
+                "🔒 Bạn cần được phê duyệt để sử dụng bot.\n"
+                "Yêu cầu của bạn đã được gửi đến admin. Vui lòng chờ xác nhận."
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Lỗi trong notify_admin_new_user: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    logger.info(f"Start called: user_id={user_id}, ADMIN_ID={ADMIN_ID}")
-
-    if str(user_id) == ADMIN_ID and not await db.is_user_approved(user_id):
-        await db.add_approved_user(user_id)
-        logger.info(f"Admin {user_id} tự động duyệt.")
-
-    if not await is_user_approved(user_id):
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý tin nhắn văn bản không phải lệnh"""
+    user_id = str(update.message.from_user.id)
+    
+    # Kiểm tra xem người dùng đã được phê duyệt chưa
+    if not await db.is_user_approved(user_id):
+        # Thông báo admin về người dùng mới
         await notify_admin_new_user(update, context)
         return
-
-    # Hiển thị các khung thời gian được hỗ trợ
-    valid_timeframes = ", ".join(sorted([key for key in DataValidator.VALID_TIMEFRAMES.keys()]))
-
+    
+    # Cập nhật thời gian hoạt động
+    try:
+        await db.update_user_last_active(user_id)
+    except Exception as e:
+        logger.error(f"Lỗi cập nhật thời gian hoạt động: {str(e)}")
+    
+    # Hướng dẫn người dùng
     await update.message.reply_text(
-        "🚀 **V18.9 - PHÂN TÍCH CHỨNG KHOÁN TOÀN DIỆN!**\n"
-        "📊 **Lệnh**:\n"
-        "- /analyze [Mã] [Số nến] [Khung thời gian] - Phân tích đa khung.\n"
-        f"  (Khung thời gian hỗ trợ: {valid_timeframes})\n"
-        "- /getid - Lấy ID.\n"
-        "- /approve [user_id] - Duyệt người dùng (admin).\n"
-        "💡 **Bắt đầu nào!**"
+        "Vui lòng sử dụng lệnh /analyze để phân tích cổ phiếu.\n"
+        "Ví dụ: /analyze VNM 1D 100\n\n"
+        "Hoặc /help để xem hướng dẫn sử dụng."
     )
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if not await is_user_approved(user_id):
+    """Xử lý lệnh /analyze để phân tích chứng khoán"""
+    user_id = str(update.message.from_user.id)
+    
+    # Kiểm tra người dùng đã được phê duyệt chưa
+    if not await db.is_user_approved(user_id):
+        # Thông báo admin về người dùng mới và thông báo cho người dùng chờ phê duyệt
         await notify_admin_new_user(update, context)
         return
+    
+    # Cập nhật thời gian hoạt động
     try:
+        await db.update_user_last_active(user_id)
+    except Exception as e:
+        logger.error(f"Lỗi cập nhật thời gian hoạt động: {str(e)}")
+        # Tiếp tục xử lý, không dừng lại vì lỗi này
+    
+    try:
+        # Phân tích tham số đầu vào
         args = context.args
         if not args:
-            raise ValueError("Nhập mã chứng khoán (e.g., VNINDEX, SSI).")
-            
+            raise ValueError("Nhập mã chứng khoán (e.g., /analyze VNINDEX hoặc /analyze SSI 1D 100)")
+        
+        # Phân tích tham số
+        symbol = args[0].upper()
+        timeframe = args[1].upper() if len(args) > 1 else DEFAULT_TIMEFRAME
+        num_candles = int(args[2]) if len(args) > 2 else DEFAULT_CANDLES
+        
         # Xác thực đầu vào
-        try:
-            symbol = DataValidator.validate_symbol(args[0])
-            num_candles = DataValidator.validate_candles(args[1] if len(args) > 1 else str(DEFAULT_CANDLES))
-            timeframe = DataValidator.validate_timeframe(args[2] if len(args) > 2 else DEFAULT_TIMEFRAME)
-        except ValueError as e:
-            await update.message.reply_text(f"❌ Lỗi xác thực: {str(e)}")
-            return
-            
+        symbol = DataValidator.validate_ticker(symbol)
+        timeframe = DataValidator.normalize_timeframe(timeframe)
+        num_candles = DataValidator.validate_candles(num_candles)
+        
+        # Thông báo đang xử lý
+        await update.message.reply_text(f"⏳ Đang phân tích {symbol} [{timeframe}] với {num_candles} nến...")
+        
+        # Tải dữ liệu và phân tích
         loader = DataLoader()
-        tech_analyzer = TechnicalAnalyzer()
         ai_analyzer = AIAnalyzer()
         
-        # Tải dữ liệu cho các khung thời gian khác nhau - luôn sử dụng các giá trị chuẩn hóa
-        standard_timeframes = ['1D', '1W', '1M']  # Đảm bảo các khung thời gian này tồn tại trong DataValidator.VALID_TIMEFRAMES
+        # Danh sách các khung thời gian cần phân tích
+        # Luôn bao gồm khung thời gian chính và các khung thời gian liên quan
+        timeframes = []
+        
+        # Nếu là intraday, thêm khung thời gian intraday và daily
+        if timeframe in ['5m', '15m', '30m']:
+            timeframes = [timeframe, '1h', '1D']
+        elif timeframe == '1h':
+            timeframes = [timeframe, '4h', '1D']
+        elif timeframe == '4h':
+            timeframes = [timeframe, '1D', '1W']
+        elif timeframe == '1D':
+            timeframes = ['1D', '1W', '1M']
+        elif timeframe == '1W':
+            timeframes = ['1W', '1D', '1M']
+        elif timeframe == '1M':
+            timeframes = ['1M', '1W', '1D']
+        else:
+            timeframes = ['1D', '1W', '1M']  # Mặc định
+        
+        # Đảm bảo khung thời gian chính là đầu tiên
+        if timeframe not in timeframes:
+            timeframes.insert(0, timeframe)
+            
+        # Loại bỏ trùng lặp
+        timeframes = list(dict.fromkeys(timeframes))
+        
+        # Tải dữ liệu cho mỗi khung thời gian
         dfs = {}
         outlier_reports = {}
         
-        await update.message.reply_text(f"⏳ Đang tải và phân tích dữ liệu cho {symbol}...")
-        
-        # Tải dữ liệu song song
-        async def load_timeframe_data(tf):
-            try:
-                # Đảm bảo khung thời gian đã được xác thực
-                validated_tf = DataValidator.validate_timeframe(tf)
-                df, outlier_report = await loader.load_data(symbol, validated_tf, num_candles)
-                processed_df = tech_analyzer.calculate_indicators(df)
-                return validated_tf, processed_df, outlier_report
-            except Exception as e:
-                logger.error(f"Lỗi xử lý khung thời gian {tf}: {str(e)}")
-                raise e
-            
-        tasks = [load_timeframe_data(tf) for tf in standard_timeframes]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"Lỗi tải dữ liệu: {str(result)}")
-                continue
+        for tf in timeframes:
+            # Điều chỉnh số nến dựa vào khung thời gian
+            tf_candles = num_candles
+            if tf == '1W' and num_candles > 52:
+                tf_candles = 52  # Tối đa 1 năm cho tuần
+            elif tf == '1M' and num_candles > 60:
+                tf_candles = 60  # Tối đa 5 năm cho tháng
                 
-            tf, df, report = result
-            dfs[tf] = df
-            outlier_reports[tf] = report
-            
-        if not dfs:
-            raise ValueError(f"Không thể tải dữ liệu cho {symbol} ở bất kỳ khung thời gian nào.")
+            raw_df, cleaned_df, outlier_report = await loader.load_data(symbol, tf, tf_candles)
+            dfs[tf] = (raw_df, cleaned_df)
+            outlier_reports[tf] = outlier_report
             
         # Tải dữ liệu cơ bản
         fundamental_data = await loader.get_fundamental_data(symbol)
         
-        # Tạo báo cáo
+        # Tải lịch sử báo cáo
+        report_history = await db.load_report_history(symbol, timeframe, limit=3)
+        
+        # Tạo báo cáo phân tích
         report = await ai_analyzer.generate_report(dfs, symbol, fundamental_data, outlier_reports)
-        await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
-
-        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
-        formatted_report += f"<pre>{html.escape(report)}</pre>"
+        
+        # Lưu báo cáo vào lịch sử
+        if len(dfs) > 0 and timeframe in dfs:
+            raw_df, _ = dfs[timeframe]
+            if len(raw_df) >= 2:
+                close_today = raw_df['close'].iloc[-1]
+                close_yesterday = raw_df['close'].iloc[-2]
+                await db.save_report_history(
+                    symbol, report, close_today, close_yesterday, timeframe
+                )
+        
+        # Định dạng và gửi báo cáo
+        formatted_report = f"<b>📈 Báo cáo {symbol} [{timeframe}] - {datetime.now(TZ).strftime('%d-%m-%Y %H:%M')}</b>\n\n<pre>{html.escape(report)}</pre>"
         await update.message.reply_text(formatted_report, parse_mode='HTML')
+        
     except ValueError as e:
         await update.message.reply_text(f"❌ Lỗi: {str(e)}")
     except Exception as e:
         logger.error(f"Lỗi trong analyze_command: {str(e)}")
-        await update.message.reply_text(f"❌ Lỗi không xác định: {str(e)}")
+        logger.error(traceback.format_exc())  # In stack trace chi tiết
+        error_msg = "❌ Không thể phân tích mã chứng khoán. Vui lòng thử lại sau hoặc kiểm tra mã chứng khoán."
+        if "HTTP 429" in str(e):
+            error_msg = "❌ Quá nhiều yêu cầu đến Yahoo Finance. Vui lòng thử lại sau vài phút."
+        await update.message.reply_text(error_msg)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý lệnh /help để hiển thị hướng dẫn sử dụng"""
+    user_id = str(update.message.from_user.id)
+    
+    # Kiểm tra người dùng đã được phê duyệt chưa
+    if not await db.is_user_approved(user_id):
+        await notify_admin_new_user(update, context)
+        return
+    
+    # Cập nhật thời gian hoạt động
+    try:
+        await db.update_user_last_active(user_id)
+    except Exception as e:
+        logger.error(f"Lỗi cập nhật thời gian hoạt động: {str(e)}")
+    
+    help_text = (
+        "📚 <b>HƯỚNG DẪN SỬ DỤNG BOT</b>\n\n"
+        "<b>Các lệnh có sẵn:</b>\n"
+        "• /analyze [Mã] [Khung TG] [Số nến] - Phân tích đa khung thời gian\n"
+        "  Ví dụ: /analyze VNM 1D 100\n\n"
+        "<b>Khung thời gian hỗ trợ:</b>\n"
+        "• Intraday: 5m, 15m, 30m, 1h, 4h\n"
+        "• Daily/Weekly/Monthly: 1D, 1W, 1M\n\n"
+        "<b>Các lệnh khác:</b>\n"
+        "• /getid - Lấy ID người dùng\n"
+        "• /help - Hiển thị hướng dẫn này\n"
+    )
+    
+    if user_id == ADMIN_ID:
+        help_text += (
+            "\n<b>Lệnh dành cho Admin:</b>\n"
+            "• /approve [user_id] - Phê duyệt người dùng mới\n"
+        )
+    
+    await update.message.reply_text(help_text, parse_mode='HTML')
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý command /start"""
+    user_id = str(update.message.from_user.id)
+    if user_id == ADMIN_ID and not await db.is_user_approved(user_id):
+        await db.add_approved_user(user_id)
+        logger.info(f"Admin {user_id} tự động duyệt.")
+    if not await db.is_user_approved(user_id):
+        await notify_admin_new_user(update, context)
+        return
+    
+    # Cập nhật thời gian hoạt động
+    try:
+        await db.update_user_last_active(user_id)
+    except Exception as e:
+        logger.error(f"Lỗi cập nhật thời gian hoạt động trong start: {str(e)}")
+        # Tiếp tục xử lý, không dừng lại vì lỗi này
+    
+    # Tạo phiên bản và thời gian
+    version = "V19.2"
+    current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
+    
+    await update.message.reply_text(
+        f"🚀 **{version} - {current_time}**\n"
+        "📊 **Lệnh**:\n"
+        "- /analyze [Mã] [Khung TG] [Số nến] - Phân tích đa khung.\n"
+        "  Ví dụ: /analyze VNM 1D 100\n"
+        "  Khung TG: 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M\n"
+        "- /getid - Lấy ID người dùng.\n"
+        "- /help - Xem hướng dẫn chi tiết.\n"
+        "💡 **Bắt đầu nào!**"
+    )
 
 async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    """Xử lý command /getid"""
+    user_id = str(update.message.from_user.id)
     await update.message.reply_text(f"ID của bạn: {user_id}")
 
 async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý command /approve - chỉ admin được dùng"""
     if str(update.message.from_user.id) != ADMIN_ID:
         await update.message.reply_text("❌ Chỉ admin dùng được lệnh này!")
         return
+    
     if len(context.args) != 1:
         await update.message.reply_text("❌ Nhập user_id: /approve 123456789")
         return
+    
     user_id = context.args[0]
     if not await db.is_user_approved(user_id):
-        await db.add_approved_user(user_id)
+        await db.add_approved_user(user_id, approved_at=datetime.now(TZ), 
+                                notes="Approved by admin via command")
         await update.message.reply_text(f"✅ Đã duyệt {user_id}")
     else:
         await update.message.reply_text(f"ℹ️ {user_id} đã được duyệt")
 
-# ---------- MAIN & DEPLOY ----------
-async def main():
+# ---------- MAIN ----------
+def main():
+    """
+    Hàm chính khởi chạy ứng dụng Telegram bot
+    """
+    # Tạo và khởi tạo application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Thêm các handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("getid", get_id))
+    application.add_handler(CommandHandler("approve", approve_user))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+    # Thiết lập event loop
     try:
-        await init_db()
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        # Tạo event loop mới nếu không có
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Khởi tạo cơ sở dữ liệu PostgreSQL
+    loop.run_until_complete(init_db())
+    
+    # Thực hiện di chuyển dữ liệu từ cơ sở dữ liệu cũ (nếu có)
+    loop.run_until_complete(migrate_database())
+    
+    # Thiết lập scheduler cho auto training
+    scheduler = AsyncIOScheduler(event_loop=loop)
+    # Chạy training vào 2 giờ sáng hàng ngày
+    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0, 
+                     misfire_grace_time=3600, coalesce=True, max_instances=1)
+    scheduler.start()
+    logger.info("Auto training scheduler đã khởi động.")
 
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
-        scheduler.start()
-        logger.info("Auto training scheduler đã khởi động.")
-
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("analyze", analyze_command))
-        app.add_handler(CommandHandler("getid", get_id))
-        app.add_handler(CommandHandler("approve", approve_user))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
-        logger.info("🤖 Bot khởi động!")
-
-        # Kiểm tra xem có đang chạy trên Render hay ở môi trường local
-        if RENDER_EXTERNAL_URL:
-            # Chế độ Render - chỉ sử dụng webhook
-            BASE_URL = RENDER_EXTERNAL_URL
-            WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
-            logger.info(f"Chạy trên Render với webhook URL: {WEBHOOK_URL}")
-
-            # Đảm bảo tất cả các dependencies cần thiết cho webhook được cài đặt
-            try:
-                import sys, subprocess
-                subprocess.check_call([sys.executable, "-m", "pip", "install", "python-telegram-bot[webhooks]"])
-                logger.info("Đã cài đặt/kiểm tra python-telegram-bot[webhooks]")
-            except Exception as e:
-                logger.error(f"Lỗi cài đặt dependencies webhook: {str(e)}")
-                raise
-
-            # Sử dụng run_webhook một cách an toàn
-            webhook_server = await app.initialize()
-            await webhook_server.start_webhook(
-                listen="0.0.0.0",
-                port=PORT,
-                url_path=TELEGRAM_TOKEN,
-                webhook_url=WEBHOOK_URL
-            )
-            
-            # Sử dụng signal handler để hỗ trợ tắt bot một cách an toàn
-            import signal
-            
-            def signal_handler(sig, frame):
-                logger.info("Đang dừng ứng dụng...")
-                asyncio.create_task(app.shutdown())
-                
-            signal.signal(signal.SIGINT, signal_handler)
-            signal.signal(signal.SIGTERM, signal_handler)
-            
-            # Giữ cho ứng dụng tiếp tục chạy
-            await asyncio.Event().wait()
-        else:
-            # Chế độ local development - sử dụng polling
-            logger.info("Khởi động bot ở chế độ polling (local development)...")
-            await app.run_polling()
-    except Exception as e:
-        logger.critical(f"Lỗi nghiêm trọng trong main(): {str(e)}")
-        logger.critical(f"Traceback: {traceback.format_exc()}")
-        # Đảm bảo tất cả tài nguyên được giải phóng
-        try:
-            if 'scheduler' in locals() and scheduler.running:
-                scheduler.shutdown()
-            if 'app' in locals():
-                await app.shutdown()
-        except Exception as cleanup_error:
-            logger.error(f"Lỗi khi dọn dẹp tài nguyên: {str(cleanup_error)}")
-        raise
-
-if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        import unittest
-
-        class TestTechnicalAnalysis(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=50, freq='D')
-                data = {
-                    'open': np.random.random(50) * 100,
-                    'high': np.random.random(50) * 100,
-                    'low': np.random.random(50) * 100,
-                    'close': np.linspace(100, 150, 50),
-                    'volume': np.random.randint(1000, 5000, 50)
-                }
-                self.df = pd.DataFrame(data, index=dates)
-
-            def test_calculate_indicators(self):
-                analyzer = TechnicalAnalyzer()
-                df_processed = analyzer.calculate_indicators(self.df)
-                self.assertIn('sma20', df_processed.columns)
-                self.assertIn('rsi', df_processed.columns)
-
-        class TestForecastProphet(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=100, freq='D')
-                self.df = pd.DataFrame({
-                    'close': np.linspace(100, 200, 100),
-                    'open': np.linspace(100, 200, 100),
-                    'high': np.linspace(100, 200, 100),
-                    'low': np.linspace(100, 200, 100),
-                    'volume': np.random.randint(1000, 5000, 100)
-                }, index=dates)
-
-            def test_forecast_with_prophet(self):
-                forecast, model = forecast_with_prophet(self.df, periods=7)
-                self.assertFalse(forecast.empty)
-                self.assertIn('yhat', forecast.columns)
-
-        class TestOutlierDetection(unittest.TestCase):
-            def setUp(self):
-                dates = pd.date_range(start="2023-01-01", periods=7, freq='D')
-                self.df = pd.DataFrame({
-                    'close': [100, 101, 102, 103, 500, 104, 105]
-                }, index=dates)
-
-            def test_detect_outliers(self):
-                loader = DataLoader()
-                df_with_outliers, report = loader.detect_outliers(self.df)
-                self.assertIn('is_outlier', df_with_outliers.columns)
-                self.assertEqual(df_with_outliers['is_outlier'].sum(), 1)
-                self.assertIn('500', report)
-
-        unittest.main(argv=[sys.argv[0]])
+    # Xác định chế độ chạy (webhook trên Render hoặc polling cho local)
+    is_render = RENDER_EXTERNAL_URL and RENDER_SERVICE_NAME
+    
+    if is_render:
+        # Thiết lập webhook cho Render
+        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="webhook",
+            webhook_url=webhook_url
+        )
+        logger.info(f"Bot V19.2 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
-        import nest_asyncio
-        nest_asyncio.apply()
-        asyncio.run(main())
+        # Chạy mode polling cho môi trường local
+        logger.info("Bot V19.2 đã khởi chạy (chế độ local).")
+        application.run_polling()
+
+if __name__ == "__main__":
+    # Đảm bảo event loop được khởi tạo đúng cách
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"Lỗi khi khởi động bot: {str(e)}")
+        # Nếu lỗi event loop, thử tạo mới và khởi động lại
+        if "no current event loop" in str(e).lower():
+            logger.info("Thử tạo event loop mới và khởi động lại...")
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            main()
