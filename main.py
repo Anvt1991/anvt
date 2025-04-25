@@ -2,14 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-Bot Chứng Khoán Toàn Diện Phiên Bản V18.8.1T (Nâng cấp tải dữ liệu):
-- Tối ưu hóa tải và xử lý dữ liệu, tự động làm sạch và sửa lỗi dữ liệu
-- Hệ thống kiểm soát chất lượng dữ liệu tự động với nhiều tiêu chí
-- Cập nhật dữ liệu gia tăng giảm tải hệ thống và băng thông
-- Tự động phát hiện và xử lý ngoại lai, dữ liệu bị thiếu
-- Hệ thống tạo đặc trưng phái sinh tự động cho phân tích kỹ thuật
+Bot Chứng Khoán Toàn Diện Phiên Bản V18.8 (Nâng cấp):
+- Tích hợp AI OpenRouter cho phân tích mẫu hình, sóng, và nến nhật.
 - Sử dụng mô hình deepseek/deepseek-chat-v3-0324:free
-- Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng
+- Đảm bảo các chức năng và công nghệ hiện có không bị ảnh hưởng.
 """
 
 import os
@@ -53,7 +49,6 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 import aiohttp
 import json
-from timestamp_aligner import TimestampAligner
 
 # ---------- CẤU HÌNH & LOGGING ----------
 load_dotenv()
@@ -294,266 +289,87 @@ def filter_trading_days(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~pd.to_datetime(df.index.date).isin(holiday_dates)]
     return df
 
-# ---------- TẢI DỮ LIỆU (NÂNG CẤP V18.8.1T) ----------
+# ---------- TẢI DỮ LIỆU (NÂNG CẤP) ----------
 class DataLoader:
-    def __init__(self, primary_source: str = 'vnstock', backup_sources: list = None):
-        self.primary_source = primary_source
-        self.backup_sources = backup_sources or ['yahoo']
-        self.data_quality_metrics = {}
-        self.source_reliability = {
-            'vnstock': 1.0,
-            'yahoo': 0.8
-        }
-        # Khởi tạo bộ căn chỉnh timestamp
-        self.timestamp_aligner = TimestampAligner(exchange_timezone='Asia/Bangkok')
-        
-    def _get_data_source_priorities(self):
-        """Trả về danh sách các nguồn dữ liệu theo thứ tự ưu tiên."""
-        sources = [self.primary_source] + [s for s in self.backup_sources if s != self.primary_source]
-        return sources
-        
-    def detect_outliers(self, df: pd.DataFrame, method: str = 'zscore', threshold: float = 3.0) -> (pd.DataFrame, str):
+    def __init__(self, source: str = 'vnstock'):
+        self.source = source
+
+    def detect_outliers(self, df: pd.DataFrame) -> (pd.DataFrame, str):
         if 'close' not in df.columns:
             return df, "Không có cột 'close' để phát hiện outlier"
-            
-        if method == 'zscore':
-            z_scores = np.abs((df['close'] - df['close'].mean()) / df['close'].std())
-            df['is_outlier'] = z_scores > threshold
-            outliers = df[df['is_outlier']]
-            
-            # Ghi lại báo cáo chi tiết
-            outlier_report = f"Phát hiện {len(outliers)} giá trị bất thường trong dữ liệu:\n"
-            for idx, row in outliers.iterrows():
-                outlier_report += f"- {idx.strftime('%Y-%m-%d')}: {row['close']:.2f}\n"
-                
-            return df, outlier_report if not outliers.empty else "Không có giá trị bất thường"
-        
-        elif method == 'iqr':
-            # Phương pháp phát hiện ngoại lai dựa trên IQR
-            Q1 = df['close'].quantile(0.25)
-            Q3 = df['close'].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - threshold * IQR
-            upper_bound = Q3 + threshold * IQR
-            
-            df['is_outlier'] = (df['close'] < lower_bound) | (df['close'] > upper_bound)
-            outliers = df[df['is_outlier']]
-            
-            outlier_report = f"Phát hiện {len(outliers)} giá trị bất thường (IQR) trong dữ liệu:\n"
-            for idx, row in outliers.iterrows():
-                outlier_report += f"- {idx.strftime('%Y-%m-%d')}: {row['close']:.2f}\n"
-                
-            return df, outlier_report if not outliers.empty else "Không có giá trị bất thường (IQR)"
-        
-        return df, "Phương pháp phát hiện ngoại lai không được hỗ trợ"
-
-    def handle_missing_values(self, df: pd.DataFrame, method: str = 'linear') -> pd.DataFrame:
-        """Xử lý các giá trị còn thiếu trong dữ liệu chuỗi thời gian."""
-        if df.empty:
-            return df
-            
-        # Kiểm tra giá trị còn thiếu
-        missing_count = df.isna().sum().sum()
-        if missing_count == 0:
-            return df
-            
-        # Thêm cờ đánh dấu dữ liệu đã được điền
-        df['is_imputed'] = False
-        
-        # Xử lý từng cột
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            if col in df.columns and df[col].isna().any():
-                missing_indices = df[col].isna()
-                
-                if method == 'linear':
-                    df.loc[missing_indices, col] = df[col].interpolate(method='linear')
-                elif method == 'ffill':
-                    df.loc[missing_indices, col] = df[col].ffill()
-                elif method == 'bfill':
-                    df.loc[missing_indices, col] = df[col].bfill()
-                elif method == 'mean':
-                    df.loc[missing_indices, col] = df[col].fillna(df[col].mean())
-                    
-                # Đánh dấu các dòng đã được điền
-                df.loc[missing_indices, 'is_imputed'] = True
-                
-        # Ghi log kết quả xử lý
-        if missing_count > 0:
-            logger.info(f"Đã xử lý {missing_count} giá trị còn thiếu bằng phương pháp {method}")
-            
-        return df
-    
-    def standardize_dataframe(self, df: pd.DataFrame, required_columns: list = None) -> pd.DataFrame:
-        """Chuẩn hóa DataFrame đảm bảo cấu trúc nhất quán."""
-        required_columns = required_columns or ['open', 'high', 'low', 'close', 'volume']
-        
-        # Chuẩn hóa tên cột
-        column_mapping = {
-            'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
-            'time': 'date', 'Time': 'date', 'Date': 'date', 'Datetime': 'date'
-        }
-        
-        df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
-        
-        # Đảm bảo có đủ cột cần thiết
-        for col in required_columns:
-            if col not in df.columns:
-                if col == 'volume':
-                    df[col] = 0  # Giá trị mặc định cho volume
-                else:
-                    raise ValueError(f"Dữ liệu thiếu cột bắt buộc: {col}")
-        
-        # Chuyển đổi kiểu dữ liệu nếu cần
-        for col in ['open', 'high', 'low', 'close']:
-            if col in df.columns:
-                df[col] = df[col].astype('float32')
-                
-        if 'volume' in df.columns:
-            df['volume'] = df['volume'].astype('float32')
-            
-        # Chuẩn hóa index
-        if not isinstance(df.index, pd.DatetimeIndex):
-            if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date')
-                
-        # Sắp xếp theo thời gian
-        df = df.sort_index()
-        
-        return df
-    
-    def validate_price_data(self, df: pd.DataFrame) -> (bool, str):
-        """Kiểm tra tính hợp lệ của dữ liệu giá."""
-        if df.empty:
-            return False, "DataFrame rỗng"
-            
-        validation_errors = []
-        
-        # Kiểm tra giá high >= giá low
-        if not (df['high'] >= df['low']).all():
-            invalid_rows = df[df['high'] < df['low']]
-            validation_errors.append(f"Phát hiện {len(invalid_rows)} dòng có giá high < giá low")
-            
-        # Kiểm tra giá close nằm trong khoảng high-low
-        if not ((df['close'] >= df['low']) & (df['close'] <= df['high'])).all():
-            invalid_rows = df[~((df['close'] >= df['low']) & (df['close'] <= df['high']))]
-            validation_errors.append(f"Phát hiện {len(invalid_rows)} dòng có giá close nằm ngoài khoảng high-low")
-            
-        # Kiểm tra volume không âm
-        if 'volume' in df.columns and (df['volume'] < 0).any():
-            invalid_rows = df[df['volume'] < 0]
-            validation_errors.append(f"Phát hiện {len(invalid_rows)} dòng có volume âm")
-            
-        if validation_errors:
-            return False, "\n".join(validation_errors)
-            
-        return True, "Dữ liệu giá hợp lệ"
+        z_scores = np.abs((df['close'] - df['close'].mean()) / df['close'].std())
+        threshold = 3
+        df['is_outlier'] = z_scores > threshold
+        outliers = df[df['is_outlier']]
+        outlier_report = f"Phát hiện {len(outliers)} giá trị bất thường trong dữ liệu:\n"
+        for idx, row in outliers.iterrows():
+            outlier_report += f"- {idx.strftime('%Y-%m-%d')}: {row['close']:.2f}\n"
+        return df, outlier_report if not outliers.empty else "Không có giá trị bất thường"
 
     async def load_data(self, symbol: str, timeframe: str, num_candles: int) -> (pd.DataFrame, str):
-        """Tải dữ liệu từ nguồn chính, nếu thất bại sẽ dùng nguồn dự phòng."""
         timeframe_map = {'1d': '1D', '1w': '1W', '1mo': '1M'}
         timeframe = timeframe_map.get(timeframe.lower(), timeframe).upper()
         
         expire = CACHE_EXPIRE_SHORT if timeframe == '1D' else CACHE_EXPIRE_MEDIUM if timeframe == '1W' else CACHE_EXPIRE_LONG
         
-        # Kiểm tra cache
-        cache_key = f"data_{self.primary_source}_{symbol}_{timeframe}_{num_candles}"
+        cache_key = f"data_{self.source}_{symbol}_{timeframe}_{num_candles}"
         cached_data = await redis_manager.get(cache_key)
         if cached_data is not None:
             return cached_data, "Dữ liệu từ cache, không kiểm tra outlier"
 
-        # Thử tải dữ liệu lần lượt từ các nguồn theo thứ tự ưu tiên
-        sources = self._get_data_source_priorities()
-        last_error = None
-        
-        for source in sources:
-            try:
-                logger.info(f"Đang tải dữ liệu cho {symbol} từ nguồn {source}...")
-                
-                if source == 'vnstock':
-                    df = await self._load_from_vnstock(symbol, timeframe, num_candles)
-                elif source == 'yahoo':
-                    df = await self._load_from_yahoo(symbol, timeframe, num_candles)
-                else:
-                    logger.warning(f"Nguồn dữ liệu không được hỗ trợ: {source}")
-                    continue
-                
-                # Chuẩn hóa dữ liệu
-                df = self.standardize_dataframe(df)
-                
-                # Căn chỉnh timestamp chính xác
-                df = self.timestamp_aligner.fix_timestamp_issues(df)
-                df = self.timestamp_aligner.standardize_timeframe(df, freq=timeframe)
-                
-                # Kiểm tra tính hợp lệ
-                is_valid, validation_msg = self.validate_price_data(df)
-                if not is_valid:
-                    logger.warning(f"Dữ liệu từ {source} không hợp lệ: {validation_msg}")
-                    continue
-                
-                # Xử lý giá trị thiếu 
-                df = self.handle_missing_values(df)
-                
-                # Lọc ngày giao dịch 
-                df = self.timestamp_aligner.filter_trading_days(df)
-                
-                # Phát hiện ngoại lai
-                df, outlier_report = self.detect_outliers(df)
-                
-                # Lưu vào cache
-                await redis_manager.set(cache_key, df, expire=expire)
-                
-                # Tối ưu bộ nhớ bằng cách chuyển đổi kiểu dữ liệu
-                for col in df.select_dtypes(include=['float64']).columns:
-                    df[col] = df[col].astype('float32')
-                
-                # Cập nhật độ tin cậy của nguồn
-                self.source_reliability[source] = min(1.0, self.source_reliability.get(source, 0.5) + 0.1)
-                
-                return df, outlier_report
-                
-            except Exception as e:
-                last_error = str(e)
-                logger.error(f"Lỗi tải dữ liệu từ {source} cho {symbol}: {last_error}")
-                # Giảm độ tin cậy của nguồn này 
-                self.source_reliability[source] = max(0.1, self.source_reliability.get(source, 0.5) - 0.1)
-        
-        # Nếu tất cả các nguồn đều thất bại
-        raise ValueError(f"Không thể tải dữ liệu cho {symbol} từ bất kỳ nguồn nào: {last_error}")
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-    async def _load_from_vnstock(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
-        """Tải dữ liệu từ VNStock."""
-        def fetch_vnstock():
-            stock = Vnstock().stock(symbol=symbol, source='TCBS')
-            end_date = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 3)).strftime('%Y-%m-%d')
-            df = stock.quote.history(start=start_date, end=end_date, interval=timeframe)
-            
-            if df is None or df.empty or len(df) < 20:
-                raise ValueError(f"Không đủ dữ liệu cho {'chỉ số' if is_index(symbol) else 'mã'} {symbol}")
-                
-            df = df.rename(columns={'time': 'date', 'open': 'open', 'high': 'high',
-                                     'low': 'low', 'close': 'close', 'volume': 'volume'})
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.set_index('date')
-            
-            # Thêm múi giờ cho index nếu chưa có
-            if df.index.tz is None:
+        try:
+            if self.source == 'vnstock':
+                @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
+                def fetch_vnstock():
+                    stock = Vnstock().stock(symbol=symbol, source='TCBS')
+                    end_date = datetime.now().strftime('%Y-%m-%d')
+                    start_date = (datetime.now() - timedelta(days=(num_candles + 1) * 3)).strftime('%Y-%m-%d')
+                    df = stock.quote.history(start=start_date, end=end_date, interval=timeframe)
+                    if df is None or df.empty or len(df) < 20:
+                        raise ValueError(f"Không đủ dữ liệu cho {'chỉ số' if is_index(symbol) else 'mã'} {symbol}")
+                    df = df.rename(columns={'time': 'date', 'open': 'open', 'high': 'high',
+                                            'low': 'low', 'close': 'close', 'volume': 'volume'})
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.set_index('date')
+                    df.index = df.index.tz_localize('Asia/Bangkok')
+                    df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
+                    if 'close' not in df.columns:
+                        raise ValueError(f"Dữ liệu cho {symbol} không có cột 'close'")
+                    if not (df['high'] >= df['low']).all() or not ((df['close'] >= df['low']) & (df['close'] <= df['high'])).all():
+                        raise ValueError(f"Dữ liệu không hợp lệ cho {symbol}")
+                    if len(df) < 200:
+                        logger.warning(f"Dữ liệu cho {symbol} dưới 200 nến, SMA200 có thể không chính xác")
+                    return df.tail(num_candles + 1)
+                df = await run_in_thread(fetch_vnstock)
+            elif self.source == 'yahoo':
+                period_map = {'1D': 'd', '1W': 'wk', '1M': 'mo'}
+                df = await self._download_yahoo_data(symbol, num_candles + 1, period_map.get(timeframe, 'd'))
+                if df is None or df.empty or len(df) < 20:
+                    raise ValueError(f"Không đủ dữ liệu cho {symbol} từ Yahoo Finance")
+                df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
+                                        'Close': 'close', 'Volume': 'volume'})
+                df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
                 df.index = df.index.tz_localize('Asia/Bangkok')
-                
-            df = df[['open', 'high', 'low', 'close', 'volume']].dropna()
-            
-            return df.tail(num_candles + 1)
-            
-        return await run_in_thread(fetch_vnstock)
+                if 'close' not in df.columns:
+                    raise ValueError(f"Dữ liệu cho {symbol} không có cột 'close'")
+                if not (df['high'] >= df['low']).all() or not ((df['close'] >= df['low']) & (df['close'] <= df['high'])).all():
+                    raise ValueError(f"Dữ liệu không hợp lệ cho {symbol}")
+                if len(df) < 200:
+                    logger.warning(f"Dữ liệu cho {symbol} dưới 200 nến, SMA200 có thể không chính xác")
+            else:
+                raise ValueError("Nguồn dữ liệu không hợp lệ")
+
+            trading_df = filter_trading_days(df)
+            trading_df, outlier_report = self.detect_outliers(trading_df)
+            await redis_manager.set(cache_key, trading_df, expire=expire)
+            return trading_df, outlier_report
+        except Exception as e:
+            logger.error(f"Lỗi tải dữ liệu cho {symbol}: {str(e)}")
+            raise ValueError(f"Không thể tải dữ liệu: {str(e)}")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8), reraise=True)
-    async def _load_from_yahoo(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
-        """Tải dữ liệu từ Yahoo Finance."""
-        period_map = {'1D': 'd', '1W': 'wk', '1M': 'mo'}
-        period = period_map.get(timeframe, 'd')
-        
+    async def _download_yahoo_data(self, symbol: str, num_candles: int, period: str) -> pd.DataFrame:
+        import aiohttp
         try:
             async with aiohttp.ClientSession() as session:
                 start_ts = int((datetime.now() - timedelta(days=num_candles * 3)).timestamp())
@@ -569,15 +385,6 @@ class DataLoader:
                         raise ValueError("Dữ liệu Yahoo rỗng")
                     df['Date'] = pd.to_datetime(df['Date'])
                     df = df.set_index('Date')
-                    
-                    # Chuẩn hóa tên cột
-                    df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low',
-                                            'Close': 'close', 'Volume': 'volume'})
-                    
-                    # Thêm múi giờ
-                    if df.index.tz is None:
-                        df.index = df.index.tz_localize('Asia/Bangkok')
-                    
                     return df.tail(num_candles)
         except asyncio.TimeoutError:
             logger.error("Timeout khi tải dữ liệu từ Yahoo Finance.")
@@ -586,76 +393,7 @@ class DataLoader:
             logger.error(f"Lỗi tải dữ liệu Yahoo: {str(e)}")
             raise
 
-    async def get_incremental_data(self, symbol: str, timeframe: str) -> pd.DataFrame:
-        """Chỉ tải dữ liệu mới từ lần cập nhật cuối."""
-        cache_key = f"last_update_{symbol}_{timeframe}"
-        last_update = await redis_manager.get(cache_key)
-        
-        if not last_update:
-            # Tải toàn bộ dữ liệu nếu chưa có
-            df, _ = await self.load_data(symbol, timeframe, DEFAULT_CANDLES)
-            await redis_manager.set(cache_key, datetime.now(), expire=CACHE_EXPIRE_LONG)
-            return df
-            
-        # Tính toán khoảng thời gian cần tải
-        from_date = last_update + timedelta(days=1)
-        to_date = datetime.now()
-        
-        # Không cần tải nếu thời gian chưa đủ 1 ngày
-        if (to_date - from_date).days < 1:
-            df_old, _ = await self.load_data(symbol, timeframe, DEFAULT_CANDLES)
-            return df_old
-            
-        try:
-            # Tải dữ liệu mới
-            if self.primary_source == 'vnstock':
-                def fetch_incremental():
-                    stock = Vnstock().stock(symbol=symbol, source='TCBS')
-                    df = stock.quote.history(start=from_date.strftime('%Y-%m-%d'), 
-                                          end=to_date.strftime('%Y-%m-%d'), 
-                                          interval=timeframe)
-                    if df is not None and not df.empty:
-                        df = df.rename(columns={'time': 'date', 'open': 'open', 'high': 'high',
-                                              'low': 'low', 'close': 'close', 'volume': 'volume'})
-                        df['date'] = pd.to_datetime(df['date'])
-                        df = df.set_index('date')
-                        if df.index.tz is None:
-                            df.index = df.index.tz_localize('Asia/Bangkok')
-                        return df[['open', 'high', 'low', 'close', 'volume']]
-                    return pd.DataFrame()
-                
-                df_new = await run_in_thread(fetch_incremental)
-                
-                if df_new is None or df_new.empty:
-                    logger.info(f"Không có dữ liệu mới cho {symbol} từ {from_date} đến {to_date}")
-                    df_old, _ = await self.load_data(symbol, timeframe, DEFAULT_CANDLES)
-                    return df_old
-                    
-                # Merge với dữ liệu cũ
-                df_old, _ = await self.load_data(symbol, timeframe, DEFAULT_CANDLES)
-                df = pd.concat([df_old, df_new]).drop_duplicates()
-                
-                # Chuẩn hóa, xử lý và lưu
-                df = self.standardize_dataframe(df)
-                df = self.handle_missing_values(df)
-                df = filter_trading_days(df)
-                
-                # Cập nhật cache
-                cache_key_data = f"data_{self.primary_source}_{symbol}_{timeframe}_{DEFAULT_CANDLES}"
-                await redis_manager.set(cache_key_data, df, expire=CACHE_EXPIRE_MEDIUM)
-                await redis_manager.set(cache_key, datetime.now(), expire=CACHE_EXPIRE_LONG)
-                
-                return df
-                
-            else:
-                # Fallback to full load for other sources
-                return await self.load_data(symbol, timeframe, DEFAULT_CANDLES)[0]
-                
-        except Exception as e:
-            logger.error(f"Lỗi cập nhật gia tăng cho {symbol}: {str(e)}")
-            # Fallback to cached data
-            return await self.load_data(symbol, timeframe, DEFAULT_CANDLES)[0]
-
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def fetch_fundamental_data_vnstock(self, symbol: str) -> dict:
         cache_key = f"fundamental_vnstock_{symbol}"
         cached_data = await redis_manager.get(cache_key)
@@ -684,6 +422,7 @@ class DataLoader:
             logger.error(f"Lỗi lấy dữ liệu cơ bản từ VNStock: {str(e)}")
             return {}
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
     async def fetch_fundamental_data_yahoo(self, symbol: str) -> dict:
         cache_key = f"fundamental_yahoo_{symbol}"
         cached_data = await redis_manager.get(cache_key)
@@ -724,212 +463,6 @@ class DataLoader:
         if fundamental_data and any(v is not None for v in fundamental_data.values()):
             return fundamental_data
         return {"error": f"Không có dữ liệu cơ bản cho {symbol}"}
-
-    async def merge_data_sources(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
-        """
-        Tải dữ liệu từ nhiều nguồn và hợp nhất lại với căn chỉnh timestamp.
-        
-        Args:
-            symbol: Mã chứng khoán cần tải
-            timeframe: Khung thời gian ('1D', '1W', '1M')
-            num_candles: Số nến cần tải
-            
-        Returns:
-            DataFrame hợp nhất từ nhiều nguồn
-        """
-        dataframes = []
-        sources = self._get_data_source_priorities()
-        
-        # Tải dữ liệu từ các nguồn
-        for source in sources:
-            try:
-                if source == 'vnstock':
-                    df = await self._load_from_vnstock(symbol, timeframe, num_candles)
-                elif source == 'yahoo':
-                    df = await self._load_from_yahoo(symbol, timeframe, num_candles)
-                else:
-                    continue
-                    
-                # Chuẩn hóa dữ liệu
-                df = self.standardize_dataframe(df)
-                
-                # Tạo cột để đánh dấu nguồn dữ liệu
-                df['data_source'] = source
-                
-                dataframes.append(df)
-            except Exception as e:
-                logger.warning(f"Không thể tải dữ liệu từ nguồn {source}: {str(e)}")
-        
-        if not dataframes:
-            raise ValueError(f"Không thể tải dữ liệu cho {symbol} từ bất kỳ nguồn nào")
-            
-        # Sử dụng TimestampAligner để hợp nhất các DataFrame
-        merged_df = self.timestamp_aligner.merge_dataframes_with_alignment(dataframes, freq=timeframe)
-        
-        # Xử lý trùng lặp và lọc dữ liệu
-        merged_df = self.handle_missing_values(merged_df)
-        merged_df = self.timestamp_aligner.filter_trading_days(merged_df)
-        
-        return merged_df
-        
-    async def get_precise_timestamp_data(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
-        """
-        Tải dữ liệu với timestamp được căn chỉnh chính xác.
-        
-        Args:
-            symbol: Mã chứng khoán cần tải
-            timeframe: Khung thời gian ('1D', '1W', '1M')
-            num_candles: Số nến cần tải
-            
-        Returns:
-            DataFrame với timestamp đã được căn chỉnh chính xác
-        """
-        cache_key = f"precise_ts_{symbol}_{timeframe}_{num_candles}"
-        cached_data = await redis_manager.get(cache_key)
-        
-        if cached_data is not None:
-            return cached_data
-            
-        try:
-            # Tải dữ liệu từ nguồn chính
-            df, _ = await self.load_data(symbol, timeframe, num_candles)
-            
-            # Căn chỉnh timestamp
-            fixed_df = self.timestamp_aligner.fix_timestamp_issues(df)
-            aligned_df = self.timestamp_aligner.standardize_timeframe(fixed_df, freq=timeframe)
-            
-            # Thêm các đặc trưng timestamp
-            enhanced_df = self.timestamp_aligner.extract_timestamp_features(aligned_df)
-            
-            # Lưu vào cache
-            await redis_manager.set(cache_key, enhanced_df, expire=CACHE_EXPIRE_MEDIUM)
-            
-            return enhanced_df
-        except Exception as e:
-            logger.error(f"Lỗi tải dữ liệu timestamp chính xác cho {symbol}: {str(e)}")
-            raise
-
-# ---------- QUẢN LÝ CHẤT LƯỢNG DỮ LIỆU ----------
-class DataQualityControl:
-    def __init__(self, db_manager=None):
-        self.quality_metrics = {}
-        self.db_manager = db_manager
-        self.quality_threshold = 0.7
-        
-    def evaluate_data_quality(self, df: pd.DataFrame, symbol: str) -> dict:
-        """Đánh giá chất lượng dữ liệu theo nhiều tiêu chí."""
-        if df is None or df.empty:
-            return {
-                "symbol": symbol,
-                "completeness": 0.0,
-                "consistency": 0.0,
-                "timeliness": 0.0,
-                "validity": 0.0,
-                "accuracy": 0.0,
-                "overall_score": 0.0,
-                "recommendation": "Không có dữ liệu để đánh giá",
-                "timestamp": datetime.now().isoformat()
-            }
-            
-        metrics = {
-            "symbol": symbol,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        # 1. Tính toán điểm đầy đủ (completeness)
-        missing_values = df.isnull().mean().mean()
-        metrics["completeness"] = float(1.0 - missing_values)
-        
-        # 2. Tính toán điểm nhất quán (consistency)
-        # Kiểm tra các ràng buộc giữa các cột
-        if 'high' in df.columns and 'low' in df.columns:
-            valid_hl = (df['high'] >= df['low']).mean()
-            metrics["consistency"] = float(valid_hl)
-        else:
-            metrics["consistency"] = 0.5  # Nếu không có dữ liệu để kiểm tra
-            
-        # 3. Tính toán điểm kịp thời (timeliness)
-        # Kiểm tra dữ liệu có cập nhật mới không
-        if isinstance(df.index, pd.DatetimeIndex):
-            latest_date = df.index.max()
-            days_since_update = (datetime.now() - latest_date.to_pydatetime()).days
-            metrics["timeliness"] = float(max(0, 1.0 - days_since_update/30.0))  # Giảm 1/30 mỗi ngày không cập nhật
-        else:
-            metrics["timeliness"] = 0.0
-            
-        # 4. Tính toán điểm hợp lệ (validity)
-        # Kiểm tra các giá trị có nằm trong khoảng hợp lệ không
-        if 'close' in df.columns and 'low' in df.columns and 'high' in df.columns:
-            valid_close = ((df['close'] >= df['low']) & (df['close'] <= df['high'])).mean()
-            metrics["validity"] = float(valid_close)
-        else:
-            metrics["validity"] = 0.5
-            
-        # 5. Ước lượng độ chính xác (accuracy)
-        # Phát hiện outliers bằng Z-score
-        if 'close' in df.columns:
-            z_scores = np.abs((df['close'] - df['close'].mean()) / df['close'].std())
-            outlier_ratio = (z_scores > 3).mean()
-            metrics["accuracy"] = float(1.0 - outlier_ratio)
-        else:
-            metrics["accuracy"] = 0.5
-            
-        # Tính điểm tổng hợp
-        weights = {
-            "completeness": 0.25,
-            "consistency": 0.2,
-            "timeliness": 0.2,
-            "validity": 0.2,
-            "accuracy": 0.15
-        }
-        
-        weighted_scores = [metrics[key] * weights[key] for key in weights.keys()]
-        metrics["overall_score"] = float(sum(weighted_scores))
-        
-        # Xác định khuyến nghị dựa trên chất lượng
-        if metrics["overall_score"] < 0.5:
-            metrics["recommendation"] = "Dữ liệu chất lượng thấp, nên thu thập lại"
-        elif metrics["overall_score"] < 0.7:
-            metrics["recommendation"] = "Dữ liệu cần được làm sạch thêm"
-        elif metrics["overall_score"] < 0.9:
-            metrics["recommendation"] = "Dữ liệu có chất lượng khá tốt"
-        else:
-            metrics["recommendation"] = "Dữ liệu có chất lượng rất tốt"
-            
-        # Lưu kết quả đánh giá
-        self.quality_metrics[symbol] = metrics
-        
-        return metrics
-        
-    async def save_quality_metrics(self, metrics: dict):
-        """Lưu trữ các chỉ số chất lượng vào DB nếu có."""
-        if self.db_manager:
-            # Implementation would depend on your database schema
-            pass
-            
-    def is_data_usable(self, metrics: dict) -> bool:
-        """Kiểm tra dữ liệu có đủ chất lượng để sử dụng không."""
-        return metrics["overall_score"] >= self.quality_threshold
-        
-    async def generate_quality_report(self, symbol: str, timeframe: str) -> str:
-        """Tạo báo cáo về chất lượng dữ liệu."""
-        if symbol not in self.quality_metrics:
-            return f"Chưa có đánh giá chất lượng dữ liệu cho {symbol}"
-            
-        metrics = self.quality_metrics[symbol]
-        
-        report = f"📊 BÁO CÁO CHẤT LƯỢNG DỮ LIỆU: {symbol} ({timeframe})\n\n"
-        report += f"⏱️ Thời điểm đánh giá: {metrics['timestamp']}\n"
-        report += f"✅ Điểm tổng hợp: {metrics['overall_score']:.2f}/1.0\n\n"
-        report += "CHI TIẾT:\n"
-        report += f"- Đầy đủ: {metrics['completeness']:.2f}/1.0\n"
-        report += f"- Nhất quán: {metrics['consistency']:.2f}/1.0\n"
-        report += f"- Kịp thời: {metrics['timeliness']:.2f}/1.0\n"
-        report += f"- Hợp lệ: {metrics['validity']:.2f}/1.0\n"
-        report += f"- Chính xác: {metrics['accuracy']:.2f}/1.0\n\n"
-        report += f"📌 Khuyến nghị: {metrics['recommendation']}"
-        
-        return report
 
 # ---------- PHÂN TÍCH KỸ THUẬT ----------
 class TechnicalAnalyzer:
@@ -1477,13 +1010,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🚀 **V18.8.1T - Nâng cấp tải và xử lý dữ liệu!**\n"
+        "🚀 **V18.8 - THUA GIA CÁT LƯỢNG MỖI CÁI QUẠT!**\n"
         "📊 **Lệnh**:\n"
         "- /analyze [Mã] [Số nến] - Phân tích đa khung.\n"
-        "- /refresh [Mã] - Làm mới dữ liệu cho mã.\n"
         "- /getid - Lấy ID.\n"
         "- /approve [user_id] - Duyệt người dùng (admin).\n"
-        "- /datastats - Xem thống kê dữ liệu (admin).\n"
         "💡 **Bắt đầu nào!**"
     )
 
@@ -1502,68 +1033,23 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError("Số nến phải lớn hơn hoặc bằng 20 để tính toán chỉ báo!")
         if num_candles > 500:
             raise ValueError("Tối đa 500 nến!")
-            
-        # Khởi tạo các lớp xử lý dữ liệu nâng cao (nếu chưa tồn tại)
-        data_loader = DataLoader(primary_source='vnstock', backup_sources=['yahoo'])
-        data_quality_control = DataQualityControl()
-        data_processor = AdvancedDataProcessor()
+        loader = DataLoader()
         tech_analyzer = TechnicalAnalyzer()
         ai_analyzer = AIAnalyzer()
-        
-        # Thông báo cho người dùng
-        processing_msg = await update.message.reply_text("⏳ Đang xử lý dữ liệu và phân tích... Vui lòng đợi.")
-        
-        # Tải dữ liệu đa khung thời gian
         timeframes = ['1D', '1W', '1M']
         dfs = {}
         outlier_reports = {}
-        quality_reports = {}
-        
         for tf in timeframes:
-            # Tải dữ liệu
-            df, outlier_report = await data_loader.load_data(symbol, tf, num_candles)
-            
-            # Đánh giá chất lượng dữ liệu
-            quality_metrics = data_quality_control.evaluate_data_quality(df, symbol)
-            quality_report = f"Chất lượng: {quality_metrics['overall_score']:.2f}/1.0"
-            
-            # Xử lý dữ liệu nâng cao
-            if data_quality_control.is_data_usable(quality_metrics):
-                df = data_processor.preprocess_data(df)
-                
-            # Tính toán các chỉ báo kỹ thuật
-            df = tech_analyzer.calculate_indicators(df)
-            
-            # Lưu kết quả
-            dfs[tf] = df
+            df, outlier_report = await loader.load_data(symbol, tf, num_candles)
+            dfs[tf] = tech_analyzer.calculate_indicators(df)
             outlier_reports[tf] = outlier_report
-            quality_reports[tf] = quality_report
-            
-        # Lấy dữ liệu cơ bản
-        fundamental_data = await data_loader.get_fundamental_data(symbol)
-        
-        # Tạo báo cáo
+        fundamental_data = await loader.get_fundamental_data(symbol)
         report = await ai_analyzer.generate_report(dfs, symbol, fundamental_data, outlier_reports)
-        
-        # Lưu vào cache
         await redis_manager.set(f"report_{symbol}_{num_candles}", report, expire=CACHE_EXPIRE_SHORT)
-        
-        # Thêm thông tin chất lượng dữ liệu vào báo cáo
-        quality_info = "\n".join([f"🔍 {tf}: {report}" for tf, report in quality_reports.items()])
-        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n<i>{quality_info}</i>\n\n<pre>{html.escape(report)}</pre>"
-        
-        # Cập nhật hoặc gửi báo cáo mới
-        try:
-            await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
-                message_id=processing_msg.message_id,
-                text=formatted_report,
-                parse_mode='HTML'
-            )
-        except Exception:
-            # Nếu không thể chỉnh sửa tin nhắn (có thể quá dài), gửi tin nhắn mới
-            await update.message.reply_text(formatted_report, parse_mode='HTML')
-            
+
+        formatted_report = f"<b>📈 Báo cáo phân tích cho {symbol}</b>\n\n"
+        formatted_report += f"<pre>{html.escape(report)}</pre>"
+        await update.message.reply_text(formatted_report, parse_mode='HTML')
     except ValueError as e:
         await update.message.reply_text(f"❌ Lỗi: {str(e)}")
     except Exception as e:
@@ -1588,234 +1074,22 @@ async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"ℹ️ {user_id} đã được duyệt")
 
-async def data_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh để admin xem thống kê dữ liệu hệ thống."""
-    user_id = update.message.from_user.id
-    if str(user_id) != ADMIN_ID:
-        await update.message.reply_text("❌ Chỉ admin dùng được lệnh này!")
-        return
-        
-    await update.message.reply_text("⏳ Đang tổng hợp thống kê dữ liệu...")
-    
-    try:
-        # Khởi tạo các lớp cần thiết
-        data_loader = DataLoader()
-        data_quality = DataQualityControl()
-        data_processor = AdvancedDataProcessor()
-        
-        data_manager = DataAutomationManager(data_loader, data_quality, data_processor)
-        stats = await data_manager.get_data_statistics()
-        
-        # Tạo báo cáo
-        report = "📊 <b>THỐNG KÊ DỮ LIỆU HỆ THỐNG</b>\n\n"
-        report += f"🔢 Tổng số mã: {stats['total_symbols']}\n"
-        report += f"📈 Tổng số điểm dữ liệu: {stats['total_datapoints']:,}\n"
-        report += f"🗄️ Tổng số khóa cache: {stats['total_cache_keys']}\n\n"
-        
-        if stats['problem_symbols']:
-            report += "⚠️ <b>MÃ CÓ VẤN ĐỀ CHẤT LƯỢNG:</b>\n"
-            for symbol_info in stats['problem_symbols'][:10]:  # Chỉ hiển thị 10 mã đầu tiên
-                report += f"- {symbol_info['symbol']}: {symbol_info['score']:.2f}/1.0\n"
-                
-            if len(stats['problem_symbols']) > 10:
-                report += f"... và {len(stats['problem_symbols']) - 10} mã khác\n"
-        else:
-            report += "✅ Tất cả mã đều có chất lượng dữ liệu tốt\n"
-            
-        # Thông tin bộ nhớ
-        if stats['memory_usage']:
-            report += "\n💾 <b>SỬ DỤNG BỘ NHỚ REDIS:</b>\n"
-            report += f"- Đã dùng: {stats['memory_usage'].get('used_memory', 'N/A')}\n"
-            report += f"- Đỉnh: {stats['memory_usage'].get('used_memory_peak', 'N/A')}\n"
-            report += f"- Tổng bộ nhớ hệ thống: {stats['memory_usage'].get('total_system_memory', 'N/A')}\n"
-            
-        await update.message.reply_text(report, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Lỗi lấy thống kê dữ liệu: {str(e)}")
-        await update.message.reply_text(f"❌ Lỗi khi lấy thống kê dữ liệu: {str(e)}")
-
-async def refresh_data_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh để làm mới dữ liệu cho một mã cụ thể."""
-    user_id = update.message.from_user.id
-    if not await is_user_approved(user_id):
-        await notify_admin_new_user(update, context)
-        return
-        
-    args = context.args
-    if not args:
-        await update.message.reply_text("❌ Vui lòng nhập mã chứng khoán cần làm mới dữ liệu.")
-        return
-        
-    symbol = args[0].upper()
-    await update.message.reply_text(f"⏳ Đang làm mới dữ liệu cho {symbol}...")
-    
-    try:
-        # Khởi tạo các lớp cần thiết
-        data_loader = DataLoader()
-        timeframes = ['1D', '1W', '1M']
-        
-        # Xóa cache hiện tại
-        for tf in timeframes:
-            cache_key = f"data_vnstock_{symbol}_{tf}_{DEFAULT_CANDLES}"
-            await redis_manager.redis_client.delete(cache_key)
-            cache_key = f"data_yahoo_{symbol}_{tf}_{DEFAULT_CANDLES}"
-            await redis_manager.redis_client.delete(cache_key)
-            
-        # Tải dữ liệu mới
-        results = []
-        for tf in timeframes:
-            try:
-                df, report = await data_loader.load_data(symbol, tf, DEFAULT_CANDLES)
-                results.append(f"✅ {tf}: {len(df)} nến")
-            except Exception as e:
-                results.append(f"❌ {tf}: {str(e)}")
-                
-        # Báo cáo kết quả
-        report = f"🔄 <b>LÀM MỚI DỮ LIỆU: {symbol}</b>\n\n" + "\n".join(results)
-        await update.message.reply_text(report, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Lỗi làm mới dữ liệu cho {symbol}: {str(e)}")
-        await update.message.reply_text(f"❌ Lỗi làm mới dữ liệu: {str(e)}")
-
-async def check_timestamp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh để kiểm tra và sửa timestamp cho một mã cụ thể."""
-    user_id = update.message.from_user.id
-    if not await is_user_approved(user_id):
-        await notify_admin_new_user(update, context)
-        return
-        
-    args = context.args
-    if not args or len(args) < 1:
-        await update.message.reply_text("❌ Vui lòng nhập: /checkts [Mã] [Khung thời gian: 1D, 1W, 1M (mặc định 1D)]")
-        return
-        
-    symbol = args[0].upper()
-    timeframe = args[1].upper() if len(args) > 1 else '1D'
-    
-    if timeframe not in ['1D', '1W', '1M']:
-        await update.message.reply_text("❌ Khung thời gian không hợp lệ. Sử dụng: 1D, 1W, hoặc 1M")
-        return
-        
-    await update.message.reply_text(f"⏳ Đang kiểm tra timestamp cho {symbol} ({timeframe})...")
-    
-    try:
-        # Khởi tạo loader và timestamp aligner
-        data_loader = DataLoader(primary_source='vnstock', backup_sources=['yahoo'])
-        
-        # Tải dữ liệu
-        regular_df, _ = await data_loader.load_data(symbol, timeframe, 30)
-        precise_df = await data_loader.get_precise_timestamp_data(symbol, timeframe, 30)
-        
-        # Tạo báo cáo
-        report = f"🕒 <b>KIỂM TRA TIMESTAMP CHO {symbol} ({timeframe})</b>\n\n"
-        
-        # So sánh số lượng nến
-        regular_count = len(regular_df) if regular_df is not None else 0
-        precise_count = len(precise_df) if precise_df is not None else 0
-        
-        report += f"📊 <b>SỐ LƯỢNG NẾN:</b>\n"
-        report += f"- Dữ liệu thông thường: {regular_count} nến\n"
-        report += f"- Dữ liệu đã căn chỉnh: {precise_count} nến\n\n"
-        
-        # Thông tin timestamp
-        if precise_df is not None and not precise_df.empty:
-            first_date = precise_df.index[0].strftime('%Y-%m-%d %H:%M')
-            last_date = precise_df.index[-1].strftime('%Y-%m-%d %H:%M')
-            
-            report += f"🗓️ <b>PHẠM VI THỜI GIAN:</b>\n"
-            report += f"- Từ: {first_date}\n"
-            report += f"- Đến: {last_date}\n\n"
-            
-            # Kiểm tra timezone
-            timezone = str(precise_df.index[0].tz)
-            report += f"🌐 <b>TIMEZONE:</b> {timezone}\n\n"
-            
-            # Kiểm tra thời gian trong ngày
-            hours = [idx.hour for idx in precise_df.index]
-            minutes = [idx.minute for idx in precise_df.index]
-            
-            if len(set(hours)) == 1 and len(set(minutes)) == 1:
-                report += f"✅ <b>CHUẨN HÓA THỜI GIAN:</b> Tất cả timestamp đều vào {hours[0]}:{minutes[0]}\n\n"
-            else:
-                report += f"⚠️ <b>CHUẨN HÓA THỜI GIAN:</b> Timestamp không đồng nhất!\n"
-                report += f"- Giờ khác nhau: {set(hours)}\n"
-                report += f"- Phút khác nhau: {set(minutes)}\n\n"
-                
-            # Kiểm tra ngày giao dịch
-            weekdays = [idx.weekday() for idx in precise_df.index]
-            weekday_counts = {
-                0: "Thứ 2", 1: "Thứ 3", 2: "Thứ 4", 
-                3: "Thứ 5", 4: "Thứ 6", 5: "Thứ 7", 6: "Chủ nhật"
-            }
-            
-            if any(wd >= 5 for wd in weekdays):
-                report += "⚠️ <b>NGÀY GIAO DỊCH:</b> Phát hiện ngày cuối tuần trong dữ liệu!\n"
-                for wd, count in sorted({wd: weekdays.count(wd) for wd in set(weekdays)}.items()):
-                    report += f"- {weekday_counts[wd]}: {count} nến\n"
-            else:
-                report += "✅ <b>NGÀY GIAO DỊCH:</b> Tất cả đều là ngày trong tuần (Thứ 2-6)\n"
-                for wd, count in sorted({wd: weekdays.count(wd) for wd in set(weekdays)}.items()):
-                    report += f"- {weekday_counts[wd]}: {count} nến\n"
-        else:
-            report += "❌ Không có dữ liệu sau khi căn chỉnh timestamp"
-            
-        await update.message.reply_text(report, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"Lỗi kiểm tra timestamp cho {symbol}: {str(e)}")
-        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
-
-# Thêm lệnh mới vào main
-def add_timestamp_commands(app):
-    app.add_handler(CommandHandler("checkts", check_timestamp_command))
-    logger.info("Đã đăng ký lệnh kiểm tra timestamp")
-
 # ---------- MAIN & DEPLOY ----------
 async def main():
     await init_db()
 
-    # Khởi tạo các lớp xử lý dữ liệu nâng cao
-    data_loader = DataLoader(primary_source='vnstock', backup_sources=['yahoo'])
-    data_quality_control = DataQualityControl()
-    data_processor = AdvancedDataProcessor()
-    
-    # Thiết lập scheduler
     scheduler = AsyncIOScheduler()
-    
-    # Tự động hóa quản lý dữ liệu
-    data_automation = DataAutomationManager(
-        data_loader=data_loader,
-        quality_control=data_quality_control,
-        data_processor=data_processor,
-        scheduler=scheduler
-    )
-    
-    # Thêm tác vụ auto training
-    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0, id='auto_train_models', replace_existing=True)
-    
-    # Thiết lập tự động hóa dữ liệu
-    data_automation.setup_data_automation()
-    
-    # Nếu đã có dữ liệu lịch sử, thiết lập các mã ưu tiên
-    training_symbols = await get_training_symbols()
-    if training_symbols:
-        data_automation.set_priority_symbols(training_symbols)
-        logger.info(f"Đã thiết lập {len(training_symbols)} mã ưu tiên từ lịch sử")
-    
-    # Khởi động scheduler
+    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0)
     scheduler.start()
-    logger.info("Các tác vụ tự động đã được khởi động")
+    logger.info("Auto training scheduler đã khởi động.")
 
-    # Khởi tạo ứng dụng Telegram
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyze", analyze_command))
     app.add_handler(CommandHandler("getid", get_id))
     app.add_handler(CommandHandler("approve", approve_user))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, notify_admin_new_user))
-    logger.info("🤖 Bot khởi động! Phiên bản V18.8.1T (Nâng cấp tải dữ liệu)")
+    logger.info("🤖 Bot khởi động!")
 
     BASE_URL = os.getenv("RENDER_EXTERNAL_URL", f"https://{os.getenv('RENDER_SERVICE_NAME')}.onrender.com")
     WEBHOOK_URL = f"{BASE_URL}/{TELEGRAM_TOKEN}"
