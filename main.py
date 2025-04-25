@@ -2144,6 +2144,10 @@ class AIAnalyzer:
 
 # ---------- TELEGRAM COMMANDS ----------
 async def notify_admin_new_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Nếu update là None, thì không thực hiện gì cả
+    if update is None or update.message is None:
+        return
+    
     user = update.message.from_user
     user_id = user.id
     if not await is_user_approved(user_id):
