@@ -1504,9 +1504,37 @@ class EnhancedPredictor:
             df_prophet.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
         else:
             # Otherwise reset the index as before
-            df_prophet = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+            df_prophet = df.reset_index()
             
-        df_prophet['ds'] = pd.to_datetime(df_prophet['ds']).dt.tz_localize(None)
+            # Check if index was named 'date' or we need to handle a different column name
+            if 'date' in df_prophet.columns:
+                df_prophet.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+            else:
+                # Try to determine the date column by looking for datetime type columns
+                date_cols = [col for col in df_prophet.columns if pd.api.types.is_datetime64_any_dtype(df_prophet[col])]
+                if date_cols:
+                    df_prophet.rename(columns={date_cols[0]: 'ds', 'close': 'y'}, inplace=True)
+                else:
+                    # If we can't find a date column, use the first column and convert to datetime
+                    first_col = df_prophet.columns[0]
+                    df_prophet.rename(columns={first_col: 'ds', 'close': 'y'}, inplace=True)
+                    try:
+                        df_prophet['ds'] = pd.to_datetime(df_prophet['ds'])
+                    except:
+                        # If conversion fails, create a new 'ds' column with a date range
+                        df_prophet['ds'] = pd.date_range(start='2020-01-01', periods=len(df_prophet), freq='D')
+                        logger.warning("Không thể xác định cột ngày tháng, tạo cột 'ds' mặc định")
+        
+        # Ensure 'ds' column exists and is datetime type
+        if 'ds' not in df_prophet.columns:
+            # If 'ds' column still doesn't exist, create it
+            df_prophet['ds'] = pd.date_range(start='2020-01-01', periods=len(df_prophet), freq='D')
+            logger.warning("Không thể tìm thấy cột 'ds', tạo cột 'ds' mặc định")
+        
+        # Ensure 'ds' is properly formatted as datetime
+        df_prophet['ds'] = pd.to_datetime(df_prophet['ds'])
+        if pd.api.types.is_datetime64_any_dtype(df_prophet['ds']):
+            df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
         
         # Cải thiện mô hình Prophet với các tham số điều chỉnh
         model = Prophet(
@@ -1747,9 +1775,37 @@ class EnhancedPredictor:
             df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
         else:
             # Otherwise reset the index as before
-            df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+            df_reset = df.reset_index()
             
-        df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
+            # Check if index was named 'date' or we need to handle a different column name
+            if 'date' in df_reset.columns:
+                df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+            else:
+                # Try to determine the date column by looking for datetime type columns
+                date_cols = [col for col in df_reset.columns if pd.api.types.is_datetime64_any_dtype(df_reset[col])]
+                if date_cols:
+                    df_reset.rename(columns={date_cols[0]: 'ds', 'close': 'y'}, inplace=True)
+                else:
+                    # If we can't find a date column, use the first column and convert to datetime
+                    first_col = df_reset.columns[0]
+                    df_reset.rename(columns={first_col: 'ds', 'close': 'y'}, inplace=True)
+                    try:
+                        df_reset['ds'] = pd.to_datetime(df_reset['ds'])
+                    except:
+                        # If conversion fails, create a new 'ds' column with a date range
+                        df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
+                        logger.warning("Không thể xác định cột ngày tháng, tạo cột 'ds' mặc định")
+        
+        # Ensure 'ds' column exists and is datetime type
+        if 'ds' not in df_reset.columns:
+            # If 'ds' column still doesn't exist, create it
+            df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
+            logger.warning("Không thể tìm thấy cột 'ds', tạo cột 'ds' mặc định")
+        
+        # Ensure 'ds' is properly formatted as datetime
+        df_reset['ds'] = pd.to_datetime(df_reset['ds'])
+        if pd.api.types.is_datetime64_any_dtype(df_reset['ds']):
+            df_reset['ds'] = df_reset['ds'].dt.tz_localize(None)
         
         # Cải thiện mô hình Prophet với các tham số điều chỉnh
         model = Prophet(
@@ -2790,9 +2846,37 @@ def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
         df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
     else:
         # Otherwise reset the index as before
-        df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+        df_reset = df.reset_index()
+        
+        # Check if index was named 'date' or we need to handle a different column name
+        if 'date' in df_reset.columns:
+            df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+        else:
+            # Try to determine the date column by looking for datetime type columns
+            date_cols = [col for col in df_reset.columns if pd.api.types.is_datetime64_any_dtype(df_reset[col])]
+            if date_cols:
+                df_reset.rename(columns={date_cols[0]: 'ds', 'close': 'y'}, inplace=True)
+            else:
+                # If we can't find a date column, use the first column and convert to datetime
+                first_col = df_reset.columns[0]
+                df_reset.rename(columns={first_col: 'ds', 'close': 'y'}, inplace=True)
+                try:
+                    df_reset['ds'] = pd.to_datetime(df_reset['ds'])
+                except:
+                    # If conversion fails, create a new 'ds' column with a date range
+                    df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
+                    logger.warning("Không thể xác định cột ngày tháng, tạo cột 'ds' mặc định cho train_prophet_model")
     
-    df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
+    # Ensure 'ds' column exists and is datetime type
+    if 'ds' not in df_reset.columns:
+        # If 'ds' column still doesn't exist, create it
+        df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
+        logger.warning("Không thể tìm thấy cột 'ds', tạo cột 'ds' mặc định cho train_prophet_model")
+    
+    # Ensure 'ds' is properly formatted as datetime
+    df_reset['ds'] = pd.to_datetime(df_reset['ds'])
+    if pd.api.types.is_datetime64_any_dtype(df_reset['ds']):
+        df_reset['ds'] = df_reset['ds'].dt.tz_localize(None)
     
     # Thêm các tham số điều chỉnh Prophet cho quá trình training
     model = Prophet(
@@ -2816,36 +2900,13 @@ def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
     future = model.make_future_dataframe(periods=0)
     future['cap'] = growth_cap
     future['floor'] = growth_floor
+    
+    # Dự báo
     forecast = model.predict(future)
     
-    # Đánh giá hiệu suất với nhiều chỉ số
-    actual = df['close'].values
-    predicted = forecast['yhat'].values
-    if len(actual) != len(predicted):
-        logger.error(f"Kích thước không khớp trong train_prophet_model: actual ({len(actual)}), predicted ({len(predicted)})")
-        return model, 0.0
-        
-    # Đánh giá bằng nhiều chỉ số
-    mse = np.mean((actual - predicted) ** 2)
-    mae = np.mean(np.abs(actual - predicted))
-    mape = np.mean(np.abs((actual - predicted) / actual)) * 100
-    
-    # Kiểm tra dự báo phi lý
-    is_unrealistic = False
-    avg_price = np.mean(actual)
-    max_deviation = np.max(np.abs(predicted - actual) / actual)
-    if max_deviation > 0.5:  # Nếu có dự báo lệch quá 50%
-        is_unrealistic = True
-        logger.warning(f"Phát hiện dự báo phi lý trong quá trình training: độ lệch tối đa {max_deviation:.2f}")
-    
-    # Tính toán điểm hiệu suất tổng hợp
-    mse_score = 1 / (1 + mse)
-    mape_score = max(0, 1 - (mape / 30))
-    performance = 0.7 * mse_score + 0.3 * mape_score
-    
-    # Giảm điểm nếu có dự báo phi lý
-    if is_unrealistic:
-        performance *= 0.5
+    # Đánh giá hiệu suất
+    predictor = EnhancedPredictor()
+    performance = predictor.evaluate_prophet_performance(df, forecast)
     
     return model, performance
 
