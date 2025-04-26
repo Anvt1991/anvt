@@ -20,8 +20,6 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
-import time
-from contextlib import contextmanager
 
 # Data processing imports
 import pandas as pd
@@ -33,7 +31,7 @@ from dotenv import load_dotenv
 
 # Telegram bot imports
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Data fetching and analysis imports
 import yfinance as yf
@@ -97,7 +95,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.5"           
+VERSION = "V19.3"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -141,7 +139,6 @@ class ChatSessionManager:
     Lưu trữ thông tin phiên, lịch sử tin nhắn và xử lý timeout.
     """
     def __init__(self):
-        """Khởi tạo ChatSessionManager"""
         self.sessions = {}
         self.cleanup_task = None
     
@@ -185,39 +182,25 @@ class ChatSessionManager:
     
     async def cleanup_sessions(self):
         """Dọn dẹp các phiên chat quá hạn (sau 15 phút không hoạt động)"""
-        try:
-            while True:
-                await asyncio.sleep(60)  # Kiểm tra mỗi phút
-                
-                # Kiểm tra xem task có bị hủy hay không
-                if asyncio.current_task().cancelled():
-                    logger.info("Task cleanup_sessions đã bị hủy, đang thoát...")
-                    break
-                    
-                now = datetime.now(TZ)
-                expired_users = []
-                
-                for user_id, session in self.sessions.items():
-                    # Kiểm tra thời gian không hoạt động
-                    inactive_time = now - session["start_time"]
-                    if inactive_time.total_seconds() > 900:  # 15 phút
-                        expired_users.append(user_id)
-                
-                # Xóa các phiên hết hạn
-                for user_id in expired_users:
-                    logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
-                    self.end_session(user_id)
-                
-                # Dừng task nếu không còn phiên nào
-                if not self.sessions:
-                    break
-        except asyncio.CancelledError:
-            logger.info("Task cleanup_sessions đã bị hủy bởi CancelledError")
-            # Đảm bảo cleanup task sẽ dừng lại đúng cách
-            raise
-        except Exception as e:
-            logger.error(f"Lỗi trong cleanup_sessions: {str(e)}")
-            logger.error(traceback.format_exc())
+        while True:
+            await asyncio.sleep(60)  # Kiểm tra mỗi phút
+            now = datetime.now(TZ)
+            expired_users = []
+            
+            for user_id, session in self.sessions.items():
+                # Kiểm tra thời gian không hoạt động
+                inactive_time = now - session["start_time"]
+                if inactive_time.total_seconds() > 900:  # 15 phút
+                    expired_users.append(user_id)
+            
+            # Xóa các phiên hết hạn
+            for user_id in expired_users:
+                logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
+                self.end_session(user_id)
+            
+            # Dừng task nếu không còn phiên nào
+            if not self.sessions:
+                break
 
 # Khởi tạo chat session manager toàn cục
 chat_manager = ChatSessionManager()
@@ -382,126 +365,74 @@ class DataValidator:
     
     @staticmethod
     def align_timestamps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-        """
-        Căn chỉnh timestamp để đảm bảo nhất quán giữa các khung thời gian
-        
-        Args:
-            df: DataFrame cần căn chỉnh
-            timeframe: Khung thời gian dữ liệu
-            
-        Returns:
-            DataFrame với timestamp đã căn chỉnh
-        """
+        """Căn chỉnh dấu thời gian theo khung thời gian chính xác"""
         if df.empty:
             return df
         
         df = df.copy()
-        # Đảm bảo index là datetime
+        # Đảm bảo index là datetime và có múi giờ
         if not isinstance(df.index, pd.DatetimeIndex):
-            if 'date' in df.columns:
-                df['date'] = pd.to_datetime(df['date'])
-                df = df.set_index('date')
-            else:
-                logger.warning("Không thể căn chỉnh timestamp: không có cột date và index không phải DatetimeIndex")
-                return df
+            df.index = pd.to_datetime(df.index)
         
-        # Xử lý múi giờ để tương thích với code khác
+        # Nếu không có múi giờ, giả định là múi giờ Bangkok
         if df.index.tz is None:
             df.index = df.index.tz_localize(TZ)
         
-        # Xác định quy tắc căn chỉnh dựa trên timeframe
-        if timeframe.upper() in ['1D', 'D']:
-            # Đối với dữ liệu ngày: sử dụng EOD (15:00) như code cũ
-            logger.info("Căn chỉnh timestamp cho khung ngày")
+        # Căn chỉnh timestamp dựa trên khung thời gian
+        if timeframe == '1D':
+            # Đối với dữ liệu ngày, lấy giá mỗi ngày lúc EOD (15:00)
             df.index = df.index.normalize() + pd.Timedelta(hours=15)
-            
-        elif timeframe.upper() in ['1W', 'W']:
-            # Đối với dữ liệu tuần: giữ nguyên logic cuối tuần từ code cũ
-            logger.info("Căn chỉnh timestamp cho khung tuần")
+        elif timeframe == '1W':
+            # Đối với dữ liệu tuần, lấy giá vào cuối tuần (Thứ 6, 15:00)
             df.index = df.index.to_period('W').to_timestamp() + pd.Timedelta(days=4, hours=15)
-            
-        elif timeframe.upper() in ['1M', 'M'] and timeframe.upper() not in ['1MIN', '1M']:
-            # Xử lý rõ ràng hơn để tránh nhầm lẫn giữa tháng và phút
-            logger.info("Căn chỉnh timestamp cho khung tháng")
+        elif timeframe == '1M':
+            # Đối với dữ liệu tháng, lấy giá vào cuối tháng
             df.index = df.index.to_period('M').to_timestamp() + pd.Timedelta(hours=15)
-            
-        elif timeframe in ['5m', '15m', '30m', '1h', '4h']:
-            # Đối với dữ liệu intraday: căn chỉnh phù hợp
-            logger.info(f"Căn chỉnh timestamp cho khung {timeframe}")
-            
-            if timeframe == '5m':
-                # Căn chỉnh về mỗi 5 phút
-                df.index = df.index.floor('5min')
-            elif timeframe == '15m':
-                # Căn chỉnh về mỗi 15 phút
-                df.index = df.index.floor('15min')
-            elif timeframe == '30m':
-                # Căn chỉnh về mỗi 30 phút
-                df.index = df.index.floor('30min')
-            elif timeframe == '1h':
-                # Căn chỉnh về mỗi giờ - sử dụng 'H' (chuẩn pandas)
-                df.index = df.index.floor('H')
-            elif timeframe == '4h':
-                # Cải thiện hiệu suất xử lý bằng phương pháp vector
-                hours = df.index.hour
-                adjusted_hours = hours - (hours % 4)
-                df.index = pd.DatetimeIndex(
-                    pd.to_datetime(df.index.date) + pd.to_timedelta(adjusted_hours, unit='h')
-                )
+        elif timeframe == '5m':
+            # Căn chỉnh theo mỗi 5 phút
+            df.index = df.index.floor('5min')
+        elif timeframe == '15m':
+            # Căn chỉnh theo mỗi 15 phút
+            df.index = df.index.floor('15min')
+        elif timeframe == '30m':
+            # Căn chỉnh theo mỗi 30 phút
+            df.index = df.index.floor('30min')
+        elif timeframe == '1h':
+            # Căn chỉnh theo mỗi giờ
+            df.index = df.index.floor('H')
+        elif timeframe == '4h':
+            # Căn chỉnh theo mỗi 4 giờ
+            df.index = df.index.floor('4H')
         
-        # Loại bỏ các hàng trùng lặp sau khi căn chỉnh
-        if df.index.duplicated().any():
-            duplicated_count = df.index.duplicated().sum()
-            logger.warning(f"Phát hiện {duplicated_count} timestamp trùng lặp sau khi căn chỉnh")
-            
-            # Xử lý timestamp trùng lặp bằng cách lấy hàng cuối cùng
-            df = df[~df.index.duplicated(keep='last')]
-            logger.info(f"Đã loại bỏ {duplicated_count} hàng trùng lặp, còn lại {len(df)} hàng")
+        # Sắp xếp theo thời gian tăng dần
+        df = df.sort_index()
         
-        # Sắp xếp dữ liệu theo index tăng dần
-        return df.sort_index()
+        return df
     
     @staticmethod
     def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Chuẩn hóa DataFrame thành định dạng thống nhất
+        """Chuẩn hóa DataFrame với xử lý giá trị thiếu, outlier và định dạng cột"""
+        if df.empty:
+            return df
         
-        Args:
-            df: DataFrame cần chuẩn hóa
-            
-        Returns:
-            DataFrame đã chuẩn hóa
-        """
         df = df.copy()
         
-        # Đảm bảo các cột cần thiết
+        # Chuẩn hóa tên cột
+        column_mapping = {
+            'time': 'date', 'Time': 'date', 'DATE': 'date', 'Date': 'date',
+            'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
+            'Adj Close': 'adj_close', 'Adjusted_close': 'adj_close'
+        }
+        df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
+        
+        # Đảm bảo các cột bắt buộc
         required_columns = ['open', 'high', 'low', 'close', 'volume']
-        missing_cols = [col for col in required_columns if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Thiếu các cột bắt buộc: {', '.join(missing_cols)}")
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"DataFrame thiếu cột bắt buộc: {col}")
         
-        # Đếm số lượng giá trị thiếu trước khi xử lý
-        na_counts_before = df[required_columns].isna().sum()
-        has_missing = na_counts_before.sum() > 0
-        
-        if has_missing:
-            # Đếm số lượng khoảng trống lớn (>5 giá trị liên tiếp)
-            large_gaps = 0
-            consecutive_na = 0
-            
-            for i in range(len(df)):
-                if df[['open', 'high', 'low', 'close']].iloc[i].isna().any():
-                    consecutive_na += 1
-                    if consecutive_na > 5 and consecutive_na % 5 == 0:  # Ghi nhận mỗi 5 giá trị
-                        large_gaps += 1
-                else:
-                    consecutive_na = 0
-            
-            # Ghi log về số lượng giá trị thiếu
-            logger.info(f"Phát hiện dữ liệu thiếu: {na_counts_before.to_dict()}")
-            if large_gaps > 0:
-                logger.warning(f"Phát hiện {large_gaps} khoảng trống lớn (>5 giá trị liên tiếp)")
-            
+        # Xử lý giá trị null: lấp đầy giá trị thiếu trong chuỗi thời gian
+        if any(df.isnull().sum()):
             # Phương pháp điền: forward fill cho giá mở/đóng/cao/thấp, không điền cho khối lượng
             df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].fillna(method='ffill')
             
@@ -510,27 +441,10 @@ class DataValidator:
             
             # Khối lượng thiếu được điền 0
             df['volume'] = df['volume'].fillna(0)
-            
-            # Đếm số lượng giá trị đã được nội suy
-            na_counts_after = df[required_columns].isna().sum()
-            interpolated_counts = na_counts_before - na_counts_after
-            
-            # Ghi log về số lượng giá trị đã được nội suy
-            logger.info(f"Đã nội suy {interpolated_counts.sum()} giá trị thiếu: {interpolated_counts.to_dict()}")
-            
-            # Kiểm tra nếu vẫn còn giá trị thiếu sau khi nội suy
-            if na_counts_after.sum() > 0:
-                logger.warning(f"Vẫn còn {na_counts_after.sum()} giá trị thiếu sau khi nội suy: {na_counts_after.to_dict()}")
         
         # Kiểm tra tính nhất quán của dữ liệu
         # - Giá cao >= giá đóng, mở, thấp
         # - Giá thấp <= giá đóng, mở, cao
-        inconsistent_high = df[df['high'] < df[['open', 'close']].max(axis=1)]
-        inconsistent_low = df[df['low'] > df[['open', 'close']].min(axis=1)]
-        
-        if not inconsistent_high.empty or not inconsistent_low.empty:
-            logger.warning(f"Phát hiện {len(inconsistent_high)} hàng với giá cao không nhất quán và {len(inconsistent_low)} hàng với giá thấp không nhất quán")
-        
         df['high'] = df[['high', 'open', 'close']].max(axis=1)
         df['low'] = df[['low', 'open', 'close']].min(axis=1)
         
@@ -539,10 +453,6 @@ class DataValidator:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
         # Loại bỏ các hàng có giá trị âm trong giá
-        negative_prices = df[(df['open'] <= 0) | (df['high'] <= 0) | (df['low'] <= 0) | (df['close'] <= 0)]
-        if not negative_prices.empty:
-            logger.warning(f"Loại bỏ {len(negative_prices)} hàng có giá trị âm hoặc bằng 0")
-        
         df = df[(df['open'] > 0) & (df['high'] > 0) & (df['low'] > 0) & (df['close'] > 0)]
         
         # Thêm cột ngày giao dịch nếu đang dùng cột date là index
@@ -552,203 +462,73 @@ class DataValidator:
         return df
     
     @staticmethod
-    def detect_and_handle_outliers(df, symbol, method='dbscan', threshold=3.0):
+    def detect_and_handle_outliers(df: pd.DataFrame, method: str = 'iqr', threshold: float = 3.0) -> tuple[pd.DataFrame, str]:
         """
-        Phát hiện và xử lý các điểm dữ liệu bất thường (outliers) trong dữ liệu giá.
+        Phát hiện và xử lý giá trị ngoại lệ (outlier) trong dữ liệu
         
         Args:
-            df (pd.DataFrame): DataFrame chứa dữ liệu giá
-            symbol (str): Mã chứng khoán
-            method (str): Phương pháp phát hiện outlier ('zscore', 'iqr', 'dbscan')
-            threshold (float): Ngưỡng để xác định outlier (mặc định là 3.0 cho z-score)
+            df: DataFrame cần xử lý
+            method: Phương pháp phát hiện ('iqr' hoặc 'zscore')
+            threshold: Ngưỡng phát hiện
             
         Returns:
-            tuple: (DataFrame đã được xử lý, Danh sách cảnh báo)
+            DataFrame đã xử lý và báo cáo về outliers
         """
         if df.empty:
-            return df, [f"Không thể phát hiện outliers: DataFrame trống cho {symbol}"]
-            
-        warnings = []
-        price_cols = ['open', 'high', 'low', 'close']
+            return df, "DataFrame rỗng, không thể phát hiện outlier"
         
-        # Kiểm tra các cột cần thiết
-        missing_cols = [col for col in price_cols if col not in df.columns]
-        if missing_cols:
-            warnings.append(f"Không thể phát hiện outliers: Thiếu các cột {', '.join(missing_cols)}")
-            return df, warnings
-            
-        # Tạo bản sao để không ảnh hưởng đến dữ liệu gốc
-        df_cleaned = df.copy()
+        df = df.copy()
+        outlier_report = "Phát hiện outlier:\n"
+        outliers_found = False
         
-        outliers = {}  # Dict để lưu vị trí outliers theo từng cột
+        # Cột cần kiểm tra outlier
+        cols_to_check = ['open', 'high', 'low', 'close', 'volume']
+        cols_to_check = [col for col in cols_to_check if col in df.columns]
         
-        # PHƯƠNG PHÁP 1: Z-score
-        if method == 'zscore':
-            for col in price_cols:
-                if df_cleaned[col].std() == 0:  # Tránh chia cho 0
-                    continue
-                    
-                z_scores = np.abs((df_cleaned[col] - df_cleaned[col].mean()) / df_cleaned[col].std())
-                outliers[col] = z_scores > threshold
-                
-                if outliers[col].any():
-                    count = outliers[col].sum()
-                    warnings.append(f"Z-score: Phát hiện {count} outliers trong cột {col} cho {symbol}")
-        
-        # PHƯƠNG PHÁP 2: IQR (Interquartile Range)
-        elif method == 'iqr':
-            for col in price_cols:
-                Q1 = df_cleaned[col].quantile(0.25)
-                Q3 = df_cleaned[col].quantile(0.75)
+        if method == 'iqr':
+            for col in cols_to_check:
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
                 IQR = Q3 - Q1
                 
                 lower_bound = Q1 - threshold * IQR
                 upper_bound = Q3 + threshold * IQR
                 
-                outliers[col] = (df_cleaned[col] < lower_bound) | (df_cleaned[col] > upper_bound)
-                
-                if outliers[col].any():
-                    count = outliers[col].sum()
-                    warnings.append(f"IQR: Phát hiện {count} outliers trong cột {col} cho {symbol}")
-        
-        # PHƯƠNG PHÁP 3: DBSCAN
-        elif method == 'dbscan':
-            from sklearn.cluster import DBSCAN
-            from sklearn.preprocessing import StandardScaler
-            
-            # Tạo feature matrix từ dữ liệu giá
-            features = df_cleaned[price_cols].copy()
-            
-            # Thêm biến động giá: phần trăm thay đổi so với phiên trước
-            for col in price_cols:
-                features[f'{col}_pct_change'] = df_cleaned[col].pct_change().fillna(0)
-                
-            # Thêm chỉ báo ATR (Average True Range) để nắm bắt biến động
-            features['tr1'] = abs(features['high'] - features['low'])
-            features['tr2'] = abs(features['high'] - features['close'].shift(1))
-            features['tr3'] = abs(features['low'] - features['close'].shift(1))
-            features['true_range'] = features[['tr1', 'tr2', 'tr3']].max(axis=1)
-            features['atr'] = features['true_range'].rolling(window=14).mean().fillna(0)
-            
-            # Loại bỏ các cột tạm thời
-            features.drop(['tr1', 'tr2', 'tr3', 'true_range'], axis=1, inplace=True)
-            
-            # Chuẩn hóa dữ liệu
-            scaler = StandardScaler()
-            scaled_features = scaler.fit_transform(features.fillna(0))
-            
-            # Áp dụng DBSCAN
-            dbscan = DBSCAN(eps=threshold, min_samples=3)
-            clusters = dbscan.fit_predict(scaled_features)
-            
-            # Điểm có nhãn -1 được coi là outliers
-            outlier_mask = clusters == -1
-            
-            # Nếu có outliers
-            if outlier_mask.any():
-                outlier_count = outlier_mask.sum()
-                outlier_indices = np.where(outlier_mask)[0]
-                
-                warnings.append(f"DBSCAN: Phát hiện {outlier_count} outliers trong dữ liệu giá cho {symbol}")
-                
-                # Tạo dict để lưu outliers cho từng cột
-                for col in price_cols:
-                    outliers[col] = pd.Series(False, index=df_cleaned.index)
-                    outliers[col].iloc[outlier_indices] = True
-        else:
-            warnings.append(f"Không hỗ trợ phương pháp phát hiện outlier '{method}', sử dụng z-score")
-            return DataValidator.detect_and_handle_outliers(df, symbol, method='zscore', threshold=threshold)
-        
-        # Xử lý outliers
-        total_outliers = 0
-        for col in price_cols:
-            if col in outliers and outliers[col].any():
-                mask = outliers[col]
-                count = mask.sum()
-                total_outliers += count
-                
-                # Không xử lý nếu quá nhiều điểm bị coi là outliers (>20%)
-                if count > len(df) * 0.2:
-                    warnings.append(f"Quá nhiều outliers trong {col} ({count} điểm, {count/len(df)*100:.1f}%), không thực hiện xử lý")
-                    continue
-                
-                # Tạo một chuỗi rolling median để thay thế outliers
-                window_size = min(7, len(df) // 3)  # Kích thước cửa sổ thích hợp
-                if window_size < 2:
-                    window_size = 2  # Tối thiểu phải có 2
+                outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)]
+                if not outliers.empty:
+                    outliers_found = True
+                    outlier_report += f"\n{col}: {len(outliers)} giá trị ngoại lệ\n"
+                    for idx, row in outliers.iterrows():
+                        date_str = idx.strftime('%Y-%m-%d %H:%M') if isinstance(idx, pd.Timestamp) else str(idx)
+                        outlier_report += f"  - {date_str}: {row[col]:.2f}\n"
                     
-                # Tính rolling median, thêm padding nếu cần
-                rolling_median = df_cleaned[col].rolling(window=window_size, center=True, min_periods=1).median()
-                
-                # Xử lý các giá trị NaN ở đầu và cuối
-                rolling_median.fillna(method='ffill', inplace=True)
-                rolling_median.fillna(method='bfill', inplace=True)
-                
-                # Thay thế outliers bằng giá trị trung vị
-                df_cleaned.loc[mask, col] = rolling_median[mask]
-                
-                # Log chi tiết
-                if count <= 10:  # Chỉ hiển thị chi tiết cho <= 10 outliers
-                    for idx in df_cleaned.index[mask]:
-                        original = df[col].loc[idx]
-                        replaced = df_cleaned[col].loc[idx]
-                        warnings.append(f"  - Outlier tại {idx}: {col}={original:.2f} thay thế bằng {replaced:.2f}")
+                    # Xử lý outlier bằng cách clip giới hạn
+                    df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
         
-        # Bổ sung cảnh báo tổng hợp
-        if total_outliers > 0:
-            warnings.append(f"Đã xử lý tổng cộng {total_outliers} outliers trong dữ liệu giá cho {symbol}")
-            
-            # Kiểm tra xem outliers có xuất hiện theo cụm (cluster) không
-            if method == 'dbscan' and outlier_mask.any():
-                consecutive_count = 0
-                max_consecutive = 0
-                for i in range(1, len(outlier_mask)):
-                    if outlier_mask[i] and outlier_mask[i-1]:
-                        consecutive_count += 1
-                    else:
-                        max_consecutive = max(max_consecutive, consecutive_count)
-                        consecutive_count = 0
+        elif method == 'zscore':
+            from scipy import stats
+            for col in cols_to_check:
+                z_scores = stats.zscore(df[col])
+                abs_z_scores = np.abs(z_scores)
+                outliers_mask = abs_z_scores > threshold
+                outliers = df[outliers_mask]
                 
-                max_consecutive = max(max_consecutive, consecutive_count)
-                
-                if max_consecutive >= 2:
-                    warnings.append(f"Cảnh báo: Phát hiện {max_consecutive+1} outliers liên tiếp, có thể là một sự kiện bất thường")
+                if not outliers.empty:
+                    outliers_found = True
+                    outlier_report += f"\n{col}: {len(outliers)} giá trị ngoại lệ\n"
+                    for idx, row in outliers.iterrows():
+                        date_str = idx.strftime('%Y-%m-%d %H:%M') if isinstance(idx, pd.Timestamp) else str(idx)
+                        z = z_scores[df.index.get_loc(idx)]
+                        outlier_report += f"  - {date_str}: {row[col]:.2f} (z={z:.2f})\n"
+                    
+                    # Xử lý outlier: thay thế bằng giá trị trung bình
+                    mean_val = df[~outliers_mask][col].mean()
+                    df.loc[outliers_mask, col] = mean_val
         
-        # Kiểm tra tính nhất quán sau khi thay thế
-        # Giá không hợp lệ: high < low, open không nằm giữa high-low, close không nằm giữa high-low
-        invalid_high_low = (df_cleaned['high'] < df_cleaned['low'])
-        if invalid_high_low.any():
-            count = invalid_high_low.sum()
-            warnings.append(f"Sau khi xử lý outliers: Phát hiện {count} dòng có high < low")
-            
-            # Sửa lại để high >= low
-            indices = df_cleaned.index[invalid_high_low]
-            for idx in indices:
-                high_val = df_cleaned.loc[idx, 'high']
-                low_val = df_cleaned.loc[idx, 'low']
-                # Hoán đổi giá trị
-                df_cleaned.loc[idx, 'high'] = max(high_val, low_val)
-                df_cleaned.loc[idx, 'low'] = min(high_val, low_val)
+        if not outliers_found:
+            outlier_report = "Không phát hiện giá trị ngoại lệ"
         
-        # Đảm bảo Open nằm trong khoảng [Low, High]
-        invalid_open = (df_cleaned['open'] > df_cleaned['high']) | (df_cleaned['open'] < df_cleaned['low'])
-        if invalid_open.any():
-            count = invalid_open.sum()
-            warnings.append(f"Sau khi xử lý outliers: Phát hiện {count} dòng có open không nằm trong khoảng [low, high]")
-            
-            # Điều chỉnh giá open
-            df_cleaned.loc[invalid_open, 'open'] = df_cleaned.loc[invalid_open, ['low', 'high']].mean(axis=1)
-        
-        # Đảm bảo Close nằm trong khoảng [Low, High]
-        invalid_close = (df_cleaned['close'] > df_cleaned['high']) | (df_cleaned['close'] < df_cleaned['low'])
-        if invalid_close.any():
-            count = invalid_close.sum()
-            warnings.append(f"Sau khi xử lý outliers: Phát hiện {count} dòng có close không nằm trong khoảng [low, high]")
-            
-            # Điều chỉnh giá close
-            df_cleaned.loc[invalid_close, 'close'] = df_cleaned.loc[invalid_close, ['low', 'high']].mean(axis=1)
-        
-        return df_cleaned, warnings
+        return df, outlier_report
     
     @staticmethod
     def validate_fundamental_data(data: dict) -> dict:
@@ -831,416 +611,12 @@ class DataValidator:
     
     @staticmethod
     def validate_api_response(response: dict, expected_keys: list) -> bool:
-        """Xác thực cấu trúc phản hồi API có chứa các khóa bắt buộc không"""
-        if not isinstance(response, dict):
+        """Xác thực phản hồi API có đầy đủ các trường dữ liệu cần thiết hay không"""
+        if not response:
             return False
         return all(key in response for key in expected_keys)
-        
-    @staticmethod
-    def check_price_consistency(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-        """
-        Kiểm tra và sửa tính nhất quán của giá (OHLC).
-        
-        Các điều kiện kiểm tra:
-        1. Giá cao (high) phải >= giá mở cửa (open)
-        2. Giá cao (high) phải >= giá đóng cửa (close)
-        3. Giá thấp (low) phải <= giá mở cửa (open)
-        4. Giá thấp (low) phải <= giá đóng cửa (close)
-        5. Giá thấp (low) phải <= giá cao (high)
-        
-        Returns:
-            tuple: (DataFrame đã sửa, báo cáo về các vấn đề nhất quán)
-        """
-        price_consistency_report = ""
-        if df.empty:
-            return df, "DataFrame rỗng, không thể kiểm tra tính nhất quán của giá"
-        
-        # Sao chép để không thay đổi DataFrame gốc
-        df_cleaned = df.copy()
-        
-        # Kiểm tra giá cao >= giá mở cửa
-        high_lt_open = df_cleaned[df_cleaned['high'] < df_cleaned['open']]
-        if not high_lt_open.empty:
-            price_consistency_report += f"Phát hiện {len(high_lt_open)} hàng có giá cao < giá mở cửa\n"
-            # Sửa giá cao
-            df_cleaned.loc[high_lt_open.index, 'high'] = df_cleaned.loc[high_lt_open.index, 'open']
-        
-        # Kiểm tra giá cao >= giá đóng cửa
-        high_lt_close = df_cleaned[df_cleaned['high'] < df_cleaned['close']]
-        if not high_lt_close.empty:
-            price_consistency_report += f"Phát hiện {len(high_lt_close)} hàng có giá cao < giá đóng cửa\n"
-            # Sửa giá cao
-            df_cleaned.loc[high_lt_close.index, 'high'] = df_cleaned.loc[high_lt_close.index, 'close']
-        
-        # Kiểm tra giá thấp <= giá mở cửa
-        low_gt_open = df_cleaned[df_cleaned['low'] > df_cleaned['open']]
-        if not low_gt_open.empty:
-            price_consistency_report += f"Phát hiện {len(low_gt_open)} hàng có giá thấp > giá mở cửa\n"
-            # Sửa giá thấp
-            df_cleaned.loc[low_gt_open.index, 'low'] = df_cleaned.loc[low_gt_open.index, 'open']
-        
-        # Kiểm tra giá thấp <= giá đóng cửa
-        low_gt_close = df_cleaned[df_cleaned['low'] > df_cleaned['close']]
-        if not low_gt_close.empty:
-            price_consistency_report += f"Phát hiện {len(low_gt_close)} hàng có giá thấp > giá đóng cửa\n"
-            # Sửa giá thấp
-            df_cleaned.loc[low_gt_close.index, 'low'] = df_cleaned.loc[low_gt_close.index, 'close']
-        
-        # Kiểm tra giá thấp <= giá cao
-        low_gt_high = df_cleaned[df_cleaned['low'] > df_cleaned['high']]
-        if not low_gt_high.empty:
-            price_consistency_report += f"Phát hiện {len(low_gt_high)} hàng có giá thấp > giá cao\n"
-            # Hoán đổi giá thấp và giá cao
-            temp_high = df_cleaned.loc[low_gt_high.index, 'high'].copy()
-            df_cleaned.loc[low_gt_high.index, 'high'] = df_cleaned.loc[low_gt_high.index, 'low']
-            df_cleaned.loc[low_gt_high.index, 'low'] = temp_high
-        
-        # Kiểm tra thêm các mẫu bất thường
-        
-        # 1. Kiểm tra giá mở cửa và đóng cửa giống nhau liên tiếp
-        df_cleaned['open_eq_close'] = df_cleaned['open'] == df_cleaned['close']
-        open_eq_close_count = df_cleaned['open_eq_close'].sum()
-        # Tìm chuỗi các ngày liên tiếp có open = close
-        if open_eq_close_count > 0:
-            consecutive_eq = 1
-            consecutive_counts = []
-            
-            for i in range(1, len(df_cleaned)):
-                if df_cleaned['open_eq_close'].iloc[i] and df_cleaned['open_eq_close'].iloc[i-1]:
-                    consecutive_eq += 1
-                elif consecutive_eq > 1:
-                    consecutive_counts.append(consecutive_eq)
-                    consecutive_eq = 1
-            
-            if consecutive_eq > 1:  # Kiểm tra chuỗi cuối cùng
-                consecutive_counts.append(consecutive_eq)
-            
-            # Báo cáo chuỗi dài nhất
-            if consecutive_counts:
-                max_consecutive = max(consecutive_counts)
-                if max_consecutive >= 3:  # Báo cáo nếu có 3+ ngày liên tiếp
-                    price_consistency_report += f"Cảnh báo: Phát hiện {max_consecutive} phiên liên tiếp có giá mở cửa = đóng cửa\n"
-                    logger.warning(f"Phát hiện {max_consecutive} phiên liên tiếp có giá mở cửa = đóng cửa")
-        
-        # 2. Kiểm tra biến động quá thấp (không tự nhiên)
-        df_cleaned['price_range_pct'] = (df_cleaned['high'] - df_cleaned['low']) / df_cleaned['close'] * 100
-        low_volatility = df_cleaned[df_cleaned['price_range_pct'] < 0.1]  # Biến động < 0.1%
-        
-        if len(low_volatility) > 5:  # Nếu có nhiều hơn 5 phiên biến động quá thấp
-            price_consistency_report += f"Cảnh báo: Phát hiện {len(low_volatility)} phiên có biến động giá quá thấp (<0.1%)\n"
-            logger.warning(f"Phát hiện {len(low_volatility)} phiên có biến động giá quá thấp (<0.1%)")
-        
-        # 3. Kiểm tra khối lượng bất thường
-        if 'volume' in df_cleaned.columns:
-            zero_volume = df_cleaned[df_cleaned['volume'] == 0]
-            if len(zero_volume) > 0:
-                price_consistency_report += f"Cảnh báo: Phát hiện {len(zero_volume)} phiên có khối lượng giao dịch = 0\n"
-                logger.warning(f"Phát hiện {len(zero_volume)} phiên có khối lượng giao dịch = 0")
-        
-        # Loại bỏ các cột tạm thời
-        df_cleaned = df_cleaned.drop(['open_eq_close', 'price_range_pct'], axis=1, errors='ignore')
-        
-        if not price_consistency_report:
-            price_consistency_report = "Dữ liệu giá nhất quán, không phát hiện vấn đề"
-        
-        return df_cleaned, price_consistency_report
 
-    @staticmethod
-    def validate_price_limits(df, symbol, exchange=None):
-        """
-        Xác thực giới hạn giá dựa trên quy định sàn giao dịch (HOSE, HNX, UPCOM).
-        
-        Args:
-            df (pd.DataFrame): DataFrame chứa dữ liệu giá
-            symbol (str): Mã chứng khoán
-            exchange (str, optional): Sàn giao dịch. Mặc định là None (sẽ tự động xác định)
-            
-        Returns:
-            tuple: (DataFrame đã được lọc, Danh sách cảnh báo)
-        """
-        warnings = []
-        
-        if 'close' not in df.columns or 'open' not in df.columns:
-            warnings.append(f"Không thể xác thực giới hạn giá cho {symbol}: Thiếu cột giá")
-            return df, warnings
-            
-        # Xác định sàn nếu không được cung cấp
-        if not exchange:
-            if symbol in DataValidator.INDICES:
-                for ex, indices in DataValidator.INDEX_TYPES.items():
-                    if symbol in indices:
-                        exchange = ex
-                        break
-            else:
-                # Xác định sàn dựa vào 2 ký tự đầu của mã CK 
-                # (Giả định phổ biến, có thể cần nguồn dữ liệu chính xác hơn)
-                if symbol.startswith(('HO', 'HS')):
-                    exchange = 'HOSE'
-                elif symbol.startswith(('HN', 'SH')):
-                    exchange = 'HNX'
-                else:
-                    exchange = 'UPCOM'  # Mặc định UPCOM nếu không xác định được
-        
-        # Tạo bản sao để tránh ảnh hưởng đến dữ liệu gốc
-        df_validated = df.copy()
-        
-        # Các ngưỡng theo quy định sàn
-        if exchange == 'HOSE':
-            price_limit_pct = 0.07  # ±7% cho HOSE
-        elif exchange == 'HNX':
-            price_limit_pct = 0.10  # ±10% cho HNX
-        else:  # UPCOM
-            price_limit_pct = 0.15  # ±15% cho UPCOM
-            
-        # Tạo cột giá tham chiếu (từ phiên trước đó)
-        df_validated['ref_price'] = df_validated['close'].shift(1)
-        
-        # Xử lý hàng đầu tiên (không có giá tham chiếu)
-        if not df_validated.empty:
-            df_validated.loc[df_validated.index[0], 'ref_price'] = df_validated.loc[df_validated.index[0], 'open']
-        
-        # Tính biên độ dao động cho phép
-        df_validated['ceiling'] = df_validated['ref_price'] * (1 + price_limit_pct)
-        df_validated['floor'] = df_validated['ref_price'] * (1 - price_limit_pct)
-        
-        # Đánh dấu các mức giá vượt giới hạn
-        price_cols = ['open', 'high', 'low', 'close']
-        exceed_limit = pd.DataFrame(False, index=df_validated.index, columns=price_cols)
-        
-        for col in price_cols:
-            # Đánh dấu giá vượt trần
-            ceiling_exceed = df_validated[col] > df_validated['ceiling']
-            # Đánh dấu giá vượt sàn
-            floor_exceed = df_validated[col] < df_validated['floor']
-            
-            if ceiling_exceed.any() or floor_exceed.any():
-                count = ceiling_exceed.sum() + floor_exceed.sum()
-                exceed_limit[col] = ceiling_exceed | floor_exceed
-                warnings.append(f"Phát hiện {count} dòng có giá {col} vượt giới hạn ±{price_limit_pct*100}% cho {symbol} trên {exchange}")
-        
-        # Xác định các dòng có ít nhất một cột giá vượt giới hạn
-        any_exceed = exceed_limit.any(axis=1)
-        if any_exceed.any():
-            problem_rows = df_validated[any_exceed].index
-            warnings.append(f"Có {len(problem_rows)} bản ghi vượt giới hạn giá cho {symbol}")
-            
-            # Đặt giá lại vào trong giới hạn cho phép
-            for col in price_cols:
-                # Giới hạn giá trần
-                over_ceiling = df_validated[col] > df_validated['ceiling'] 
-                if over_ceiling.any():
-                    df_validated.loc[over_ceiling, col] = df_validated.loc[over_ceiling, 'ceiling']
-                
-                # Giới hạn giá sàn
-                under_floor = df_validated[col] < df_validated['floor']
-                if under_floor.any():
-                    df_validated.loc[under_floor, col] = df_validated.loc[under_floor, 'floor']
-        
-        # Loại bỏ các cột tạm thời
-        df_validated = df_validated.drop(['ref_price', 'ceiling', 'floor'], axis=1)
-        
-        return df_validated, warnings
-
-    @staticmethod
-    def filter_trading_hours(df, symbol, timeframe, exchange=None):
-        """
-        Lọc dữ liệu theo giờ giao dịch hợp lệ
-        """
-        # Code implementation
-        # ...
-
-class PipelineTracker:
-    """
-    Lớp theo dõi và ghi nhật ký các bước xử lý trong pipeline dữ liệu.
-    Cung cấp khả năng ghi lại từng bước xử lý, theo dõi thời gian thực thi
-    và phát hiện lỗi trong quá trình xử lý dữ liệu.
-    """
-    
-    def __init__(self, pipeline_name: str, log_level: str = "INFO"):
-        """
-        Khởi tạo đối tượng theo dõi pipeline với tên xác định
-        
-        Args:
-            pipeline_name: Tên của pipeline đang được theo dõi
-            log_level: Mức độ ghi log (DEBUG, INFO, WARNING, ERROR)
-        """
-        self.pipeline_name = pipeline_name
-        self.steps = []
-        self.start_time = datetime.now(TZ)
-        self.end_time = None
-        self.success = None
-        self.current_step = None
-        self.step_start_time = None
-        self.errors = []
-        
-        # Thiết lập logger
-        self.logger = logging.getLogger(f"pipeline.{pipeline_name}")
-        numeric_level = getattr(logging, log_level.upper(), logging.INFO)
-        self.logger.setLevel(numeric_level)
-    
-    def start_step(self, step_name: str, metadata: dict = None) -> None:
-        """
-        Bắt đầu một bước xử lý mới trong pipeline
-        
-        Args:
-            step_name: Tên của bước xử lý
-            metadata: Thông tin bổ sung về bước xử lý (định dạng dict)
-        """
-        if self.current_step:
-            self.logger.warning(f"Bước '{self.current_step}' chưa được kết thúc trước khi bắt đầu '{step_name}'")
-            self.end_step(success=False, error_msg="Bước bị hủy do bước mới bắt đầu")
-        
-        self.current_step = step_name
-        self.step_start_time = datetime.now(TZ)
-        step_info = {
-            "name": step_name,
-            "start_time": self.step_start_time,
-            "end_time": None,
-            "duration": None,
-            "success": None,
-            "metadata": metadata or {}
-        }
-        self.steps.append(step_info)
-        self.logger.info(f"Bắt đầu bước: {step_name}")
-    
-    def end_step(self, success: bool = True, error_msg: str = None, output_metadata: dict = None) -> None:
-        """
-        Kết thúc bước xử lý hiện tại
-        
-        Args:
-            success: Trạng thái thành công của bước
-            error_msg: Thông báo lỗi nếu có
-            output_metadata: Thông tin đầu ra của bước xử lý
-        """
-        if not self.current_step:
-            self.logger.warning("Không có bước nào đang chạy để kết thúc")
-            return
-        
-        now = datetime.now(TZ)
-        duration = (now - self.step_start_time).total_seconds()
-        
-        # Cập nhật thông tin cho bước hiện tại
-        for step in reversed(self.steps):
-            if step["name"] == self.current_step and step["end_time"] is None:
-                step["end_time"] = now
-                step["duration"] = duration
-                step["success"] = success
-                if output_metadata:
-                    step["output"] = output_metadata
-                break
-        
-        # Ghi log kết quả
-        if success:
-            self.logger.info(f"Kết thúc bước '{self.current_step}' thành công sau {duration:.2f}s")
-        else:
-            error_log = f"Bước '{self.current_step}' thất bại sau {duration:.2f}s"
-            if error_msg:
-                error_log += f": {error_msg}"
-                self.errors.append({"step": self.current_step, "error": error_msg, "time": now})
-            self.logger.error(error_log)
-        
-        # Reset trạng thái bước hiện tại
-        self.current_step = None
-        self.step_start_time = None
-    
-    def finish_pipeline(self, success: bool = True, error_msg: str = None) -> dict:
-        """
-        Kết thúc và trả về báo cáo toàn bộ quá trình xử lý pipeline
-        
-        Args:
-            success: Trạng thái thành công của toàn bộ pipeline
-            error_msg: Thông báo lỗi cuối cùng nếu có
-            
-        Returns:
-            dict: Báo cáo tổng hợp về quá trình xử lý
-        """
-        # Nếu có bước đang chạy, kết thúc trước
-        if self.current_step:
-            self.end_step(success=False, error_msg="Pipeline kết thúc trước khi bước hoàn thành")
-        
-        self.end_time = datetime.now(TZ)
-        self.success = success
-        
-        if error_msg and not success:
-            self.errors.append({"step": "pipeline", "error": error_msg, "time": self.end_time})
-            self.logger.error(f"Pipeline kết thúc với lỗi: {error_msg}")
-        
-        # Tính toán thời gian tổng thể
-        total_duration = (self.end_time - self.start_time).total_seconds()
-        successful_steps = sum(1 for step in self.steps if step["success"])
-        
-        report = {
-            "pipeline_name": self.pipeline_name,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "total_duration": total_duration,
-            "success": success,
-            "steps_total": len(self.steps),
-            "steps_successful": successful_steps,
-            "errors": self.errors,
-            "steps": self.steps
-        }
-        
-        self.logger.info(f"Pipeline '{self.pipeline_name}' kết thúc sau {total_duration:.2f}s, "
-                        f"thành công: {success}, {successful_steps}/{len(self.steps)} bước hoàn thành")
-        return report
-    
-    def log_metric(self, metric_name: str, value: float) -> None:
-        """
-        Ghi lại các chỉ số metric trong quá trình xử lý
-        
-        Args:
-            metric_name: Tên của chỉ số
-            value: Giá trị của chỉ số
-        """
-        self.logger.info(f"Metric '{metric_name}': {value}")
-        
-        # Nếu đang trong một bước, gắn metric vào bước đó
-        if self.current_step:
-            for step in reversed(self.steps):
-                if step["name"] == self.current_step:
-                    if "metrics" not in step:
-                        step["metrics"] = {}
-                    step["metrics"][metric_name] = value
-                    break
-
-    @contextmanager
-    def track_step(self, step_name: str, metadata: dict = None):
-        """
-        Context manager để theo dõi một bước xử lý tự động
-        
-        Args:
-            step_name: Tên của bước xử lý
-            metadata: Thông tin bổ sung về bước xử lý
-            
-        Yields:
-            None: Không trả về giá trị, chỉ để sử dụng với câu lệnh with
-        """
-        try:
-            self.start_step(step_name, metadata)
-            yield
-            self.end_step(success=True)
-        except Exception as e:
-            self.end_step(success=False, error_msg=str(e))
-            raise  # Re-raise để caller có thể xử lý ngoại lệ
-
-    def to_dict(self) -> dict:
-        """
-        Chuyển đổi trạng thái hiện tại thành dictionary để lưu trữ/gửi API
-        
-        Returns:
-            dict: Trạng thái hiện tại của pipeline tracker
-        """
-        return {
-            "pipeline_name": self.pipeline_name,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "success": self.success,
-            "current_step": self.current_step,
-            "steps": self.steps,
-            "errors": self.errors
-        }
-
+# ---------- KẾT NỐI AIOSQLITE & MIGRATIONS (DEPRECATED) ----------
 class DBManager:
     """
     Quản lý cơ sở dữ liệu PostgreSQL thông qua SQLAlchemy
@@ -1518,117 +894,31 @@ class DataLoader:
     def __init__(self, source: str = 'vnstock'):
         self.source = source
         self.validator = DataValidator
-        self.logger = logging.getLogger(__name__)
 
     def detect_outliers(self, df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         """Hàm giữ lại để tương thích với code cũ"""
         return self.validator.detect_and_handle_outliers(df, method='iqr')
 
-    def clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Làm sạch dữ liệu sử dụng validator
-        - Chuẩn hóa DataFrame
-        - Xử lý dữ liệu thiếu
-        - Kiểm tra tính nhất quán của giá
-        - Xử lý ngoại lai
-        - Đảm bảo đủ ngày giao dịch
-        """
-        self.logger.info(f"Bắt đầu làm sạch dữ liệu cho {len(df)} hàng...")
+    async def clean_data(self, df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, str]:
+        """Làm sạch dữ liệu với xác thực validator"""
+        # Chuẩn hóa DataFrame
+        df = self.validator.normalize_dataframe(df)
         
-        if df.empty:
-            self.logger.warning("DataFrame rỗng, không thể làm sạch")
-            return df
-            
-        # Tạo bản sao để không làm thay đổi dữ liệu gốc
-        df_cleaned = df.copy()
+        # Phát hiện và xử lý outlier
+        df_cleaned, outlier_report = self.validator.detect_and_handle_outliers(df)
         
-        # Chuẩn hóa tên cột sang chữ thường
-        df_cleaned.columns = [col.lower() for col in df_cleaned.columns]
+        # Đảm bảo đủ ngày giao dịch
+        if len(df_cleaned) > 5:  # Chỉ thực hiện nếu có đủ dữ liệu
+            try:
+                trading_days = self.validator.calculate_trading_days(
+                    df_cleaned.index.min(), 
+                    df_cleaned.index.max()
+                )
+                df_cleaned = df_cleaned[df_cleaned.index.isin(trading_days)]
+            except Exception as e:
+                logger.warning(f"Không thể lọc theo ngày giao dịch: {str(e)}")
         
-        # Kiểm tra null
-        null_counts = df_cleaned.isnull().sum()
-        if null_counts.sum() > 0:
-            self.logger.warning(f"Phát hiện giá trị thiếu:\n{null_counts[null_counts > 0]}")
-            
-            # Điền giá trị thiếu với forward fill, sau đó backward fill
-            df_cleaned = df_cleaned.fillna(method='ffill').fillna(method='bfill')
-            
-            # Nếu vẫn còn giá trị thiếu, xóa các hàng đó
-            if df_cleaned.isnull().sum().sum() > 0:
-                original_len = len(df_cleaned)
-                df_cleaned = df_cleaned.dropna()
-                self.logger.warning(f"Đã xóa {original_len - len(df_cleaned)} hàng có giá trị thiếu không thể điền")
-                
-        # Kiểm tra tính nhất quán của giá
-        # Các điều kiện: high >= open, high >= close, low <= open, low <= close, low <= high
-        # Sử dụng phương thức check_price_consistency từ DataValidator
-        df_cleaned, price_consistency_report = DataValidator.check_price_consistency(df_cleaned)
-        
-        if price_consistency_report:
-            self.logger.warning(price_consistency_report)
-            
-        # Kiểm tra và xử lý ngoại lai bằng IQR
-        if 'close' in df_cleaned.columns:
-            Q1 = df_cleaned['close'].quantile(0.25)
-            Q3 = df_cleaned['close'].quantile(0.75)
-            IQR = Q3 - Q1
-            
-            lower_bound = Q1 - 3 * IQR
-            upper_bound = Q3 + 3 * IQR
-            
-            outliers = df_cleaned[(df_cleaned['close'] < lower_bound) | (df_cleaned['close'] > upper_bound)]
-            
-            if not outliers.empty:
-                self.logger.warning(f"Phát hiện {len(outliers)} ngoại lai trong giá đóng cửa")
-                # Báo cáo về 3 ngoại lai đầu tiên
-                self.logger.debug(f"Ví dụ ngoại lai:\n{outliers.head(3)}")
-                
-                # Cách 1: Xóa ngoại lai
-                # df_cleaned = df_cleaned[(df_cleaned['close'] >= lower_bound) & (df_cleaned['close'] <= upper_bound)]
-                
-                # Cách 2: Giới hạn giá trị ngoại lai
-                df_cleaned.loc[df_cleaned['close'] < lower_bound, 'close'] = lower_bound
-                df_cleaned.loc[df_cleaned['close'] > upper_bound, 'close'] = upper_bound
-                self.logger.info(f"Đã giới hạn {len(outliers)} giá trị ngoại lai")
-                
-        # Kiểm tra đủ ngày giao dịch và tái index
-        if isinstance(df_cleaned.index, pd.DatetimeIndex):
-            # Đảm bảo index được sắp xếp
-            df_cleaned = df_cleaned.sort_index()
-            
-            # Kiểm tra và xử lý index trùng lặp
-            if df_cleaned.index.duplicated().any():
-                duplicated_count = df_cleaned.index.duplicated().sum()
-                self.logger.warning(f"Phát hiện {duplicated_count} timestamp trùng lặp trong dữ liệu")
-                # Giữ lại giá trị cuối cùng của mỗi timestamp trùng lặp
-                df_cleaned = df_cleaned[~df_cleaned.index.duplicated(keep='last')]
-                self.logger.info(f"Đã xử lý {duplicated_count} timestamp trùng lặp, giữ lại giá trị mới nhất")
-            
-            # Kiểm tra khoảng trống lớn trong dữ liệu
-            date_diff = df_cleaned.index.to_series().diff().dt.days
-            large_gaps = date_diff[date_diff > 5]  # khoảng trống > 5 ngày
-            
-            if not large_gaps.empty:
-                self.logger.warning(f"Phát hiện {len(large_gaps)} khoảng trống lớn trong dữ liệu")
-                self.logger.debug(f"Các khoảng trống lớn nhất: {large_gaps.nlargest(3)}")
-                
-                # Tạo lịch giao dịch tiêu chuẩn
-                start_date = df_cleaned.index.min()
-                end_date = df_cleaned.index.max()
-                
-                # Tạo lịch giao dịch tiêu chuẩn (trừ T7, CN)
-                trading_days = pd.date_range(start=start_date, end=end_date, freq='B')  # 'B' = business days
-                
-                # Reindex theo lịch giao dịch tiêu chuẩn
-                df_cleaned = df_cleaned.reindex(trading_days)
-                
-                # Điền giá trị thiếu
-                df_cleaned = df_cleaned.fillna(method='ffill').fillna(method='bfill')
-                
-                self.logger.info(f"Đã tái index dữ liệu theo lịch giao dịch tiêu chuẩn ({len(trading_days)} ngày)")
-        
-        self.logger.info(f"Hoàn tất làm sạch dữ liệu. Kết quả: {len(df_cleaned)} hàng.")
-        return df_cleaned
+        return df_cleaned, outlier_report
 
     async def load_raw_data(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
         """Tải dữ liệu thô với validator và hỗ trợ đa khung thời gian"""
@@ -1804,13 +1094,7 @@ class DataLoader:
     async def load_data(self, symbol: str, timeframe: str, num_candles: int) -> tuple:
         """Tải và xử lý dữ liệu toàn diện với validator"""
         raw_df = await self.load_raw_data(symbol, timeframe, num_candles)
-        
-        # Đầu tiên làm sạch dữ liệu
-        cleaned_df = self.clean_data(raw_df)
-        
-        # Sau đó phát hiện outlier để lấy báo cáo
-        cleaned_df, outlier_report = self.detect_outliers(cleaned_df)
-        
+        cleaned_df, outlier_report = await self.clean_data(raw_df, symbol)
         return raw_df, cleaned_df, outlier_report
 
     async def get_fundamental_data(self, symbol: str) -> dict:
@@ -2038,37 +1322,9 @@ class EnhancedPredictor:
             df_prophet.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
         else:
             # Otherwise reset the index as before
-            df_prophet = df.reset_index()
+            df_prophet = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
             
-            # Check if index was named 'date' or we need to handle a different column name
-            if 'date' in df_prophet.columns:
-                df_prophet.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
-            else:
-                # Try to determine the date column by looking for datetime type columns
-                date_cols = [col for col in df_prophet.columns if pd.api.types.is_datetime64_any_dtype(df_prophet[col])]
-                if date_cols:
-                    df_prophet.rename(columns={date_cols[0]: 'ds', 'close': 'y'}, inplace=True)
-                else:
-                    # If we can't find a date column, use the first column and convert to datetime
-                    first_col = df_prophet.columns[0]
-                    df_prophet.rename(columns={first_col: 'ds', 'close': 'y'}, inplace=True)
-                    try:
-                        df_prophet['ds'] = pd.to_datetime(df_prophet['ds'])
-                    except:
-                        # If conversion fails, create a new 'ds' column with a date range
-                        df_prophet['ds'] = pd.date_range(start='2020-01-01', periods=len(df_prophet), freq='D')
-                        logger.warning("Không thể xác định cột ngày tháng, tạo cột 'ds' mặc định")
-        
-        # Ensure 'ds' column exists and is datetime type
-        if 'ds' not in df_prophet.columns:
-            # If 'ds' column still doesn't exist, create it
-            df_prophet['ds'] = pd.date_range(start='2020-01-01', periods=len(df_prophet), freq='D')
-            logger.warning("Không thể tìm thấy cột 'ds', tạo cột 'ds' mặc định")
-        
-        # Ensure 'ds' is properly formatted as datetime
-        df_prophet['ds'] = pd.to_datetime(df_prophet['ds'])
-        if pd.api.types.is_datetime64_any_dtype(df_prophet['ds']):
-            df_prophet['ds'] = df_prophet['ds'].dt.tz_localize(None)
+        df_prophet['ds'] = pd.to_datetime(df_prophet['ds']).dt.tz_localize(None)
         
         # Cải thiện mô hình Prophet với các tham số điều chỉnh
         model = Prophet(
@@ -2201,7 +1457,6 @@ class EnhancedPredictor:
             # Safer approach: manually build arrays of matching dates
             matched_actual = []
             matched_predicted = []
-            matched_dates = []
             
             for i, date in enumerate(date_index):
                 # Try to find the closest date in forecast
@@ -2211,7 +1466,6 @@ class EnhancedPredictor:
                 if not matching_dates.empty:
                     matched_actual.append(actual[i])
                     matched_predicted.append(forecast_df.loc[matching_dates[0], 'yhat'])
-                    matched_dates.append(date)
             
             if not matched_actual:
                 # If no exact matches, try a more flexible approach with date strings
@@ -2237,7 +1491,6 @@ class EnhancedPredictor:
                         # Add to our lists
                         matched_actual.append(df.iloc[df_idx[0]]['close'])
                         matched_predicted.append(forecast_df.iloc[forecast_idx[0]]['yhat'])
-                        matched_dates.append(pd.to_datetime(date_str))
                 
                 if not matched_actual:
                     logger.error("Không thể đồng bộ ngày giữa df và forecast: không có ngày trùng khớp sau khi kiểm tra")
@@ -2246,7 +1499,6 @@ class EnhancedPredictor:
             # Convert to numpy arrays
             actual = np.array(matched_actual)
             predicted = np.array(matched_predicted)
-            matched_dates = pd.DatetimeIndex(matched_dates)
                 
         except KeyError as e:
             logger.error(f"Không thể đồng bộ ngày giữa df và forecast: {str(e)}")
@@ -2263,82 +1515,28 @@ class EnhancedPredictor:
             logger.warning(f"Quá ít điểm dữ liệu cho đánh giá chính xác: {len(actual)} điểm")
             return 0.3  # Return a moderate score
         
-        # Phân chia tập train/test để đánh giá chính xác hơn
-        # Sử dụng 80% dữ liệu đầu cho train, 20% dữ liệu cuối cho test
-        train_size = int(len(actual) * 0.8)
+        # Tính toán các chỉ số hiệu suất
+        mse = np.mean((actual - predicted) ** 2)
+        mae = np.mean(np.abs(actual - predicted))
+        mape = np.mean(np.abs((actual - predicted) / actual)) * 100
         
-        # Đảm bảo dữ liệu được sắp xếp theo thứ tự thời gian
-        time_sorted_indices = np.argsort(matched_dates)
-        actual = actual[time_sorted_indices]
-        predicted = predicted[time_sorted_indices]
+        # Phát hiện dự báo phi lý
+        avg_price = np.mean(actual)
+        is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in predicted)
         
-        # Chia tập train/test
-        train_actual = actual[:train_size]
-        train_predicted = predicted[:train_size]
-        test_actual = actual[train_size:]
-        test_predicted = predicted[train_size:]
+        # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
+        if is_unrealistic:
+            logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
+            return 0.1  # Giảm mạnh điểm hiệu suất
+            
+        # Đánh giá hiệu suất dựa trên MSE và MAPE
+        # 1/(1+MSE) cho giá trị từ 0-1, càng gần 1 càng tốt
+        mse_score = 1 / (1 + mse)
+        # MAPE < 10% là tốt, >30% là kém
+        mape_score = max(0, 1 - (mape / 30))
         
-        logger.info(f"Đánh giá Prophet: {len(train_actual)} điểm dữ liệu train, {len(test_actual)} điểm dữ liệu test")
-        
-        # Tính toán các chỉ số hiệu suất trên tập test
-        if len(test_actual) > 0:
-            test_mse = np.mean((test_actual - test_predicted) ** 2)
-            test_mae = np.mean(np.abs(test_actual - test_predicted))
-            test_mape = np.mean(np.abs((test_actual - test_predicted) / test_actual)) * 100
-            
-            logger.info(f"Hiệu suất Prophet trên tập test - MSE: {test_mse:.2f}, MAE: {test_mae:.2f}, MAPE: {test_mape:.2f}%")
-            
-            # Đánh giá trên tập train để so sánh
-            train_mse = np.mean((train_actual - train_predicted) ** 2)
-            train_mape = np.mean(np.abs((train_actual - train_predicted) / train_actual)) * 100
-            
-            logger.info(f"Hiệu suất Prophet trên tập train - MSE: {train_mse:.2f}, MAPE: {train_mape:.2f}%")
-            
-            # Kiểm tra hiện tượng overfitting
-            if train_mse < 0.3 * test_mse:
-                logger.warning("Phát hiện có thể overfitting trong mô hình Prophet (hiệu suất train >> test)")
-            
-            # Phát hiện dự báo phi lý
-            avg_price = np.mean(test_actual)
-            is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in test_predicted)
-            
-            # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
-            if is_unrealistic:
-                logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
-                return 0.1  # Giảm mạnh điểm hiệu suất
-                
-            # Đánh giá hiệu suất dựa chủ yếu trên tập test
-            # 1/(1+MSE) cho giá trị từ 0-1, càng gần 1 càng tốt
-            mse_score = 1 / (1 + test_mse)
-            # MAPE < 10% là tốt, >30% là kém
-            mape_score = max(0, 1 - (test_mape / 30))
-            
-            # Kết hợp hai điểm số (70% MSE, 30% MAPE) - trọng số cao cho MSE
-            performance = 0.7 * mse_score + 0.3 * mape_score
-        else:
-            # Nếu không có dữ liệu test, sử dụng toàn bộ dữ liệu
-            logger.warning("Không có đủ dữ liệu cho tập test, sử dụng toàn bộ dữ liệu")
-            
-            # Tính toán trên toàn bộ dữ liệu
-            mse = np.mean((actual - predicted) ** 2)
-            mae = np.mean(np.abs(actual - predicted))
-            mape = np.mean(np.abs((actual - predicted) / actual)) * 100
-            
-            # Phát hiện dự báo phi lý
-            avg_price = np.mean(actual)
-            is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in predicted)
-            
-            # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
-            if is_unrealistic:
-                logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
-                return 0.1  # Giảm mạnh điểm hiệu suất
-                
-            # Đánh giá hiệu suất dựa trên MSE và MAPE
-            mse_score = 1 / (1 + mse)
-            mape_score = max(0, 1 - (mape / 30))
-            
-            # Kết hợp hai điểm số với trọng số thấp hơn do không có tập test riêng
-            performance = 0.6 * mse_score + 0.2 * mape_score + 0.2  # Thêm 0.2 cố định vì không cross-validation
+        # Kết hợp hai điểm số (70% MSE, 30% MAPE)
+        performance = 0.7 * mse_score + 0.3 * mape_score
         
         return performance
 
@@ -2367,37 +1565,9 @@ class EnhancedPredictor:
             df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
         else:
             # Otherwise reset the index as before
-            df_reset = df.reset_index()
+            df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
             
-            # Check if index was named 'date' or we need to handle a different column name
-            if 'date' in df_reset.columns:
-                df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
-            else:
-                # Try to determine the date column by looking for datetime type columns
-                date_cols = [col for col in df_reset.columns if pd.api.types.is_datetime64_any_dtype(df_reset[col])]
-                if date_cols:
-                    df_reset.rename(columns={date_cols[0]: 'ds', 'close': 'y'}, inplace=True)
-                else:
-                    # If we can't find a date column, use the first column and convert to datetime
-                    first_col = df_reset.columns[0]
-                    df_reset.rename(columns={first_col: 'ds', 'close': 'y'}, inplace=True)
-                    try:
-                        df_reset['ds'] = pd.to_datetime(df_reset['ds'])
-                    except:
-                        # If conversion fails, create a new 'ds' column with a date range
-                        df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
-                        logger.warning("Không thể xác định cột ngày tháng, tạo cột 'ds' mặc định")
-        
-        # Ensure 'ds' column exists and is datetime type
-        if 'ds' not in df_reset.columns:
-            # If 'ds' column still doesn't exist, create it
-            df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
-            logger.warning("Không thể tìm thấy cột 'ds', tạo cột 'ds' mặc định")
-        
-        # Ensure 'ds' is properly formatted as datetime
-        df_reset['ds'] = pd.to_datetime(df_reset['ds'])
-        if pd.api.types.is_datetime64_any_dtype(df_reset['ds']):
-            df_reset['ds'] = df_reset['ds'].dt.tz_localize(None)
+        df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
         
         # Cải thiện mô hình Prophet với các tham số điều chỉnh
         model = Prophet(
@@ -2694,7 +1864,7 @@ class AIAnalyzer:
             content_match = re.search(r'"content":"(.*?)(?:\\"|")', result_text)
             if content_match:
                 content = content_match.group(1).replace('\\\\', '\\').replace('\\"', '"')
-                # Tìm kiếm JSON trong nội dung
+                # Tìm kiểm JSON trong nội dung
                 json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
                 if json_match:
                     json_text = json_match.group(1)
@@ -3438,37 +2608,9 @@ def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
         df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
     else:
         # Otherwise reset the index as before
-        df_reset = df.reset_index()
-        
-        # Check if index was named 'date' or we need to handle a different column name
-        if 'date' in df_reset.columns:
-            df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
-        else:
-            # Try to determine the date column by looking for datetime type columns
-            date_cols = [col for col in df_reset.columns if pd.api.types.is_datetime64_any_dtype(df_reset[col])]
-            if date_cols:
-                df_reset.rename(columns={date_cols[0]: 'ds', 'close': 'y'}, inplace=True)
-            else:
-                # If we can't find a date column, use the first column and convert to datetime
-                first_col = df_reset.columns[0]
-                df_reset.rename(columns={first_col: 'ds', 'close': 'y'}, inplace=True)
-                try:
-                    df_reset['ds'] = pd.to_datetime(df_reset['ds'])
-                except:
-                    # If conversion fails, create a new 'ds' column with a date range
-                    df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
-                    logger.warning("Không thể xác định cột ngày tháng, tạo cột 'ds' mặc định cho train_prophet_model")
+        df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
     
-    # Ensure 'ds' column exists and is datetime type
-    if 'ds' not in df_reset.columns:
-        # If 'ds' column still doesn't exist, create it
-        df_reset['ds'] = pd.date_range(start='2020-01-01', periods=len(df_reset), freq='D')
-        logger.warning("Không thể tìm thấy cột 'ds', tạo cột 'ds' mặc định cho train_prophet_model")
-    
-    # Ensure 'ds' is properly formatted as datetime
-    df_reset['ds'] = pd.to_datetime(df_reset['ds'])
-    if pd.api.types.is_datetime64_any_dtype(df_reset['ds']):
-        df_reset['ds'] = df_reset['ds'].dt.tz_localize(None)
+    df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
     
     # Thêm các tham số điều chỉnh Prophet cho quá trình training
     model = Prophet(
@@ -3492,13 +2634,36 @@ def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
     future = model.make_future_dataframe(periods=0)
     future['cap'] = growth_cap
     future['floor'] = growth_floor
-    
-    # Dự báo
     forecast = model.predict(future)
     
-    # Đánh giá hiệu suất
-    predictor = EnhancedPredictor()
-    performance = predictor.evaluate_prophet_performance(df, forecast)
+    # Đánh giá hiệu suất với nhiều chỉ số
+    actual = df['close'].values
+    predicted = forecast['yhat'].values
+    if len(actual) != len(predicted):
+        logger.error(f"Kích thước không khớp trong train_prophet_model: actual ({len(actual)}), predicted ({len(predicted)})")
+        return model, 0.0
+        
+    # Đánh giá bằng nhiều chỉ số
+    mse = np.mean((actual - predicted) ** 2)
+    mae = np.mean(np.abs(actual - predicted))
+    mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+    
+    # Kiểm tra dự báo phi lý
+    is_unrealistic = False
+    avg_price = np.mean(actual)
+    max_deviation = np.max(np.abs(predicted - actual) / actual)
+    if max_deviation > 0.5:  # Nếu có dự báo lệch quá 50%
+        is_unrealistic = True
+        logger.warning(f"Phát hiện dự báo phi lý trong quá trình training: độ lệch tối đa {max_deviation:.2f}")
+    
+    # Tính toán điểm hiệu suất tổng hợp
+    mse_score = 1 / (1 + mse)
+    mape_score = max(0, 1 - (mape / 30))
+    performance = 0.7 * mse_score + 0.3 * mape_score
+    
+    # Giảm điểm nếu có dự báo phi lý
+    if is_unrealistic:
+        performance *= 0.5
     
     return model, performance
 
@@ -3515,71 +2680,21 @@ def train_xgboost_model(df: pd.DataFrame, features: list) -> tuple[xgb.XGBClassi
     """
     if df.empty or len(df) < 100:
         raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost (cần ít nhất 100 điểm dữ liệu)")
-        
     df = df.copy()
-    # Tạo biến mục tiêu (1 nếu giá đóng cửa hôm sau > hôm nay, 0 nếu ngược lại)
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
-    
-    # Xử lý dữ liệu NaN từ việc tạo target và shift
-    df = df.dropna()
-    logger.info(f"Sau khi dropna, còn {len(df)} dòng dữ liệu cho huấn luyện XGBoost")
-    
-    if len(df) < 100:
-        raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost sau khi loại bỏ NaN")
-    
-    # Chuẩn bị dữ liệu
-    X = df[features]
+    X = df[features].shift(1)
     y = df['target']
-    
-    # Chuẩn hóa dữ liệu
-    from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X_scaled = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
-    
-    # Sử dụng cross-validation để đánh giá mô hình
-    from sklearn.model_selection import cross_val_score, TimeSeriesSplit
-    
-    # Sử dụng TimeSeriesSplit cho dữ liệu chuỗi thời gian
-    tscv = TimeSeriesSplit(n_splits=5)
-    
-    # Khởi tạo mô hình
-    model = xgb.XGBClassifier(
-        n_estimators=100,
-        learning_rate=0.05,
-        max_depth=4,
-        min_child_weight=1,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42
-    )
-    
-    # Đánh giá bằng cross-validation với dữ liệu đã chuẩn hóa
-    cv_scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring='accuracy')
-    avg_cv_score = cv_scores.mean()
-    
-    logger.info(f"XGBoost cross-validation scores: {cv_scores}, avg: {avg_cv_score:.4f}")
-    
-    # Xem xét các metric khác
-    from sklearn.model_selection import cross_val_predict
-    from sklearn.metrics import precision_score, recall_score, f1_score
-    
-    # Dự đoán trên tập cross-validation
-    y_pred = cross_val_predict(model, X_scaled, y, cv=tscv)
-    
-    # Tính toán các chỉ số hiệu suất
-    precision = precision_score(y, y_pred)
-    recall = recall_score(y, y_pred)
-    f1 = f1_score(y, y_pred)
-    
-    logger.info(f"XGBoost metrics - Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
-    
-    # Huấn luyện mô hình trên toàn bộ dữ liệu
-    model.fit(X_scaled, y)
-    
-    # Tính hiệu suất cuối cùng là trung bình của accuracy và f1
-    performance = (avg_cv_score + f1) / 2
-    
+    valid_idx = X.notna().all(axis=1) & y.notna()
+    X = X[valid_idx]
+    y = y[valid_idx]
+    if len(X) < 100:
+        raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost")
+    X_train = X.iloc[:-1]
+    y_train = y.iloc[:-1]
+    model = xgb.XGBClassifier()
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_train)
+    performance = accuracy_score(y_train, y_pred)
     return model, performance
 
 # ---------- TELEGRAM COMMAND HANDLERS ----------
@@ -3989,13 +3104,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý command /start"""
-    user = update.effective_user
-    user_id = user.id
-    chat_id = update.effective_chat.id
-    
-    version = "V19.5"
-    username = user.username if user.username else "N/A"
-    
+    user_id = str(update.message.from_user.id)
     if user_id == ADMIN_ID and not await db.is_user_approved(user_id):
         await db.add_approved_user(user_id)
         logger.info(f"Admin {user_id} tự động duyệt.")
@@ -4011,6 +3120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
+    version = "V19.3"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
@@ -4106,35 +3216,6 @@ def main():
     # Xác định chế độ chạy (webhook trên Render hoặc polling cho local)
     is_render = RENDER_EXTERNAL_URL and RENDER_SERVICE_NAME
     
-    # Định nghĩa hàm xử lý khi tắt ứng dụng
-    async def shutdown(application):
-        """Hàm xử lý khi tắt ứng dụng, đảm bảo dọn dẹp tất cả các tác vụ đang chạy"""
-        logger.info("Đang dừng ứng dụng và xử lý các tác vụ chưa hoàn thành...")
-        
-        # Hủy task cleanup_sessions nếu đang chạy
-        if chat_manager.cleanup_task and not chat_manager.cleanup_task.done():
-            logger.info("Đang hủy task cleanup_sessions...")
-            chat_manager.cleanup_task.cancel()
-            try:
-                await chat_manager.cleanup_task
-            except asyncio.CancelledError:
-                logger.info("Task cleanup_sessions đã được hủy thành công")
-        
-        # Dừng scheduler
-        if scheduler.running:
-            logger.info("Đang dừng scheduler...")
-            scheduler.shutdown()
-        
-        # Đóng thread pool executor
-        logger.info("Đang đóng thread pool executor...")
-        executor.shutdown(wait=False)
-        
-        logger.info("Tất cả tác vụ đã được dọn dẹp")
-    
-    # Đăng ký hàm xử lý khi tắt ứng dụng
-    application.add_handler(TypeHandler(Update, lambda update, context: None), group=-1)
-    application.shutdown_handler = shutdown
-    
     if is_render:
         # Thiết lập webhook cho Render
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
@@ -4144,10 +3225,10 @@ def main():
             url_path="webhook",
             webhook_url=webhook_url
         )
-        logger.info(f"Bot V19.5 đã khởi chạy trên Render với webhook: {webhook_url}")
+        logger.info(f"Bot V19.3 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
         # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.5 đã khởi chạy (chế độ local).")
+        logger.info("Bot V19.3 đã khởi chạy (chế độ local).")
         application.run_polling()
 
 if __name__ == "__main__":
