@@ -95,7 +95,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.4"           
+VERSION = "V19.3"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -984,6 +984,7 @@ class DataLoader:
     def __init__(self, source: str = 'vnstock'):
         self.source = source
         self.validator = DataValidator
+        self.logger = logging.getLogger(__name__)
 
     def detect_outliers(self, df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         """Hàm giữ lại để tương thích với code cũ"""
@@ -1261,7 +1262,13 @@ class DataLoader:
     async def load_data(self, symbol: str, timeframe: str, num_candles: int) -> tuple:
         """Tải và xử lý dữ liệu toàn diện với validator"""
         raw_df = await self.load_raw_data(symbol, timeframe, num_candles)
-        cleaned_df, outlier_report = await self.clean_data(raw_df, symbol)
+        
+        # Đầu tiên làm sạch dữ liệu
+        cleaned_df = self.clean_data(raw_df)
+        
+        # Sau đó phát hiện outlier để lấy báo cáo
+        cleaned_df, outlier_report = self.detect_outliers(cleaned_df)
+        
         return raw_df, cleaned_df, outlier_report
 
     async def get_fundamental_data(self, symbol: str) -> dict:
@@ -3287,7 +3294,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
-    version = "V19.4"
+    version = "V19.3"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
@@ -3392,10 +3399,10 @@ def main():
             url_path="webhook",
             webhook_url=webhook_url
         )
-        logger.info(f"Bot V19.4 đã khởi chạy trên Render với webhook: {webhook_url}")
+        logger.info(f"Bot V19.3 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
         # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.4 đã khởi chạy (chế độ local).")
+        logger.info("Bot V19.3 đã khởi chạy (chế độ local).")
         application.run_polling()
 
 if __name__ == "__main__":
