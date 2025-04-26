@@ -43,7 +43,7 @@ from ta import trend, momentum, volatility
 from ta.volume import MFIIndicator
 import feedparser
 import holidays
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
 # Async and persistence imports
 import aiohttp
@@ -1163,6 +1163,36 @@ class EnhancedPredictor:
             df.index = df.index.tz_convert(None)
             df.index = df.index.tz_localize(None)
         
+        # Run sliding window backtest nếu có đủ dữ liệu
+        backtest_results = None
+        model_params = {
+            "changepoint_prior_scale": 0.05,
+            "seasonality_prior_scale": 10,
+            "seasonality_mode": "multiplicative"
+        }
+        
+        if len(df) >= 270:  # Đủ dữ liệu cho sliding window
+            try:
+                backtest_results = self.sliding_window_backtest_prophet(
+                    df, 
+                    forecast_periods=5, 
+                    window_size=180, 
+                    step_size=30, 
+                    min_train_size=90
+                )
+                
+                # Điều chỉnh tham số model dựa trên kết quả backtest
+                if backtest_results.get("success", False) and backtest_results.get("summary", {}).get("avg_mape", 100) < 30:
+                    # Nếu MAPE trung bình thấp hơn 30%, giữ nguyên tham số
+                    logger.info(f"Backtest Prophet thành công với MAPE trung bình: {backtest_results['summary']['avg_mape']:.2f}%")
+                else:
+                    # Nếu MAPE cao, điều chỉnh tham số
+                    logger.info("Điều chỉnh tham số Prophet dựa trên kết quả backtest kém")
+                    model_params["changepoint_prior_scale"] = 0.01
+                    model_params["seasonality_prior_scale"] = 5
+            except Exception as e:
+                logger.warning(f"Lỗi khi thực hiện sliding window backtest: {str(e)}")
+        
         # Fix for "cannot insert date, already exists" error
         if 'date' in df.columns:
             # If 'date' is already a column, use it directly
@@ -1176,9 +1206,9 @@ class EnhancedPredictor:
         
         # Cải thiện mô hình Prophet với các tham số điều chỉnh
         model = Prophet(
-            changepoint_prior_scale=0.05,  # Giảm để giới hạn sự biến động
-            seasonality_prior_scale=10,    # Tăng trọng số cho yếu tố mùa vụ
-            seasonality_mode='multiplicative'  # Phù hợp hơn với dữ liệu tài chính
+            changepoint_prior_scale=model_params["changepoint_prior_scale"],
+            seasonality_prior_scale=model_params["seasonality_prior_scale"],
+            seasonality_mode=model_params["seasonality_mode"]
         )
         
         # Thêm mùa vụ tuần và tháng phù hợp với thị trường chứng khoán
@@ -1235,11 +1265,23 @@ class EnhancedPredictor:
         breakdown_prob = breakdown_prob / total * 100
         sideway_prob = 100 - breakout_prob - breakdown_prob
 
-        return predictions, {
+        scenarios = {
             "Breakout": {"prob": breakout_prob, "target": last_close * 1.05},
             "Breakdown": {"prob": breakdown_prob, "target": last_close * 0.95},
             "Sideway": {"prob": sideway_prob, "target": last_close}
         }
+        
+        # Thêm thông tin backtest nếu có
+        if backtest_results and backtest_results.get("success", False):
+            scenarios["model_info"] = {
+                "backtest": {
+                    "avg_mape": backtest_results["summary"]["avg_mape"],
+                    "avg_direction_accuracy": backtest_results["summary"]["avg_direction_accuracy"],
+                    "windows_tested": backtest_results["summary"]["windows_tested"]
+                }
+            }
+
+        return predictions, scenarios
     
     def _apply_sanity_checks(self, predictions, last_value):
         """
@@ -1274,7 +1316,7 @@ class EnhancedPredictor:
         adjusted_predictions = np.maximum(adjusted_predictions, 0)
         
         return adjusted_predictions
-
+    
     def evaluate_prophet_performance(self, df: pd.DataFrame, forecast: pd.DataFrame) -> float:
         """
         Đánh giá hiệu suất của mô hình Prophet
@@ -1478,6 +1520,92 @@ class EnhancedPredictor:
             performance = 0.5  # Đặt hiệu suất mặc định cho mô hình hồi quy tuyến tính
         
         return forecast, model, performance
+
+    def timeseries_cv_xgboost(self, df: pd.DataFrame, features: list, n_splits: int = 5) -> dict:
+        """
+        Thực hiện time series cross-validation cho mô hình XGBoost.
+        
+        Args:
+            df: DataFrame chứa dữ liệu kỹ thuật
+            features: Danh sách các đặc trưng sử dụng
+            n_splits: Số lượng folds
+            
+        Returns:
+            Dictionary chứa kết quả CV
+        """
+        results = {"success": True, "folds": [], "metrics": {}, "summary": {}}
+        
+        if df.empty or len(df) < 100:
+            return {"success": False, "error": "Không đủ dữ liệu"}
+            
+        # Chuẩn bị dữ liệu
+        df = df.copy()
+        df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
+        X = df[features].shift(1)
+        y = df['target']
+        valid_idx = X.notna().all(axis=1) & y.notna()
+        X = X[valid_idx]
+        y = y[valid_idx]
+        
+        if len(X) < 100:
+            return {"success": False, "error": "Không đủ dữ liệu sau khi lọc"}
+            
+        # Khởi tạo biến theo dõi
+        fold_size = len(X) // n_splits
+        test_size = min(20, fold_size // 4)
+        accuracies = []
+        f1_scores = []
+        
+        # Thực hiện CV với expanding window
+        for i in range(1, n_splits):
+            split_point = i * fold_size
+            if split_point <= 50 or split_point >= len(X) - test_size:
+                continue
+                
+            X_train = X.iloc[:split_point]
+            y_train = y.iloc[:split_point]
+            X_test = X.iloc[split_point:split_point+test_size]
+            y_test = y.iloc[split_point:split_point+test_size]
+            
+            try:
+                model = xgb.XGBClassifier(objective='binary:logistic')
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                
+                accuracy = accuracy_score(y_test, y_pred)
+                f1 = f1_score(y_test, y_pred, pos_label=1, zero_division=0)
+                
+                fold_info = {
+                    "fold": i,
+                    "train_size": len(X_train),
+                    "test_size": len(X_test),
+                    "accuracy": float(accuracy),
+                    "f1": float(f1)
+                }
+                
+                results["folds"].append(fold_info)
+                accuracies.append(accuracy)
+                f1_scores.append(f1)
+                
+            except Exception as e:
+                logger.error(f"Lỗi khi xử lý fold {i}: {str(e)}")
+                
+        # Tổng kết kết quả
+        if accuracies:
+            results["metrics"] = {
+                "accuracies": [float(a) for a in accuracies],
+                "f1_scores": [float(f) for f in f1_scores]
+            }
+            results["summary"] = {
+                "avg_accuracy": float(np.mean(accuracies)),
+                "avg_f1": float(np.mean(f1_scores)),
+                "folds_completed": len(accuracies)
+            }
+        else:
+            results["success"] = False
+            results["error"] = "Không có fold nào hoàn thành"
+            
+        return results
 
     def predict_xgboost_signal(self, df: pd.DataFrame, features: list):
         """
@@ -2338,9 +2466,9 @@ async def migrate_database():
                 logger.error(f"Lỗi khi kiểm tra/thêm cột timeframe: {str(e)}")
                 logger.error(traceback.format_exc())
             
-    except Exception as e:
-        logger.error(f"Lỗi khi kiểm tra/thêm cột trong database: {str(e)}")
-        logger.error(traceback.format_exc())
+            except Exception as e:
+                logger.error(f"Lỗi khi kiểm tra/thêm cột trong database: {str(e)}")
+                logger.error(traceback.format_exc())
 
 def train_prophet_model(df: pd.DataFrame) -> tuple[Prophet, float]:
     """
