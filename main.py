@@ -1062,6 +1062,14 @@ class DataLoader:
             # Đảm bảo index được sắp xếp
             df_cleaned = df_cleaned.sort_index()
             
+            # Kiểm tra và xử lý index trùng lặp
+            if df_cleaned.index.duplicated().any():
+                duplicated_count = df_cleaned.index.duplicated().sum()
+                self.logger.warning(f"Phát hiện {duplicated_count} timestamp trùng lặp trong dữ liệu")
+                # Giữ lại giá trị cuối cùng của mỗi timestamp trùng lặp
+                df_cleaned = df_cleaned[~df_cleaned.index.duplicated(keep='last')]
+                self.logger.info(f"Đã xử lý {duplicated_count} timestamp trùng lặp, giữ lại giá trị mới nhất")
+            
             # Kiểm tra khoảng trống lớn trong dữ liệu
             date_diff = df_cleaned.index.to_series().diff().dt.days
             large_gaps = date_diff[date_diff > 5]  # khoảng trống > 5 ngày
