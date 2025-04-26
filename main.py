@@ -1886,7 +1886,7 @@ class AIAnalyzer:
             logger.error(f"Lỗi khi cố gắng trích xuất JSON từ phản hồi API gốc: {str(e)}")
             return None
 
-    async def generate_report_with_groq(self, prompt: str) -> str:
+    async def generate_report_with_groq(self, prompt: str, temperature: float = 0.7) -> str:
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json"
@@ -1894,7 +1894,8 @@ class AIAnalyzer:
         payload = {
             "model": GROQ_MODEL_NAME,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2048
+            "max_tokens": 2048,
+            "temperature": temperature
         }
         
         async with aiohttp.ClientSession() as session:
@@ -2771,6 +2772,16 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         session = chat_manager.get_session(user_id)
         symbol = session["symbol"]
         
+        # Log thông tin tin nhắn
+        logger.info(f"Xử lý tin nhắn chat từ user {user_id} về mã {symbol}: {message_text[:50]}...")
+        
+        # Phát hiện nếu là câu hỏi về phân bổ vốn hoặc tiềm năng
+        is_allocation_question = any(phrase in message_text.lower() for phrase in ["phân bổ", "phân phối", "đầu tư", "tỷ trọng", "bao nhiêu %"])
+        is_potential_question = any(phrase in message_text.lower() for phrase in ["tiềm năng", "triển vọng", "tương lai", "dài hạn", "lâu dài"])
+        
+        if is_allocation_question or is_potential_question:
+            logger.info(f"Phát hiện câu hỏi {'phân bổ vốn' if is_allocation_question else 'tiềm năng'} - sẽ trả lời chuyên sâu")
+        
         # Thêm tin nhắn vào lịch sử chat
         chat_manager.add_message(user_id, "user", message_text)
         
@@ -2827,6 +2838,16 @@ Thông tin cơ bản:
 - Vốn hóa: {fundamental_data.get('marketCap', 'N/A')}
 - P/E: {fundamental_data.get('trailingPE', 'N/A')}
 - EPS: {fundamental_data.get('epsTrailingTwelveMonths', 'N/A')}
+- ROE: {fundamental_data.get('returnOnEquity', 'N/A')}
+- Tăng trưởng doanh thu: {fundamental_data.get('revenueGrowth', 'N/A')}
+- Biên lợi nhuận: {fundamental_data.get('profitMargins', 'N/A')}
+- Nợ/Vốn chủ sở hữu: {fundamental_data.get('debtToEquity', 'N/A')}
+- Cổ tức: {fundamental_data.get('dividendYield', 'N/A')}
+- Beta: {fundamental_data.get('beta', 'N/A')}
+
+Khi trả lời về phương án phân bổ vốn, hãy đề xuất cụ thể: X% vào cổ phiếu này, Y% để dự phòng và giải thích lý do dựa trên phân tích fundamental và technical. Cung cấp các kịch bản và tỷ lệ risk/reward.
+
+Khi đánh giá tiềm năng công ty, hãy phân tích mô hình kinh doanh, lợi thế cạnh tranh, triển vọng ngành và chất lượng ban lãnh đạo. Nêu rõ điểm mạnh, điểm yếu và so sánh với đối thủ trong ngành.
 """
         
         # Lấy lịch sử chat
@@ -2846,22 +2867,36 @@ Thông tin cơ bản:
         if not chat_history:
             # Nếu đây là tin nhắn đầu tiên, thêm ngữ cảnh
             system_prompt = {
-                "role": "user",
+                "role": "system",
                 "parts": [context_text]
             }
-            model_response = {
-                "role": "model",
-                "parts": ["Tôi đã hiểu về mã cổ phiếu này và sẽ tư vấn cho bạn."]
-            }
-            chat_history = [system_prompt, model_response]
+            chat_history = [system_prompt]
+        
+        # Nếu có tin nhắn đầu tiên là báo cáo (assistant), thêm vào hệ thống prompt để tăng ngữ cảnh
+        if len(session["messages"]) > 0 and session["messages"][0]["role"] == "assistant":
+            # Trường hợp này là khi báo cáo đã được thêm vào lịch sử ở bước analyze_command
+            report_summary = f"""
+
+**Báo cáo phân tích trước đó:**
+{session["messages"][0]["parts"]}
+"""
+            # Cập nhật ngữ cảnh hệ thống với báo cáo
+            if not chat_history:
+                system_prompt = {
+                    "role": "system",
+                    "parts": [context_text + report_summary]
+                }
+                chat_history = [system_prompt]
+            elif chat_history[0]["role"] == "system":
+                chat_history[0]["parts"] = [context_text + report_summary]
         
         # Gọi Gemini API để có phản hồi
         try:
             # Tạo model chat Gemini
             chat = ai_analyzer.gemini_model.start_chat(history=chat_history)
             
-            # Gửi tin nhắn và nhận phản hồi
-            response = await chat.send_message_async(message_text)
+            # Gửi tin nhắn và nhận phản hồi với temperature thấp hơn cho câu trả lời cô đọng, chuyên sâu
+            response = await chat.send_message_async(message_text, generation_config={"temperature": 0.3})
             reply_text = response.text
         except Exception as e:
             logger.error(f"Lỗi gọi Gemini API cho chat: {str(e)}")
@@ -2873,8 +2908,11 @@ Thông tin cơ bản:
                     role_text = "User" if msg["role"] == "user" else "Assistant"
                     history_text += f"{role_text}: {msg['parts']}\n\n"
                 
+                # Đảm bảo báo cáo ban đầu được thêm vào ngữ cảnh thông qua history_text
+                # và cũng thêm hướng dẫn đề xuất phân bổ vốn và đánh giá tiềm năng
+                
                 prompt = f"{context_text}\n\n{history_text}\nUser: {message_text}\n\nAssistant:"
-                reply_text = await ai_analyzer.generate_report_with_groq(prompt)
+                reply_text = await ai_analyzer.generate_report_with_groq(prompt, temperature=0.3)
             except Exception as e2:
                 logger.error(f"Lỗi fallback sang Groq cho chat: {str(e2)}")
                 reply_text = f"❌ Xin lỗi, tôi không thể phản hồi lúc này. Lỗi: {str(e)}"
@@ -3004,6 +3042,9 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Khởi tạo phiên chat AI cá nhân cho mã cổ phiếu
         user_id = str(update.effective_user.id)
         chat_manager.start_session(user_id, symbol)
+        
+        # Thêm báo cáo phân tích chi tiết vào lịch sử để làm ngữ cảnh
+        chat_manager.add_message(user_id, "assistant", report)
         
         # Gửi tin nhắn để bắt đầu cuộc trò chuyện
         await update.message.reply_text(
