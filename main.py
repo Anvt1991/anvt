@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
 import time
+from contextlib import contextmanager
 
 # Data processing imports
 import pandas as pd
@@ -96,7 +97,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.3"           
+VERSION = "V19.5"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -3988,7 +3989,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý command /start"""
-    user_id = str(update.message.from_user.id)
+    user = update.effective_user
+    user_id = user.id
+    chat_id = update.effective_chat.id
+    
+    version = "V19.5"
+    username = user.username if user.username else "N/A"
+    
     if user_id == ADMIN_ID and not await db.is_user_approved(user_id):
         await db.add_approved_user(user_id)
         logger.info(f"Admin {user_id} tự động duyệt.")
@@ -4004,7 +4011,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
-    version = "V19.5"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
