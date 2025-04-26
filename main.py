@@ -95,7 +95,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.2"           
+VERSION = "V19.3"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -131,6 +131,79 @@ class RedisManager:
 redis_manager = RedisManager()
 
 executor = ThreadPoolExecutor(max_workers=5)
+
+# ---------- QUẢN LÝ PHIÊN CHAT ----------
+class ChatSessionManager:
+    """
+    Quản lý các phiên chat AI với người dùng.
+    Lưu trữ thông tin phiên, lịch sử tin nhắn và xử lý timeout.
+    """
+    def __init__(self):
+        self.sessions = {}
+        self.cleanup_task = None
+    
+    def start_session(self, user_id: str, symbol: str):
+        """Khởi tạo một phiên chat mới"""
+        self.sessions[user_id] = {
+            "symbol": symbol,
+            "messages": [],
+            "start_time": datetime.now(TZ)
+        }
+        # Đảm bảo chỉ có một task dọn dẹp đang chạy
+        if self.cleanup_task is None or self.cleanup_task.done():
+            self.cleanup_task = asyncio.create_task(self.cleanup_sessions())
+    
+    def end_session(self, user_id: str):
+        """Kết thúc phiên chat hiện tại của người dùng"""
+        if user_id in self.sessions:
+            del self.sessions[user_id]
+            return True
+        return False
+    
+    def add_message(self, user_id: str, role: str, content: str):
+        """Thêm tin nhắn vào phiên chat"""
+        if user_id in self.sessions:
+            self.sessions[user_id]["messages"].append({
+                "role": role,
+                "parts": content
+            })
+            # Cập nhật thời gian bắt đầu để reset timeout
+            self.sessions[user_id]["start_time"] = datetime.now(TZ)
+            return True
+        return False
+    
+    def get_session(self, user_id: str):
+        """Lấy thông tin phiên chat của người dùng"""
+        return self.sessions.get(user_id)
+    
+    def has_active_session(self, user_id: str):
+        """Kiểm tra xem người dùng có phiên chat đang hoạt động không"""
+        return user_id in self.sessions
+    
+    async def cleanup_sessions(self):
+        """Dọn dẹp các phiên chat quá hạn (sau 15 phút không hoạt động)"""
+        while True:
+            await asyncio.sleep(60)  # Kiểm tra mỗi phút
+            now = datetime.now(TZ)
+            expired_users = []
+            
+            for user_id, session in self.sessions.items():
+                # Kiểm tra thời gian không hoạt động
+                inactive_time = now - session["start_time"]
+                if inactive_time.total_seconds() > 900:  # 15 phút
+                    expired_users.append(user_id)
+            
+            # Xóa các phiên hết hạn
+            for user_id in expired_users:
+                logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
+                self.end_session(user_id)
+            
+            # Dừng task nếu không còn phiên nào
+            if not self.sessions:
+                break
+
+# Khởi tạo chat session manager toàn cục
+chat_manager = ChatSessionManager()
 
 async def run_in_thread(func, *args, **kwargs):
     loop = asyncio.get_running_loop()
@@ -2666,7 +2739,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = str(update.message.from_user.id)
     
     # Kiểm tra xem người dùng đã được phê duyệt chưa
-    if not await db.is_user_approved(user_id):
+    if not await is_user_approved(user_id):
         # Thông báo admin về người dùng mới
         await notify_admin_new_user(update, context)
         return
@@ -2677,12 +2750,146 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"Lỗi cập nhật thời gian hoạt động: {str(e)}")
     
-    # Hướng dẫn người dùng
+    # Kiểm tra xem user có phiên chat đang hoạt động không
+    if chat_manager.has_active_session(user_id):
+        await handle_chat_message(update, context)
+        return
+    
+    # Nếu không có phiên chat, hiển thị hướng dẫn
     await update.message.reply_text(
         "Vui lòng sử dụng lệnh /analyze để phân tích cổ phiếu.\n"
         "Ví dụ: /analyze VNM 1D 100\n\n"
         "Hoặc /help để xem hướng dẫn sử dụng."
     )
+
+async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý tin nhắn chat khi người dùng đang trong phiên chat"""
+    user_id = str(update.message.from_user.id)
+    
+    try:
+        message_text = update.message.text
+        session = chat_manager.get_session(user_id)
+        symbol = session["symbol"]
+        
+        # Thêm tin nhắn vào lịch sử chat
+        chat_manager.add_message(user_id, "user", message_text)
+        
+        # Thông báo đang xử lý
+        processing_message = await update.message.reply_text("⏳ Đang xử lý câu hỏi của bạn...")
+        
+        # Chuẩn bị prompt context cho Gemini
+        ai_analyzer = AIAnalyzer()
+        
+        # Lấy dữ liệu cơ bản về cổ phiếu để tạo ngữ cảnh
+        loader = DataLoader()
+        main_df = None
+        fundamental_data = {}
+        
+        try:
+            # Tải dữ liệu cơ bản (chỉ timeframe mặc định)
+            timeframe = DEFAULT_TIMEFRAME
+            num_candles = DEFAULT_CANDLES
+            
+            # Tải dữ liệu chứng khoán
+            raw_df, cleaned_df, outlier_report = await loader.load_data(symbol, timeframe, num_candles)
+            main_df = raw_df
+            
+            # Tải dữ liệu cơ bản nếu có
+            if not DataValidator.is_index(symbol):
+                fundamental_data = await loader.get_fundamental_data(symbol)
+        except Exception as e:
+            logger.error(f"Lỗi tải dữ liệu cho chat: {str(e)}")
+            # Tiếp tục mà không cần dữ liệu
+        
+        # Tạo ngữ cảnh cho Gemini
+        context_info = {
+            "symbol": symbol,
+            "current_price": main_df['close'].iloc[-1] if main_df is not None and len(main_df) > 0 else None,
+            "change_pct": main_df['close'].pct_change().iloc[-1]*100 if main_df is not None and len(main_df) > 1 else None,
+            "fundamental_data": fundamental_data
+        }
+        
+        # Chuẩn bị các giá trị hiển thị với xử lý None
+        current_price_str = f"{context_info['current_price']:.2f}" if context_info['current_price'] is not None else "N/A"
+        change_pct_str = f"{context_info['change_pct']:.2f}" if context_info['change_pct'] is not None else "N/A"
+        
+        context_text = f"""
+Bạn là chuyên gia tư vấn đầu tư chứng khoán Việt Nam. Hãy trò chuyện với nhà đầu tư về mã {symbol}.
+
+Thông tin cơ bản:
+- Mã: {symbol}
+- Giá hiện tại: {current_price_str} VND
+- Thay đổi gần nhất: {change_pct_str}%
+"""
+        if fundamental_data:
+            context_text += f"""
+Thông tin cơ bản:
+- Vốn hóa: {fundamental_data.get('marketCap', 'N/A')}
+- P/E: {fundamental_data.get('trailingPE', 'N/A')}
+- EPS: {fundamental_data.get('epsTrailingTwelveMonths', 'N/A')}
+"""
+        
+        # Lấy lịch sử chat
+        chat_history = []
+        for message in session["messages"]:
+            chat_history.append({
+                "role": message["role"],
+                "parts": [message["parts"]]
+            })
+        
+        # Tạo câu hỏi mới
+        user_query = {
+            "role": "user", 
+            "parts": [message_text]
+        }
+        
+        if not chat_history:
+            # Nếu đây là tin nhắn đầu tiên, thêm ngữ cảnh
+            system_prompt = {
+                "role": "user",
+                "parts": [context_text]
+            }
+            model_response = {
+                "role": "model",
+                "parts": ["Tôi đã hiểu về mã cổ phiếu này và sẽ tư vấn cho bạn."]
+            }
+            chat_history = [system_prompt, model_response]
+        
+        # Gọi Gemini API để có phản hồi
+        try:
+            # Tạo model chat Gemini
+            chat = ai_analyzer.gemini_model.start_chat(history=chat_history)
+            
+            # Gửi tin nhắn và nhận phản hồi
+            response = await chat.send_message_async(message_text)
+            reply_text = response.text
+        except Exception as e:
+            logger.error(f"Lỗi gọi Gemini API cho chat: {str(e)}")
+            # Fallback sang Groq nếu cần
+            try:
+                # Tạo prompt từ lịch sử chat
+                history_text = ""
+                for msg in session["messages"]:
+                    role_text = "User" if msg["role"] == "user" else "Assistant"
+                    history_text += f"{role_text}: {msg['parts']}\n\n"
+                
+                prompt = f"{context_text}\n\n{history_text}\nUser: {message_text}\n\nAssistant:"
+                reply_text = await ai_analyzer.generate_report_with_groq(prompt)
+            except Exception as e2:
+                logger.error(f"Lỗi fallback sang Groq cho chat: {str(e2)}")
+                reply_text = f"❌ Xin lỗi, tôi không thể phản hồi lúc này. Lỗi: {str(e)}"
+        
+        # Lưu phản hồi vào lịch sử chat
+        chat_manager.add_message(user_id, "model", reply_text)
+        
+        # Gửi phản hồi cho người dùng
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+        await update.message.reply_text(reply_text)
+        
+    except Exception as e:
+        logger.error(f"Lỗi xử lý chat: {str(e)}")
+        logger.error(traceback.format_exc())
+        await update.message.reply_text(f"❌ Lỗi xử lý chat: {str(e)}")
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý lệnh /analyze để phân tích chứng khoán"""
@@ -2793,6 +3000,15 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             formatted_report = f"<b>📈 Báo cáo cổ phiếu {symbol} [{timeframe}] - {datetime.now(TZ).strftime('%d-%m-%Y %H:%M')}</b>\n\n<pre>{html.escape(report)}</pre>"
             
         await update.message.reply_text(formatted_report, parse_mode='HTML')
+        
+        # Khởi tạo phiên chat AI cá nhân cho mã cổ phiếu
+        user_id = str(update.effective_user.id)
+        chat_manager.start_session(user_id, symbol)
+        
+        # Gửi tin nhắn để bắt đầu cuộc trò chuyện
+        await update.message.reply_text(
+            f"🤖 Bạn có câu hỏi gì thêm về {symbol}? Hãy nhắn ngay nhé! (Gõ /exit để kết thúc)"
+        )
     
     except ValueError as e:
         await update.message.reply_text(f"⚠️ Lỗi: {str(e)}")
@@ -2821,6 +3037,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 `/analyze SSI 1W 50` - Phân tích SSI với 50 nến trên khung tuần
 `/analyze VNINDEX 1D 200` - Phân tích chỉ số VNINDEX với 200 nến ngày
 
+💬 *Chat AI Cá Nhân*
+- Sau khi phân tích cổ phiếu, bot sẽ tự động mở phiên chat AI để bạn có thể hỏi thêm
+- Chỉ cần nhắn tin trực tiếp với bot để được tư vấn thêm về mã chứng khoán
+- Sử dụng /exit để kết thúc phiên chat
+- Phiên chat sẽ tự động đóng sau 15 phút không hoạt động
+
 📊 *Phân biệt Cổ phiếu và Chỉ số*
 - *Cổ phiếu* là chứng khoán của một công ty cụ thể (VD: SSI, VNM)
 - *Chỉ số* là thước đo tổng thể của thị trường hoặc một phân khúc thị trường:
@@ -2833,6 +3055,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔧 *Chức năng khác*
 /help - Hiển thị hướng dẫn sử dụng
 /getid - Lấy ID người dùng để yêu cầu quyền truy cập
+/exit - Kết thúc phiên chat AI
 
 📅 Bot cập nhật liên tục và thêm tính năng mới. Hãy sử dụng /help để xem các cập nhật mới nhất!
 """
@@ -2844,7 +3067,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == ADMIN_ID and not await db.is_user_approved(user_id):
         await db.add_approved_user(user_id)
         logger.info(f"Admin {user_id} tự động duyệt.")
-    if not await db.is_user_approved(user_id):
+    if not await is_user_approved(user_id):
         await notify_admin_new_user(update, context)
         return
     
@@ -2856,7 +3079,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
-    version = "V19.2"
+    version = "V19.3"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
@@ -2866,6 +3089,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  Ví dụ: /analyze VNM 1D 100\n"
         "  Khung TG: 5m, 15m, 30m, 1h, 4h, 1D, 1W, 1M\n"
         "- /getid - Lấy ID người dùng.\n"
+        "- /exit - Kết thúc phiên chat AI.\n"
         "- /help - Xem hướng dẫn chi tiết.\n"
         "💡 **Bắt đầu nào!**"
     )
@@ -2876,22 +3100,38 @@ async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"ID của bạn: {user_id}")
 
 async def approve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xử lý command /approve - chỉ admin được dùng"""
-    if str(update.message.from_user.id) != ADMIN_ID:
-        await update.message.reply_text("❌ Chỉ admin dùng được lệnh này!")
+    """Phê duyệt người dùng mới"""
+    if str(update.effective_user.id) != ADMIN_ID:
+        await update.message.reply_text("⛔ Chỉ admin mới có thể sử dụng lệnh này.")
         return
-    
-    if len(context.args) != 1:
-        await update.message.reply_text("❌ Nhập user_id: /approve 123456789")
+
+    if not context.args or len(context.args) < 1:
+        await update.message.reply_text("⚠️ Cú pháp: /approve <user_id> [ghi_chú]")
         return
-    
+
     user_id = context.args[0]
-    if not await db.is_user_approved(user_id):
-        await db.add_approved_user(user_id, approved_at=datetime.now(TZ), 
-                                notes="Approved by admin via command")
-        await update.message.reply_text(f"✅ Đã duyệt {user_id}")
+    notes = " ".join(context.args[1:]) if len(context.args) > 1 else None
+    
+    try:
+        await db.add_approved_user(user_id, notes=notes)
+        await update.message.reply_text(f"✅ Đã phê duyệt người dùng {user_id}.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
+
+async def exit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý command /exit để kết thúc phiên chat AI"""
+    user_id = str(update.message.from_user.id)
+    
+    if not await is_user_approved(user_id):
+        await notify_admin_new_user(update, context)
+        return
+    
+    if chat_manager.has_active_session(user_id):
+        symbol = chat_manager.get_session(user_id)["symbol"]
+        chat_manager.end_session(user_id)
+        await update.message.reply_text(f"✅ Đã kết thúc phiên chat về {symbol}.")
     else:
-        await update.message.reply_text(f"ℹ️ {user_id} đã được duyệt")
+        await update.message.reply_text("❌ Bạn không có phiên chat nào đang hoạt động.")
 
 # ---------- MAIN ----------
 def main():
@@ -2907,6 +3147,7 @@ def main():
     application.add_handler(CommandHandler("getid", get_id))
     application.add_handler(CommandHandler("approve", approve_user))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("exit", exit_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     # Thiết lập event loop
@@ -2943,10 +3184,10 @@ def main():
             url_path="webhook",
             webhook_url=webhook_url
         )
-        logger.info(f"Bot V19.2 đã khởi chạy trên Render với webhook: {webhook_url}")
+        logger.info(f"Bot V19.3 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
         # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.2 đã khởi chạy (chế độ local).")
+        logger.info("Bot V19.3 đã khởi chạy (chế độ local).")
         application.run_polling()
 
 if __name__ == "__main__":
