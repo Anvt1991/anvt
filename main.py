@@ -95,7 +95,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.3"           
+VERSION = "V19.4"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -611,10 +611,100 @@ class DataValidator:
     
     @staticmethod
     def validate_api_response(response: dict, expected_keys: list) -> bool:
-        """Xác thực phản hồi API có đầy đủ các trường dữ liệu cần thiết hay không"""
-        if not response:
+        """Xác thực cấu trúc phản hồi API có chứa các khóa bắt buộc không"""
+        if not isinstance(response, dict):
             return False
         return all(key in response for key in expected_keys)
+        
+    @staticmethod
+    def check_price_consistency(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+        """
+        Kiểm tra và sửa tính nhất quán của giá (OHLC).
+        
+        Các điều kiện kiểm tra:
+        1. Giá cao (high) phải >= giá mở cửa (open)
+        2. Giá cao (high) phải >= giá đóng cửa (close)
+        3. Giá thấp (low) phải <= giá mở cửa (open)
+        4. Giá thấp (low) phải <= giá đóng cửa (close)
+        5. Giá thấp (low) phải <= giá cao (high)
+        
+        Returns:
+            tuple: (DataFrame đã sửa, báo cáo về các vấn đề nhất quán)
+        """
+        price_consistency_report = ""
+        df_cleaned = df.copy()
+        
+        if not all(col in df_cleaned.columns for col in ['open', 'high', 'low', 'close']):
+            return df_cleaned, "Không có đủ cột OHLC để kiểm tra tính nhất quán của giá."
+            
+        # Kiểm tra các điều kiện hợp lệ của giá
+        # 1. Giá cao (high) phải >= giá mở cửa (open)
+        high_open_inconsistent = df_cleaned[df_cleaned['high'] < df_cleaned['open']]
+        # 2. Giá cao (high) phải >= giá đóng cửa (close)
+        high_close_inconsistent = df_cleaned[df_cleaned['high'] < df_cleaned['close']]
+        # 3. Giá thấp (low) phải <= giá mở cửa (open)
+        low_open_inconsistent = df_cleaned[df_cleaned['low'] > df_cleaned['open']]
+        # 4. Giá thấp (low) phải <= giá đóng cửa (close)
+        low_close_inconsistent = df_cleaned[df_cleaned['low'] > df_cleaned['close']]
+        # 5. Giá thấp (low) phải <= giá cao (high)
+        low_high_inconsistent = df_cleaned[df_cleaned['low'] > df_cleaned['high']]
+        
+        # Tổng hợp báo cáo các vấn đề nhất quán về giá
+        total_inconsistencies = (len(high_open_inconsistent) + len(high_close_inconsistent) + 
+                               len(low_open_inconsistent) + len(low_close_inconsistent) + 
+                               len(low_high_inconsistent))
+        
+        if total_inconsistencies > 0:
+            price_consistency_report = "--- Báo cáo kiểm tra tính nhất quán của giá ---\n"
+            price_consistency_report += f"Tổng số hàng có dữ liệu giá không nhất quán: {total_inconsistencies}\n"
+            
+            if len(high_open_inconsistent) > 0:
+                price_consistency_report += f"- Giá cao < Giá mở cửa: {len(high_open_inconsistent)} hàng\n"
+            if len(high_close_inconsistent) > 0:
+                price_consistency_report += f"- Giá cao < Giá đóng cửa: {len(high_close_inconsistent)} hàng\n"
+            if len(low_open_inconsistent) > 0:
+                price_consistency_report += f"- Giá thấp > Giá mở cửa: {len(low_open_inconsistent)} hàng\n"
+            if len(low_close_inconsistent) > 0:
+                price_consistency_report += f"- Giá thấp > Giá đóng cửa: {len(low_close_inconsistent)} hàng\n"
+            if len(low_high_inconsistent) > 0:
+                price_consistency_report += f"- Giá thấp > Giá cao: {len(low_high_inconsistent)} hàng\n"
+            
+            # Hiển thị các ví dụ về dữ liệu không nhất quán
+            if len(low_high_inconsistent) > 0:  # Đây là lỗi nghiêm trọng nhất
+                example_rows = low_high_inconsistent.head(3)
+                price_consistency_report += "\nVí dụ về giá thấp > giá cao:\n"
+                for idx, row in example_rows.iterrows():
+                    date_str = idx.strftime('%Y-%m-%d') if isinstance(idx, pd.Timestamp) else str(idx)
+                    price_consistency_report += f"  {date_str}: Low={row['low']:.2f}, High={row['high']:.2f}\n"
+            
+            # Tự động sửa lỗi dữ liệu
+            price_consistency_report += "\nÁp dụng sửa lỗi tự động cho dữ liệu không nhất quán...\n"
+            
+            # Tạo bản sao giá trị ban đầu để so sánh
+            original_len = len(df_cleaned)
+            
+            # Sửa lỗi: Đảm bảo low <= high
+            inconsistent_indices = low_high_inconsistent.index
+            if len(inconsistent_indices) > 0:
+                # Đổi giá trị low và high cho nhau
+                temp_high = df_cleaned.loc[inconsistent_indices, 'high'].copy()
+                df_cleaned.loc[inconsistent_indices, 'high'] = df_cleaned.loc[inconsistent_indices, 'low']
+                df_cleaned.loc[inconsistent_indices, 'low'] = temp_high
+            
+            # Sửa lỗi: Đảm bảo high >= max(open, close)
+            df_cleaned['true_high'] = df_cleaned[['high', 'open', 'close']].max(axis=1)
+            df_cleaned['high'] = df_cleaned['true_high']
+            
+            # Sửa lỗi: Đảm bảo low <= min(open, close)
+            df_cleaned['true_low'] = df_cleaned[['low', 'open', 'close']].min(axis=1)
+            df_cleaned['low'] = df_cleaned['true_low']
+            
+            # Xóa các cột tạm
+            df_cleaned = df_cleaned.drop(['true_high', 'true_low'], axis=1, errors='ignore')
+            
+            price_consistency_report += f"Đã sửa {total_inconsistencies} hàng có dữ liệu không nhất quán.\n"
+            
+        return df_cleaned, price_consistency_report
 
 # ---------- KẾT NỐI AIOSQLITE & MIGRATIONS (DEPRECATED) ----------
 class DBManager:
@@ -899,26 +989,103 @@ class DataLoader:
         """Hàm giữ lại để tương thích với code cũ"""
         return self.validator.detect_and_handle_outliers(df, method='iqr')
 
-    async def clean_data(self, df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, str]:
-        """Làm sạch dữ liệu với xác thực validator"""
-        # Chuẩn hóa DataFrame
-        df = self.validator.normalize_dataframe(df)
+    def clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Làm sạch dữ liệu sử dụng validator
+        - Chuẩn hóa DataFrame
+        - Xử lý dữ liệu thiếu
+        - Kiểm tra tính nhất quán của giá
+        - Xử lý ngoại lai
+        - Đảm bảo đủ ngày giao dịch
+        """
+        self.logger.info(f"Bắt đầu làm sạch dữ liệu cho {len(df)} hàng...")
         
-        # Phát hiện và xử lý outlier
-        df_cleaned, outlier_report = self.validator.detect_and_handle_outliers(df)
+        if df.empty:
+            self.logger.warning("DataFrame rỗng, không thể làm sạch")
+            return df
+            
+        # Tạo bản sao để không làm thay đổi dữ liệu gốc
+        df_cleaned = df.copy()
         
-        # Đảm bảo đủ ngày giao dịch
-        if len(df_cleaned) > 5:  # Chỉ thực hiện nếu có đủ dữ liệu
-            try:
-                trading_days = self.validator.calculate_trading_days(
-                    df_cleaned.index.min(), 
-                    df_cleaned.index.max()
-                )
-                df_cleaned = df_cleaned[df_cleaned.index.isin(trading_days)]
-            except Exception as e:
-                logger.warning(f"Không thể lọc theo ngày giao dịch: {str(e)}")
+        # Chuẩn hóa tên cột sang chữ thường
+        df_cleaned.columns = [col.lower() for col in df_cleaned.columns]
         
-        return df_cleaned, outlier_report
+        # Kiểm tra null
+        null_counts = df_cleaned.isnull().sum()
+        if null_counts.sum() > 0:
+            self.logger.warning(f"Phát hiện giá trị thiếu:\n{null_counts[null_counts > 0]}")
+            
+            # Điền giá trị thiếu với forward fill, sau đó backward fill
+            df_cleaned = df_cleaned.fillna(method='ffill').fillna(method='bfill')
+            
+            # Nếu vẫn còn giá trị thiếu, xóa các hàng đó
+            if df_cleaned.isnull().sum().sum() > 0:
+                original_len = len(df_cleaned)
+                df_cleaned = df_cleaned.dropna()
+                self.logger.warning(f"Đã xóa {original_len - len(df_cleaned)} hàng có giá trị thiếu không thể điền")
+                
+        # Kiểm tra tính nhất quán của giá
+        # Các điều kiện: high >= open, high >= close, low <= open, low <= close, low <= high
+        # Sử dụng phương thức check_price_consistency từ DataValidator
+        df_cleaned, price_consistency_report = DataValidator.check_price_consistency(df_cleaned)
+        
+        if price_consistency_report:
+            self.logger.warning(price_consistency_report)
+            
+        # Kiểm tra và xử lý ngoại lai bằng IQR
+        if 'close' in df_cleaned.columns:
+            Q1 = df_cleaned['close'].quantile(0.25)
+            Q3 = df_cleaned['close'].quantile(0.75)
+            IQR = Q3 - Q1
+            
+            lower_bound = Q1 - 3 * IQR
+            upper_bound = Q3 + 3 * IQR
+            
+            outliers = df_cleaned[(df_cleaned['close'] < lower_bound) | (df_cleaned['close'] > upper_bound)]
+            
+            if not outliers.empty:
+                self.logger.warning(f"Phát hiện {len(outliers)} ngoại lai trong giá đóng cửa")
+                # Báo cáo về 3 ngoại lai đầu tiên
+                self.logger.debug(f"Ví dụ ngoại lai:\n{outliers.head(3)}")
+                
+                # Cách 1: Xóa ngoại lai
+                # df_cleaned = df_cleaned[(df_cleaned['close'] >= lower_bound) & (df_cleaned['close'] <= upper_bound)]
+                
+                # Cách 2: Giới hạn giá trị ngoại lai
+                df_cleaned.loc[df_cleaned['close'] < lower_bound, 'close'] = lower_bound
+                df_cleaned.loc[df_cleaned['close'] > upper_bound, 'close'] = upper_bound
+                self.logger.info(f"Đã giới hạn {len(outliers)} giá trị ngoại lai")
+                
+        # Kiểm tra đủ ngày giao dịch và tái index
+        if isinstance(df_cleaned.index, pd.DatetimeIndex):
+            # Đảm bảo index được sắp xếp
+            df_cleaned = df_cleaned.sort_index()
+            
+            # Kiểm tra khoảng trống lớn trong dữ liệu
+            date_diff = df_cleaned.index.to_series().diff().dt.days
+            large_gaps = date_diff[date_diff > 5]  # khoảng trống > 5 ngày
+            
+            if not large_gaps.empty:
+                self.logger.warning(f"Phát hiện {len(large_gaps)} khoảng trống lớn trong dữ liệu")
+                self.logger.debug(f"Các khoảng trống lớn nhất: {large_gaps.nlargest(3)}")
+                
+                # Tạo lịch giao dịch tiêu chuẩn
+                start_date = df_cleaned.index.min()
+                end_date = df_cleaned.index.max()
+                
+                # Tạo lịch giao dịch tiêu chuẩn (trừ T7, CN)
+                trading_days = pd.date_range(start=start_date, end=end_date, freq='B')  # 'B' = business days
+                
+                # Reindex theo lịch giao dịch tiêu chuẩn
+                df_cleaned = df_cleaned.reindex(trading_days)
+                
+                # Điền giá trị thiếu
+                df_cleaned = df_cleaned.fillna(method='ffill').fillna(method='bfill')
+                
+                self.logger.info(f"Đã tái index dữ liệu theo lịch giao dịch tiêu chuẩn ({len(trading_days)} ngày)")
+        
+        self.logger.info(f"Hoàn tất làm sạch dữ liệu. Kết quả: {len(df_cleaned)} hàng.")
+        return df_cleaned
 
     async def load_raw_data(self, symbol: str, timeframe: str, num_candles: int) -> pd.DataFrame:
         """Tải dữ liệu thô với validator và hỗ trợ đa khung thời gian"""
@@ -1864,7 +2031,7 @@ class AIAnalyzer:
             content_match = re.search(r'"content":"(.*?)(?:\\"|")', result_text)
             if content_match:
                 content = content_match.group(1).replace('\\\\', '\\').replace('\\"', '"')
-                # Tìm kiểm JSON trong nội dung
+                # Tìm kiếm JSON trong nội dung
                 json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
                 if json_match:
                     json_text = json_match.group(1)
@@ -3120,7 +3287,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
-    version = "V19.3"
+    version = "V19.4"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
@@ -3225,10 +3392,10 @@ def main():
             url_path="webhook",
             webhook_url=webhook_url
         )
-        logger.info(f"Bot V19.3 đã khởi chạy trên Render với webhook: {webhook_url}")
+        logger.info(f"Bot V19.4 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
         # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.3 đã khởi chạy (chế độ local).")
+        logger.info("Bot V19.4 đã khởi chạy (chế độ local).")
         application.run_polling()
 
 if __name__ == "__main__":
