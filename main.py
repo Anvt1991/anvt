@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 
 # Telegram bot imports
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler
 
 # Data fetching and analysis imports
 import yfinance as yf
@@ -139,6 +139,7 @@ class ChatSessionManager:
     Lưu trữ thông tin phiên, lịch sử tin nhắn và xử lý timeout.
     """
     def __init__(self):
+        """Khởi tạo ChatSessionManager"""
         self.sessions = {}
         self.cleanup_task = None
     
@@ -182,25 +183,39 @@ class ChatSessionManager:
     
     async def cleanup_sessions(self):
         """Dọn dẹp các phiên chat quá hạn (sau 15 phút không hoạt động)"""
-        while True:
-            await asyncio.sleep(60)  # Kiểm tra mỗi phút
-            now = datetime.now(TZ)
-            expired_users = []
-            
-            for user_id, session in self.sessions.items():
-                # Kiểm tra thời gian không hoạt động
-                inactive_time = now - session["start_time"]
-                if inactive_time.total_seconds() > 900:  # 15 phút
-                    expired_users.append(user_id)
-            
-            # Xóa các phiên hết hạn
-            for user_id in expired_users:
-                logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
-                self.end_session(user_id)
-            
-            # Dừng task nếu không còn phiên nào
-            if not self.sessions:
-                break
+        try:
+            while True:
+                await asyncio.sleep(60)  # Kiểm tra mỗi phút
+                
+                # Kiểm tra xem task có bị hủy hay không
+                if asyncio.current_task().cancelled():
+                    logger.info("Task cleanup_sessions đã bị hủy, đang thoát...")
+                    break
+                    
+                now = datetime.now(TZ)
+                expired_users = []
+                
+                for user_id, session in self.sessions.items():
+                    # Kiểm tra thời gian không hoạt động
+                    inactive_time = now - session["start_time"]
+                    if inactive_time.total_seconds() > 900:  # 15 phút
+                        expired_users.append(user_id)
+                
+                # Xóa các phiên hết hạn
+                for user_id in expired_users:
+                    logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
+                    self.end_session(user_id)
+                
+                # Dừng task nếu không còn phiên nào
+                if not self.sessions:
+                    break
+        except asyncio.CancelledError:
+            logger.info("Task cleanup_sessions đã bị hủy bởi CancelledError")
+            # Đảm bảo cleanup task sẽ dừng lại đúng cách
+            raise
+        except Exception as e:
+            logger.error(f"Lỗi trong cleanup_sessions: {str(e)}")
+            logger.error(traceback.format_exc())
 
 # Khởi tạo chat session manager toàn cục
 chat_manager = ChatSessionManager()
@@ -365,74 +380,126 @@ class DataValidator:
     
     @staticmethod
     def align_timestamps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-        """Căn chỉnh dấu thời gian theo khung thời gian chính xác"""
+        """
+        Căn chỉnh timestamp để đảm bảo nhất quán giữa các khung thời gian
+        
+        Args:
+            df: DataFrame cần căn chỉnh
+            timeframe: Khung thời gian dữ liệu
+            
+        Returns:
+            DataFrame với timestamp đã căn chỉnh
+        """
         if df.empty:
             return df
         
         df = df.copy()
-        # Đảm bảo index là datetime và có múi giờ
+        # Đảm bảo index là datetime
         if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.set_index('date')
+            else:
+                logger.warning("Không thể căn chỉnh timestamp: không có cột date và index không phải DatetimeIndex")
+                return df
         
-        # Nếu không có múi giờ, giả định là múi giờ Bangkok
+        # Xử lý múi giờ để tương thích với code khác
         if df.index.tz is None:
             df.index = df.index.tz_localize(TZ)
         
-        # Căn chỉnh timestamp dựa trên khung thời gian
-        if timeframe == '1D':
-            # Đối với dữ liệu ngày, lấy giá mỗi ngày lúc EOD (15:00)
+        # Xác định quy tắc căn chỉnh dựa trên timeframe
+        if timeframe.upper() in ['1D', 'D']:
+            # Đối với dữ liệu ngày: sử dụng EOD (15:00) như code cũ
+            logger.info("Căn chỉnh timestamp cho khung ngày")
             df.index = df.index.normalize() + pd.Timedelta(hours=15)
-        elif timeframe == '1W':
-            # Đối với dữ liệu tuần, lấy giá vào cuối tuần (Thứ 6, 15:00)
+            
+        elif timeframe.upper() in ['1W', 'W']:
+            # Đối với dữ liệu tuần: giữ nguyên logic cuối tuần từ code cũ
+            logger.info("Căn chỉnh timestamp cho khung tuần")
             df.index = df.index.to_period('W').to_timestamp() + pd.Timedelta(days=4, hours=15)
-        elif timeframe == '1M':
-            # Đối với dữ liệu tháng, lấy giá vào cuối tháng
+            
+        elif timeframe.upper() in ['1M', 'M'] and timeframe.upper() not in ['1MIN', '1M']:
+            # Xử lý rõ ràng hơn để tránh nhầm lẫn giữa tháng và phút
+            logger.info("Căn chỉnh timestamp cho khung tháng")
             df.index = df.index.to_period('M').to_timestamp() + pd.Timedelta(hours=15)
-        elif timeframe == '5m':
-            # Căn chỉnh theo mỗi 5 phút
-            df.index = df.index.floor('5min')
-        elif timeframe == '15m':
-            # Căn chỉnh theo mỗi 15 phút
-            df.index = df.index.floor('15min')
-        elif timeframe == '30m':
-            # Căn chỉnh theo mỗi 30 phút
-            df.index = df.index.floor('30min')
-        elif timeframe == '1h':
-            # Căn chỉnh theo mỗi giờ
-            df.index = df.index.floor('H')
-        elif timeframe == '4h':
-            # Căn chỉnh theo mỗi 4 giờ
-            df.index = df.index.floor('4H')
+            
+        elif timeframe in ['5m', '15m', '30m', '1h', '4h']:
+            # Đối với dữ liệu intraday: căn chỉnh phù hợp
+            logger.info(f"Căn chỉnh timestamp cho khung {timeframe}")
+            
+            if timeframe == '5m':
+                # Căn chỉnh về mỗi 5 phút
+                df.index = df.index.floor('5min')
+            elif timeframe == '15m':
+                # Căn chỉnh về mỗi 15 phút
+                df.index = df.index.floor('15min')
+            elif timeframe == '30m':
+                # Căn chỉnh về mỗi 30 phút
+                df.index = df.index.floor('30min')
+            elif timeframe == '1h':
+                # Căn chỉnh về mỗi giờ - sử dụng 'H' (chuẩn pandas)
+                df.index = df.index.floor('H')
+            elif timeframe == '4h':
+                # Cải thiện hiệu suất xử lý bằng phương pháp vector
+                hours = df.index.hour
+                adjusted_hours = hours - (hours % 4)
+                df.index = pd.DatetimeIndex(
+                    pd.to_datetime(df.index.date) + pd.to_timedelta(adjusted_hours, unit='h')
+                )
         
-        # Sắp xếp theo thời gian tăng dần
-        df = df.sort_index()
+        # Loại bỏ các hàng trùng lặp sau khi căn chỉnh
+        if df.index.duplicated().any():
+            duplicated_count = df.index.duplicated().sum()
+            logger.warning(f"Phát hiện {duplicated_count} timestamp trùng lặp sau khi căn chỉnh")
+            
+            # Xử lý timestamp trùng lặp bằng cách lấy hàng cuối cùng
+            df = df[~df.index.duplicated(keep='last')]
+            logger.info(f"Đã loại bỏ {duplicated_count} hàng trùng lặp, còn lại {len(df)} hàng")
         
-        return df
+        # Sắp xếp dữ liệu theo index tăng dần
+        return df.sort_index()
     
     @staticmethod
     def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """Chuẩn hóa DataFrame với xử lý giá trị thiếu, outlier và định dạng cột"""
-        if df.empty:
-            return df
+        """
+        Chuẩn hóa DataFrame thành định dạng thống nhất
         
+        Args:
+            df: DataFrame cần chuẩn hóa
+            
+        Returns:
+            DataFrame đã chuẩn hóa
+        """
         df = df.copy()
         
-        # Chuẩn hóa tên cột
-        column_mapping = {
-            'time': 'date', 'Time': 'date', 'DATE': 'date', 'Date': 'date',
-            'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume',
-            'Adj Close': 'adj_close', 'Adjusted_close': 'adj_close'
-        }
-        df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
-        
-        # Đảm bảo các cột bắt buộc
+        # Đảm bảo các cột cần thiết
         required_columns = ['open', 'high', 'low', 'close', 'volume']
-        for col in required_columns:
-            if col not in df.columns:
-                raise ValueError(f"DataFrame thiếu cột bắt buộc: {col}")
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Thiếu các cột bắt buộc: {', '.join(missing_cols)}")
         
-        # Xử lý giá trị null: lấp đầy giá trị thiếu trong chuỗi thời gian
-        if any(df.isnull().sum()):
+        # Đếm số lượng giá trị thiếu trước khi xử lý
+        na_counts_before = df[required_columns].isna().sum()
+        has_missing = na_counts_before.sum() > 0
+        
+        if has_missing:
+            # Đếm số lượng khoảng trống lớn (>5 giá trị liên tiếp)
+            large_gaps = 0
+            consecutive_na = 0
+            
+            for i in range(len(df)):
+                if df[['open', 'high', 'low', 'close']].iloc[i].isna().any():
+                    consecutive_na += 1
+                    if consecutive_na > 5 and consecutive_na % 5 == 0:  # Ghi nhận mỗi 5 giá trị
+                        large_gaps += 1
+                else:
+                    consecutive_na = 0
+            
+            # Ghi log về số lượng giá trị thiếu
+            logger.info(f"Phát hiện dữ liệu thiếu: {na_counts_before.to_dict()}")
+            if large_gaps > 0:
+                logger.warning(f"Phát hiện {large_gaps} khoảng trống lớn (>5 giá trị liên tiếp)")
+            
             # Phương pháp điền: forward fill cho giá mở/đóng/cao/thấp, không điền cho khối lượng
             df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].fillna(method='ffill')
             
@@ -441,10 +508,27 @@ class DataValidator:
             
             # Khối lượng thiếu được điền 0
             df['volume'] = df['volume'].fillna(0)
+            
+            # Đếm số lượng giá trị đã được nội suy
+            na_counts_after = df[required_columns].isna().sum()
+            interpolated_counts = na_counts_before - na_counts_after
+            
+            # Ghi log về số lượng giá trị đã được nội suy
+            logger.info(f"Đã nội suy {interpolated_counts.sum()} giá trị thiếu: {interpolated_counts.to_dict()}")
+            
+            # Kiểm tra nếu vẫn còn giá trị thiếu sau khi nội suy
+            if na_counts_after.sum() > 0:
+                logger.warning(f"Vẫn còn {na_counts_after.sum()} giá trị thiếu sau khi nội suy: {na_counts_after.to_dict()}")
         
         # Kiểm tra tính nhất quán của dữ liệu
         # - Giá cao >= giá đóng, mở, thấp
         # - Giá thấp <= giá đóng, mở, cao
+        inconsistent_high = df[df['high'] < df[['open', 'close']].max(axis=1)]
+        inconsistent_low = df[df['low'] > df[['open', 'close']].min(axis=1)]
+        
+        if not inconsistent_high.empty or not inconsistent_low.empty:
+            logger.warning(f"Phát hiện {len(inconsistent_high)} hàng với giá cao không nhất quán và {len(inconsistent_low)} hàng với giá thấp không nhất quán")
+        
         df['high'] = df[['high', 'open', 'close']].max(axis=1)
         df['low'] = df[['low', 'open', 'close']].min(axis=1)
         
@@ -453,6 +537,10 @@ class DataValidator:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
         # Loại bỏ các hàng có giá trị âm trong giá
+        negative_prices = df[(df['open'] <= 0) | (df['high'] <= 0) | (df['low'] <= 0) | (df['close'] <= 0)]
+        if not negative_prices.empty:
+            logger.warning(f"Loại bỏ {len(negative_prices)} hàng có giá trị âm hoặc bằng 0")
+        
         df = df[(df['open'] > 0) & (df['high'] > 0) & (df['low'] > 0) & (df['close'] > 0)]
         
         # Thêm cột ngày giao dịch nếu đang dùng cột date là index
@@ -480,10 +568,15 @@ class DataValidator:
         df = df.copy()
         outlier_report = "Phát hiện outlier:\n"
         outliers_found = False
+        total_outliers = 0
+        total_data_points = len(df) * 5  # Giả sử 5 cột cần kiểm tra
         
         # Cột cần kiểm tra outlier
         cols_to_check = ['open', 'high', 'low', 'close', 'volume']
         cols_to_check = [col for col in cols_to_check if col in df.columns]
+        
+        # Điều chỉnh tổng số điểm dữ liệu dựa trên số cột thực sự
+        total_data_points = len(df) * len(cols_to_check)
         
         if method == 'iqr':
             for col in cols_to_check:
@@ -495,12 +588,19 @@ class DataValidator:
                 upper_bound = Q3 + threshold * IQR
                 
                 outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)]
+                num_outliers = len(outliers)
+                total_outliers += num_outliers
+                
                 if not outliers.empty:
                     outliers_found = True
-                    outlier_report += f"\n{col}: {len(outliers)} giá trị ngoại lệ\n"
-                    for idx, row in outliers.iterrows():
+                    outlier_report += f"\n{col}: {num_outliers} giá trị ngoại lệ ({num_outliers/len(df)*100:.2f}%)\n"
+                    # Ghi log các giá trị outlier đầu tiên (tối đa 5)
+                    for idx, row in outliers.head(5).iterrows():
                         date_str = idx.strftime('%Y-%m-%d %H:%M') if isinstance(idx, pd.Timestamp) else str(idx)
                         outlier_report += f"  - {date_str}: {row[col]:.2f}\n"
+                    
+                    if num_outliers > 5:
+                        outlier_report += f"  - ... và {num_outliers - 5} giá trị khác\n"
                     
                     # Xử lý outlier bằng cách clip giới hạn
                     df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
@@ -1667,6 +1767,7 @@ class EnhancedPredictor:
             # Safer approach: manually build arrays of matching dates
             matched_actual = []
             matched_predicted = []
+            matched_dates = []
             
             for i, date in enumerate(date_index):
                 # Try to find the closest date in forecast
@@ -1676,6 +1777,7 @@ class EnhancedPredictor:
                 if not matching_dates.empty:
                     matched_actual.append(actual[i])
                     matched_predicted.append(forecast_df.loc[matching_dates[0], 'yhat'])
+                    matched_dates.append(date)
             
             if not matched_actual:
                 # If no exact matches, try a more flexible approach with date strings
@@ -1701,6 +1803,7 @@ class EnhancedPredictor:
                         # Add to our lists
                         matched_actual.append(df.iloc[df_idx[0]]['close'])
                         matched_predicted.append(forecast_df.iloc[forecast_idx[0]]['yhat'])
+                        matched_dates.append(pd.to_datetime(date_str))
                 
                 if not matched_actual:
                     logger.error("Không thể đồng bộ ngày giữa df và forecast: không có ngày trùng khớp sau khi kiểm tra")
@@ -1709,6 +1812,7 @@ class EnhancedPredictor:
             # Convert to numpy arrays
             actual = np.array(matched_actual)
             predicted = np.array(matched_predicted)
+            matched_dates = pd.DatetimeIndex(matched_dates)
                 
         except KeyError as e:
             logger.error(f"Không thể đồng bộ ngày giữa df và forecast: {str(e)}")
@@ -1725,28 +1829,82 @@ class EnhancedPredictor:
             logger.warning(f"Quá ít điểm dữ liệu cho đánh giá chính xác: {len(actual)} điểm")
             return 0.3  # Return a moderate score
         
-        # Tính toán các chỉ số hiệu suất
-        mse = np.mean((actual - predicted) ** 2)
-        mae = np.mean(np.abs(actual - predicted))
-        mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+        # Phân chia tập train/test để đánh giá chính xác hơn
+        # Sử dụng 80% dữ liệu đầu cho train, 20% dữ liệu cuối cho test
+        train_size = int(len(actual) * 0.8)
         
-        # Phát hiện dự báo phi lý
-        avg_price = np.mean(actual)
-        is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in predicted)
+        # Đảm bảo dữ liệu được sắp xếp theo thứ tự thời gian
+        time_sorted_indices = np.argsort(matched_dates)
+        actual = actual[time_sorted_indices]
+        predicted = predicted[time_sorted_indices]
         
-        # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
-        if is_unrealistic:
-            logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
-            return 0.1  # Giảm mạnh điểm hiệu suất
+        # Chia tập train/test
+        train_actual = actual[:train_size]
+        train_predicted = predicted[:train_size]
+        test_actual = actual[train_size:]
+        test_predicted = predicted[train_size:]
+        
+        logger.info(f"Đánh giá Prophet: {len(train_actual)} điểm dữ liệu train, {len(test_actual)} điểm dữ liệu test")
+        
+        # Tính toán các chỉ số hiệu suất trên tập test
+        if len(test_actual) > 0:
+            test_mse = np.mean((test_actual - test_predicted) ** 2)
+            test_mae = np.mean(np.abs(test_actual - test_predicted))
+            test_mape = np.mean(np.abs((test_actual - test_predicted) / test_actual)) * 100
             
-        # Đánh giá hiệu suất dựa trên MSE và MAPE
-        # 1/(1+MSE) cho giá trị từ 0-1, càng gần 1 càng tốt
-        mse_score = 1 / (1 + mse)
-        # MAPE < 10% là tốt, >30% là kém
-        mape_score = max(0, 1 - (mape / 30))
-        
-        # Kết hợp hai điểm số (70% MSE, 30% MAPE)
-        performance = 0.7 * mse_score + 0.3 * mape_score
+            logger.info(f"Hiệu suất Prophet trên tập test - MSE: {test_mse:.2f}, MAE: {test_mae:.2f}, MAPE: {test_mape:.2f}%")
+            
+            # Đánh giá trên tập train để so sánh
+            train_mse = np.mean((train_actual - train_predicted) ** 2)
+            train_mape = np.mean(np.abs((train_actual - train_predicted) / train_actual)) * 100
+            
+            logger.info(f"Hiệu suất Prophet trên tập train - MSE: {train_mse:.2f}, MAPE: {train_mape:.2f}%")
+            
+            # Kiểm tra hiện tượng overfitting
+            if train_mse < 0.3 * test_mse:
+                logger.warning("Phát hiện có thể overfitting trong mô hình Prophet (hiệu suất train >> test)")
+            
+            # Phát hiện dự báo phi lý
+            avg_price = np.mean(test_actual)
+            is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in test_predicted)
+            
+            # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
+            if is_unrealistic:
+                logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
+                return 0.1  # Giảm mạnh điểm hiệu suất
+                
+            # Đánh giá hiệu suất dựa chủ yếu trên tập test
+            # 1/(1+MSE) cho giá trị từ 0-1, càng gần 1 càng tốt
+            mse_score = 1 / (1 + test_mse)
+            # MAPE < 10% là tốt, >30% là kém
+            mape_score = max(0, 1 - (test_mape / 30))
+            
+            # Kết hợp hai điểm số (70% MSE, 30% MAPE) - trọng số cao cho MSE
+            performance = 0.7 * mse_score + 0.3 * mape_score
+        else:
+            # Nếu không có dữ liệu test, sử dụng toàn bộ dữ liệu
+            logger.warning("Không có đủ dữ liệu cho tập test, sử dụng toàn bộ dữ liệu")
+            
+            # Tính toán trên toàn bộ dữ liệu
+            mse = np.mean((actual - predicted) ** 2)
+            mae = np.mean(np.abs(actual - predicted))
+            mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+            
+            # Phát hiện dự báo phi lý
+            avg_price = np.mean(actual)
+            is_unrealistic = any(abs(pred - avg_price) / avg_price > 0.5 for pred in predicted)
+            
+            # Nếu phát hiện dự báo phi lý, giảm điểm hiệu suất
+            if is_unrealistic:
+                logger.warning("Phát hiện dự báo Prophet phi lý, giảm điểm hiệu suất")
+                return 0.1  # Giảm mạnh điểm hiệu suất
+                
+            # Đánh giá hiệu suất dựa trên MSE và MAPE
+            mse_score = 1 / (1 + mse)
+            mape_score = max(0, 1 - (mape / 30))
+            
+            # Kết hợp hai điểm số với trọng số thấp hơn do không có tập test riêng
+            performance = 0.6 * mse_score + 0.2 * mape_score + 0.2  # Thêm 0.2 cố định vì không cross-validation
         
         return performance
 
@@ -2923,21 +3081,71 @@ def train_xgboost_model(df: pd.DataFrame, features: list) -> tuple[xgb.XGBClassi
     """
     if df.empty or len(df) < 100:
         raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost (cần ít nhất 100 điểm dữ liệu)")
+        
     df = df.copy()
+    # Tạo biến mục tiêu (1 nếu giá đóng cửa hôm sau > hôm nay, 0 nếu ngược lại)
     df['target'] = (df['close'] > df['close'].shift(1)).astype(int)
-    X = df[features].shift(1)
+    
+    # Xử lý dữ liệu NaN từ việc tạo target và shift
+    df = df.dropna()
+    logger.info(f"Sau khi dropna, còn {len(df)} dòng dữ liệu cho huấn luyện XGBoost")
+    
+    if len(df) < 100:
+        raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost sau khi loại bỏ NaN")
+    
+    # Chuẩn bị dữ liệu
+    X = df[features]
     y = df['target']
-    valid_idx = X.notna().all(axis=1) & y.notna()
-    X = X[valid_idx]
-    y = y[valid_idx]
-    if len(X) < 100:
-        raise ValueError("Không đủ dữ liệu để huấn luyện XGBoost")
-    X_train = X.iloc[:-1]
-    y_train = y.iloc[:-1]
-    model = xgb.XGBClassifier()
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_train)
-    performance = accuracy_score(y_train, y_pred)
+    
+    # Chuẩn hóa dữ liệu
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    X_scaled = pd.DataFrame(X_scaled, index=X.index, columns=X.columns)
+    
+    # Sử dụng cross-validation để đánh giá mô hình
+    from sklearn.model_selection import cross_val_score, TimeSeriesSplit
+    
+    # Sử dụng TimeSeriesSplit cho dữ liệu chuỗi thời gian
+    tscv = TimeSeriesSplit(n_splits=5)
+    
+    # Khởi tạo mô hình
+    model = xgb.XGBClassifier(
+        n_estimators=100,
+        learning_rate=0.05,
+        max_depth=4,
+        min_child_weight=1,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=42
+    )
+    
+    # Đánh giá bằng cross-validation với dữ liệu đã chuẩn hóa
+    cv_scores = cross_val_score(model, X_scaled, y, cv=tscv, scoring='accuracy')
+    avg_cv_score = cv_scores.mean()
+    
+    logger.info(f"XGBoost cross-validation scores: {cv_scores}, avg: {avg_cv_score:.4f}")
+    
+    # Xem xét các metric khác
+    from sklearn.model_selection import cross_val_predict
+    from sklearn.metrics import precision_score, recall_score, f1_score
+    
+    # Dự đoán trên tập cross-validation
+    y_pred = cross_val_predict(model, X_scaled, y, cv=tscv)
+    
+    # Tính toán các chỉ số hiệu suất
+    precision = precision_score(y, y_pred)
+    recall = recall_score(y, y_pred)
+    f1 = f1_score(y, y_pred)
+    
+    logger.info(f"XGBoost metrics - Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
+    
+    # Huấn luyện mô hình trên toàn bộ dữ liệu
+    model.fit(X_scaled, y)
+    
+    # Tính hiệu suất cuối cùng là trung bình của accuracy và f1
+    performance = (avg_cv_score + f1) / 2
+    
     return model, performance
 
 # ---------- TELEGRAM COMMAND HANDLERS ----------
@@ -3363,7 +3571,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
-    version = "V19.3"
+    version = "V19.4"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
@@ -3459,6 +3667,35 @@ def main():
     # Xác định chế độ chạy (webhook trên Render hoặc polling cho local)
     is_render = RENDER_EXTERNAL_URL and RENDER_SERVICE_NAME
     
+    # Định nghĩa hàm xử lý khi tắt ứng dụng
+    async def shutdown(application):
+        """Hàm xử lý khi tắt ứng dụng, đảm bảo dọn dẹp tất cả các tác vụ đang chạy"""
+        logger.info("Đang dừng ứng dụng và xử lý các tác vụ chưa hoàn thành...")
+        
+        # Hủy task cleanup_sessions nếu đang chạy
+        if chat_manager.cleanup_task and not chat_manager.cleanup_task.done():
+            logger.info("Đang hủy task cleanup_sessions...")
+            chat_manager.cleanup_task.cancel()
+            try:
+                await chat_manager.cleanup_task
+            except asyncio.CancelledError:
+                logger.info("Task cleanup_sessions đã được hủy thành công")
+        
+        # Dừng scheduler
+        if scheduler.running:
+            logger.info("Đang dừng scheduler...")
+            scheduler.shutdown()
+        
+        # Đóng thread pool executor
+        logger.info("Đang đóng thread pool executor...")
+        executor.shutdown(wait=False)
+        
+        logger.info("Tất cả tác vụ đã được dọn dẹp")
+    
+    # Đăng ký hàm xử lý khi tắt ứng dụng
+    application.add_handler(TypeHandler(Update, lambda update, context: None), group=-1)
+    application.shutdown_handler = shutdown
+    
     if is_render:
         # Thiết lập webhook cho Render
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
@@ -3468,10 +3705,10 @@ def main():
             url_path="webhook",
             webhook_url=webhook_url
         )
-        logger.info(f"Bot V19.3 đã khởi chạy trên Render với webhook: {webhook_url}")
+        logger.info(f"Bot V19.4 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
         # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.3 đã khởi chạy (chế độ local).")
+        logger.info("Bot V19.4 đã khởi chạy (chế độ local).")
         application.run_polling()
 
 if __name__ == "__main__":
