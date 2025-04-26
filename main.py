@@ -191,6 +191,13 @@ class DataValidator:
     # Danh sách các mã chỉ số
     INDICES = ['VNINDEX', 'VN30', 'HNX30', 'HNXINDEX', 'UPCOM']
     
+    # Phân loại chỉ số theo nhóm
+    INDEX_TYPES = {
+        'HOSE': ['VNINDEX', 'VN30'],
+        'HNX': ['HNX30', 'HNXINDEX'],
+        'UPCOM': ['UPCOM']
+    }
+    
     # Định dạng mã hợp lệ
     TICKER_PATTERN = r'^[A-Z0-9]{3,6}$'
     
@@ -247,7 +254,20 @@ class DataValidator:
     @staticmethod
     def is_index(ticker: str) -> bool:
         """Kiểm tra xem mã có phải là chỉ số hay không"""
-        return ticker.upper() in DataValidator.INDICES
+        ticker = ticker.upper().strip()
+        return ticker in DataValidator.INDICES
+    
+    @staticmethod
+    def get_index_type(ticker: str) -> str:
+        """Trả về loại sàn giao dịch của chỉ số"""
+        if not DataValidator.is_index(ticker):
+            return "STOCK"
+            
+        ticker = ticker.upper().strip()
+        for exchange, indices in DataValidator.INDEX_TYPES.items():
+            if ticker in indices:
+                return exchange
+        return "UNKNOWN"
     
     @staticmethod
     def validate_candles(num_candles: int) -> int:
@@ -1007,7 +1027,68 @@ class DataLoader:
     async def get_fundamental_data(self, symbol: str) -> dict:
         """Lấy dữ liệu cơ bản với validator"""
         if self.validator.is_index(symbol):
-            return {"error": f"{symbol} là chỉ số, không có dữ liệu cơ bản"}
+            index_type = self.validator.get_index_type(symbol)
+            
+            # Cung cấp thông tin mô tả cho từng loại chỉ số
+            index_descriptions = {
+                'VNINDEX': {
+                    'name': 'VN-Index',
+                    'description': 'Chỉ số giá cổ phiếu của tất cả các công ty niêm yết trên Sở GDCK TP.HCM (HOSE)',
+                    'component_count': '~400 mã',
+                    'started': 'Tháng 7/2000',
+                    'type': 'Chỉ số giá theo vốn hóa',
+                    'category': 'HOSE',
+                    'is_investable': False,
+                    'has_derivatives': False
+                },
+                'VN30': {
+                    'name': 'VN30 Index',
+                    'description': 'Chỉ số giá của 30 cổ phiếu có giá trị vốn hóa lớn nhất và thanh khoản cao nhất trên HOSE',
+                    'component_count': '30 mã',
+                    'started': 'Tháng 1/2012',
+                    'type': 'Chỉ số giá theo free-float',
+                    'category': 'HOSE',
+                    'is_investable': True,
+                    'has_derivatives': True
+                },
+                'HNX30': {
+                    'name': 'HNX30 Index',
+                    'description': 'Chỉ số giá của 30 cổ phiếu có giá trị vốn hóa lớn nhất và thanh khoản cao nhất trên HNX',
+                    'component_count': '30 mã',
+                    'started': 'Tháng 8/2012',
+                    'type': 'Chỉ số giá theo free-float',
+                    'category': 'HNX',
+                    'is_investable': False,
+                    'has_derivatives': False
+                },
+                'HNXINDEX': {
+                    'name': 'HNX-Index',
+                    'description': 'Chỉ số giá cổ phiếu của tất cả các công ty niêm yết trên Sở GDCK Hà Nội (HNX)',
+                    'component_count': '~350 mã',
+                    'started': 'Tháng 7/2005',
+                    'type': 'Chỉ số giá theo vốn hóa',
+                    'category': 'HNX',
+                    'is_investable': False,
+                    'has_derivatives': False
+                },
+                'UPCOM': {
+                    'name': 'UPCOM Index',
+                    'description': 'Chỉ số giá cổ phiếu của các công ty đăng ký giao dịch trên thị trường UPCoM',
+                    'component_count': '~900 mã',
+                    'started': 'Tháng 6/2009',
+                    'type': 'Chỉ số giá theo vốn hóa',
+                    'category': 'UPCOM',
+                    'is_investable': False,
+                    'has_derivatives': False
+                }
+            }
+            
+            # Trả về thông tin mô tả chỉ số
+            return {
+                'is_index': True,
+                'index_info': index_descriptions.get(symbol.upper(), 
+                                                   {'name': symbol, 'description': f'Chỉ số {symbol}', 'category': index_type})
+            }
             
         cache_key = f"fundamental_{symbol}_{datetime.now(TZ).strftime('%Y%m%d')}"
         
@@ -1043,11 +1124,9 @@ class DataLoader:
             
         fundamental_data = await self.fetch_fundamental_data_yahoo(symbol)
         if fundamental_data and any(v is not None for v in fundamental_data.values()):
-            # Xác thực dữ liệu trước khi lưu cache
             valid_data = self.validator.validate_fundamental_data(fundamental_data)
             cache[cache_key] = valid_data
             
-            # Lưu vào Redis cache nếu có thể
             try:
                 await redis_manager.set(cache_key, valid_data, CACHE_EXPIRE_LONG)
             except Exception as e:
@@ -1055,7 +1134,7 @@ class DataLoader:
                 
             return valid_data
             
-        return {"error": f"Không có dữ liệu cơ bản cho {symbol}"}
+        return {"error": f"Không tìm thấy dữ liệu cơ bản cho {symbol}"}
 
     async def fetch_fundamental_data_vnstock(self, symbol: str) -> dict:
         try:
@@ -1818,7 +1897,12 @@ class AIAnalyzer:
                 past_result = "đúng" if (close_today > last["close_today"] and "mua" in last["report"].lower()) else "sai"
                 past_report = f"📜 **Báo cáo trước** ({last['date']}): {last['close_today']} → {close_today} ({past_result})\n"
 
-            fundamental_report = deep_fundamental_analysis(fundamental_data)
+            # Kiểm tra xem symbol có phải là chỉ số không
+            is_index = DataValidator.is_index(symbol)
+            index_type = DataValidator.get_index_type(symbol) if is_index else "STOCK"
+            
+            # Phân tích cơ bản chỉ áp dụng cho cổ phiếu, không phải chỉ số
+            fundamental_report = "Không áp dụng (Chỉ số)" if is_index else deep_fundamental_analysis(fundamental_data)
 
             # Chỉ báo đa khung thời gian
             multi_indicators = self.tech_analyzer.calculate_multi_timeframe_indicators(dfs)
@@ -1843,18 +1927,51 @@ class AIAnalyzer:
             }
             groq_annotation = await self.analyze_with_groq(technical_data)
 
-            news = await get_news(symbol=symbol)
+            # Tin thị trường hoặc tin mã cụ thể
+            if is_index:
+                # Đối với chỉ số, lấy tin thị trường chung
+                news = await get_news()
+            else:
+                # Đối với cổ phiếu, lấy tin liên quan đến mã
+                news = await get_news(symbol=symbol)
+                
             news_text = "\n".join([f"📰 **{n['title']}**\n🔗 {n['link']}\n📝 {n['summary']}" for n in news])
             outlier_text = "\n".join([f"**{tf}**: {report_text}" for tf, report_text in outlier_reports.items()])
 
-            # Tạo chuỗi prompt cho AI
-            prompt = f"""
-Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho {symbol}:
+            # Tạo chuỗi prompt tùy theo loại symbol (chỉ số hoặc cổ phiếu)
+            if is_index:
+                # Prompt cho chỉ số
+                prompt = f"""
+Bạn là chuyên gia phân tích kỹ thuật, trader chuyên nghiệp, chuyên gia với 30 năm kinh nghiệm trong phân tích thị trường chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho chỉ số {symbol} ({index_type}):
+
+**Thông tin chung:**
+- Chỉ số: {symbol} ({index_type})
+- Ngày: {datetime.now(TZ).strftime('%d/%m/%Y')}
+- Giá hôm qua: {close_yesterday:.2f}
+- Giá hôm nay: {close_today:.2f}
+- Biến động: {((close_today - close_yesterday) / close_yesterday * 100):.2f}%
+
+**Biến động giá:**
+{price_action}
+
+**Lịch sử dự đoán:**
+{past_report}
+
+**Chất lượng dữ liệu:**
+{outlier_text}
+
+**Chỉ số kỹ thuật:**
+"""
+            else:
+                # Prompt cho cổ phiếu
+                prompt = f"""
+Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên nghiệp, chuyên gia bắt đáy 30 năm kinh nghiệm ở chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho mã cổ phiếu {symbol}:
 
 **Thông tin cơ bản:**
 - Ngày: {datetime.now(TZ).strftime('%d/%m/%Y')}
 - Giá hôm qua: {close_yesterday:.2f}
 - Giá hôm nay: {close_today:.2f}
+- Biến động: {((close_today - close_yesterday) / close_yesterday * 100):.2f}%
 
 **Hành động giá:**
 {price_action}
@@ -1877,7 +1994,10 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
                 prompt += f"- Ichimoku: A: {ind.get('ichimoku_a', 0):.2f}, B: {ind.get('ichimoku_b', 0):.2f}\n"
                 prompt += f"- Fibonacci: 0.0: {ind.get('fib_0.0', 0):.2f}, 61.8: {ind.get('fib_61.8', 0):.2f}\n"
 
-            prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
+            # Thêm phần cơ bản chỉ cho cổ phiếu
+            if not is_index:
+                prompt += f"\n**Cơ bản:**\n{fundamental_report}\n"
+                
             prompt += f"\n**Tin tức:**\n{news_text}\n"
             prompt += f"\n**XGBoost dự đoán tín hiệu giao dịch** (Hiệu suất: {xgb_accuracy:.2f}): {xgb_signal}\n"
             prompt += f"\n**Dự báo giá (Prophet)** (Hiệu suất: {prophet_perf:.2f}):\n"
@@ -1888,7 +2008,29 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
             prompt += f"  + Breakdown: {scenarios['Breakdown']['prob']:.1f}%, Mục tiêu: {scenarios['Breakdown']['target']:.2f}\n"
             prompt += f"  + Sideway: {scenarios['Sideway']['prob']:.1f}%, Mục tiêu: {scenarios['Sideway']['target']:.2f}\n"
             prompt += f"\n**Phân tích Groq:**\n{json.dumps(groq_annotation, ensure_ascii=False) if groq_annotation else 'Không có dữ liệu từ Groq'}\n"
-            prompt += """
+            
+            if is_index:
+                # Hướng dẫn đặc biệt cho chỉ số
+                prompt += f"""
+**Yêu cầu cho phân tích chỉ số {symbol}:**
+1. Tóm tắt tổng quan thị trường thông qua chỉ số này.
+2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn của thị trường.
+3. Phân tích chi tiết các chỉ số kỹ thuật, vùng hỗ trợ/kháng cự của chỉ số.
+4. Đánh giá rủi ro thị trường và mức tâm lý nhà đầu tư.
+5. Đưa ra dự báo xu hướng thị trường và các kịch bản có thể xảy ra.
+6. Đề cập đến tác động của các yếu tố vĩ mô nếu có.
+7. Nếu là VNINDEX, hãy phân tích thêm về sức mạnh của nhóm ngành, bluechip và midcap.
+8. Nếu là VN30, hãy đề cập đến khả năng giao dịch phái sinh.
+9. Trình bày logic, súc tích nhưng đủ thông tin để người đọc có cái nhìn tổng quan về thị trường.
+
+**Hướng dẫn bổ sung:**
+- {symbol} là chỉ số thị trường, KHÔNG phải mã cổ phiếu.
+- KHÔNG đưa ra khuyến nghị mua/bán chỉ số (trừ khi là VN30 có thể giao dịch phái sinh).
+- Tập trung vào phân tích tổng thể thị trường và các nhóm ngành.
+"""
+            else:
+                # Hướng dẫn đặc biệt cho cổ phiếu
+                prompt += """
 **Yêu cầu:**
 1. Tóm tắt tổng quan.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
@@ -1901,8 +2043,8 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 
 **Hướng dẫn bổ sung:**
 - Sử dụng dữ liệu, số liệu được cung cấp, KHÔNG tự suy diễn thêm.
-- VNINDEX, VN30 là chỉ số, không phải mã cổ phiếu, bỏ qua chỉ số cơ bản, không mua/bán ( VNINDEX có phái sinh).
 """
+
             # Tạo báo cáo
             report = await self.try_gemini_then_groq(prompt)
             
@@ -1916,6 +2058,32 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 # ---------- PHÂN TÍCH CƠ BẢN ----------
 def deep_fundamental_analysis(fundamental_data: dict) -> str:
     report = "📊 **Phân tích cơ bản**:\n"
+    
+    # Kiểm tra nếu là chỉ số
+    if fundamental_data and fundamental_data.get('is_index', False):
+        index_info = fundamental_data.get('index_info', {})
+        report = "📊 **Thông tin chỉ số**:\n"
+        report += f"- **Tên**: {index_info.get('name', 'N/A')}\n"
+        report += f"- **Mô tả**: {index_info.get('description', 'N/A')}\n"
+        report += f"- **Số lượng mã**: {index_info.get('component_count', 'N/A')}\n"
+        report += f"- **Ngày bắt đầu**: {index_info.get('started', 'N/A')}\n"
+        report += f"- **Loại chỉ số**: {index_info.get('type', 'N/A')}\n"
+        report += f"- **Sàn giao dịch**: {index_info.get('category', 'N/A')}\n"
+        
+        # Thông tin về khả năng đầu tư
+        if index_info.get('is_investable', False):
+            report += "- **Có thể đầu tư**: Có (thông qua ETFs hoặc quỹ mở)\n"
+        else:
+            report += "- **Có thể đầu tư**: Không (chỉ theo dõi)\n"
+            
+        # Thông tin về phái sinh
+        if index_info.get('has_derivatives', False):
+            report += "- **Giao dịch phái sinh**: Có (hợp đồng tương lai, quyền chọn)\n"
+        else:
+            report += "- **Giao dịch phái sinh**: Không\n"
+            
+        return report
+        
     if not fundamental_data or 'error' in fundamental_data:
         return report + f"❌ {fundamental_data.get('error', 'Không có dữ liệu')}\n"
 
@@ -2518,22 +2686,15 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý lệnh /analyze để phân tích chứng khoán"""
-    user_id = str(update.message.from_user.id)
-    
-    # Kiểm tra người dùng đã được phê duyệt chưa
-    if not await db.is_user_approved(user_id):
-        # Thông báo admin về người dùng mới và thông báo cho người dùng chờ phê duyệt
-        await notify_admin_new_user(update, context)
+    if not await is_user_approved(update.effective_user.id):
+        await update.message.reply_text(
+            "⛔ Bạn chưa được phê duyệt để sử dụng bot. Sử dụng /getid để lấy ID và liên hệ admin."
+        )
         return
-    
-    # Cập nhật thời gian hoạt động
+        
     try:
-        await db.update_user_last_active(user_id)
-    except Exception as e:
-        logger.error(f"Lỗi cập nhật thời gian hoạt động: {str(e)}")
-        # Tiếp tục xử lý, không dừng lại vì lỗi này
-    
-    try:
+        await db.update_user_last_active(update.effective_user.id)
+        
         # Phân tích tham số đầu vào
         args = context.args
         if not args:
@@ -2549,8 +2710,15 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         timeframe = DataValidator.normalize_timeframe(timeframe)
         num_candles = DataValidator.validate_candles(num_candles)
         
-        # Thông báo đang xử lý
-        await update.message.reply_text(f"⏳ Đang phân tích {symbol} [{timeframe}] với {num_candles} nến...")
+        # Kiểm tra xem là chỉ số hay cổ phiếu
+        is_index = DataValidator.is_index(symbol)
+        index_type = DataValidator.get_index_type(symbol) if is_index else "STOCK"
+        
+        # Thông báo đang xử lý với thông tin rõ ràng hơn về loại symbol
+        if is_index:
+            await update.message.reply_text(f"⏳ Đang phân tích chỉ số {symbol} ({index_type}) [{timeframe}] với {num_candles} nến...")
+        else:
+            await update.message.reply_text(f"⏳ Đang phân tích cổ phiếu {symbol} [{timeframe}] với {num_candles} nến...")
         
         # Tải dữ liệu và phân tích
         loader = DataLoader()
@@ -2618,55 +2786,57 @@ async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     symbol, report, close_today, close_yesterday, timeframe
                 )
         
-        # Định dạng và gửi báo cáo
-        formatted_report = f"<b>📈 Báo cáo {symbol} [{timeframe}] - {datetime.now(TZ).strftime('%d-%m-%Y %H:%M')}</b>\n\n<pre>{html.escape(report)}</pre>"
+        # Định dạng và gửi báo cáo với thông tin rõ ràng hơn về loại symbol
+        if is_index:
+            formatted_report = f"<b>📈 Báo cáo chỉ số {symbol} ({index_type}) [{timeframe}] - {datetime.now(TZ).strftime('%d-%m-%Y %H:%M')}</b>\n\n<pre>{html.escape(report)}</pre>"
+        else:
+            formatted_report = f"<b>📈 Báo cáo cổ phiếu {symbol} [{timeframe}] - {datetime.now(TZ).strftime('%d-%m-%Y %H:%M')}</b>\n\n<pre>{html.escape(report)}</pre>"
+            
         await update.message.reply_text(formatted_report, parse_mode='HTML')
-        
+    
     except ValueError as e:
-        await update.message.reply_text(f"❌ Lỗi: {str(e)}")
+        await update.message.reply_text(f"⚠️ Lỗi: {str(e)}")
     except Exception as e:
         logger.error(f"Lỗi trong analyze_command: {str(e)}")
-        logger.error(traceback.format_exc())  # In stack trace chi tiết
-        error_msg = "❌ Không thể phân tích mã chứng khoán. Vui lòng thử lại sau hoặc kiểm tra mã chứng khoán."
-        if "HTTP 429" in str(e):
-            error_msg = "❌ Quá nhiều yêu cầu đến Yahoo Finance. Vui lòng thử lại sau vài phút."
-        await update.message.reply_text(error_msg)
+        logger.error(traceback.format_exc())
+        await update.message.reply_text(f"❌ Lỗi phân tích: {str(e)}")
+        # Kiểm tra kết nối DB và thử lại khởi tạo nếu cần
+        try:
+            await init_db()
+        except Exception as db_error:
+            logger.error(f"Không thể khởi tạo lại DB: {str(db_error)}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xử lý lệnh /help để hiển thị hướng dẫn sử dụng"""
-    user_id = str(update.message.from_user.id)
-    
-    # Kiểm tra người dùng đã được phê duyệt chưa
-    if not await db.is_user_approved(user_id):
-        await notify_admin_new_user(update, context)
-        return
-    
-    # Cập nhật thời gian hoạt động
-    try:
-        await db.update_user_last_active(user_id)
-    except Exception as e:
-        logger.error(f"Lỗi cập nhật thời gian hoạt động: {str(e)}")
-    
-    help_text = (
-        "📚 <b>HƯỚNG DẪN SỬ DỤNG BOT</b>\n\n"
-        "<b>Các lệnh có sẵn:</b>\n"
-        "• /analyze [Mã] [Khung TG] [Số nến] - Phân tích đa khung thời gian\n"
-        "  Ví dụ: /analyze VNM 1D 100\n\n"
-        "<b>Khung thời gian hỗ trợ:</b>\n"
-        "• Intraday: 5m, 15m, 30m, 1h, 4h\n"
-        "• Daily/Weekly/Monthly: 1D, 1W, 1M\n\n"
-        "<b>Các lệnh khác:</b>\n"
-        "• /getid - Lấy ID người dùng\n"
-        "• /help - Hiển thị hướng dẫn này\n"
-    )
-    
-    if user_id == ADMIN_ID:
-        help_text += (
-            "\n<b>Lệnh dành cho Admin:</b>\n"
-            "• /approve [user_id] - Phê duyệt người dùng mới\n"
-        )
-    
-    await update.message.reply_text(help_text, parse_mode='HTML')
+    """Hiển thị trợ giúp và hướng dẫn sử dụng bot"""
+    help_text = """🤖 *AI Stock Bot - Hướng dẫn sử dụng*
+
+🔍 *Phân tích Chứng Khoán*
+/analyze <mã> <khung_thời_gian> <số_nến>
+- Mã: Mã chứng khoán (VD: SSI) hoặc chỉ số (VD: VNINDEX, VN30)
+- Khung thời gian: 5m, 15m, 30m, 1h, 4h, 1D (mặc định), 1W, 1M
+- Số nến: 20-1000 (mặc định: 100)
+
+*Ví dụ:*
+`/analyze SSI` - Phân tích cổ phiếu SSI với cài đặt mặc định (1D, 100 nến)
+`/analyze SSI 1W 50` - Phân tích SSI với 50 nến trên khung tuần
+`/analyze VNINDEX 1D 200` - Phân tích chỉ số VNINDEX với 200 nến ngày
+
+📊 *Phân biệt Cổ phiếu và Chỉ số*
+- *Cổ phiếu* là chứng khoán của một công ty cụ thể (VD: SSI, VNM)
+- *Chỉ số* là thước đo tổng thể của thị trường hoặc một phân khúc thị trường:
+  • VNINDEX: Chỉ số tất cả cổ phiếu trên HOSE
+  • VN30: Chỉ số 30 cổ phiếu vốn hóa lớn nhất HOSE (có phái sinh)
+  • HNX30: Chỉ số 30 cổ phiếu vốn hóa lớn nhất HNX
+  • HNXINDEX: Chỉ số tất cả cổ phiếu trên HNX
+  • UPCOM: Chỉ số tất cả cổ phiếu trên UPCOM
+
+🔧 *Chức năng khác*
+/help - Hiển thị hướng dẫn sử dụng
+/getid - Lấy ID người dùng để yêu cầu quyền truy cập
+
+📅 Bot cập nhật liên tục và thêm tính năng mới. Hãy sử dụng /help để xem các cập nhật mới nhất!
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý command /start"""
