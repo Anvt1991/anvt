@@ -95,7 +95,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.3"           
+VERSION = "V19.4"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -3692,10 +3692,16 @@ def main():
         
         logger.info("Tất cả tác vụ đã được dọn dẹp")
     
-    # Đăng ký hàm xử lý khi tắt ứng dụng
-    application.add_handler(TypeHandler(Update, lambda update, context: None), group=-1)
-    application.shutdown_handler = shutdown
+    # Hàm dummy async để dùng với TypeHandler
+    async def dummy_handler(update, context):
+        return
     
+    # Đăng ký hàm xử lý khi tắt ứng dụng
+    application.add_handler(TypeHandler(Update, dummy_handler), group=-1)
+    
+    # Gán hàm shutdown vào ứng dụng
+    application.add_shutdown_callback(shutdown)
+
     if is_render:
         # Thiết lập webhook cho Render
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
