@@ -72,8 +72,8 @@ async def save_news(entry, ai_summary, sentiment):
         """, entry.title, entry.link, entry.summary, sentiment, ai_summary)
 
 # --- AI Analysis (Gemini) ---
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "google/gemini-pro")
-OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "openai/gpt-3.5-turbo")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
 
 async def analyze_news(title, summary, model=None):
     if model is None:
