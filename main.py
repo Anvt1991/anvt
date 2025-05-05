@@ -2240,12 +2240,16 @@ async def get_news(symbol: str = None, limit: int = 3) -> list:
     Thu thập tin tức liên quan đến chứng khoán từ nhiều nguồn RSS.
     
     Args:
-        symbol: Mã chứng khoán cần thu thập tin tức (None để lấy tin thị trường chung)
+        symbol: Mã chứng khoán hoặc tên ngành/nhóm cần thu thập tin tức (None để lấy tin thị trường chung)
         limit: Số lượng tin tức tối đa cần lấy
         
     Returns:
         Danh sách các tin tức đã thu thập
     """
+    # Danh sách từ khóa ngành/nhóm đặc biệt
+    special_groups = [
+        "bluechip", "midcap", "ngân hàng", "bất động sản", "thép", "dầu khí", "chứng khoán", "công nghệ", "bán lẻ", "điện", "phân bón", "bảo hiểm", "xây dựng", "logistics", "thực phẩm", "y tế", "ngân hàng số", "fintech"
+    ]
     # Tạo khóa cache dựa trên symbol và ngày hiện tại
     cache_key = f"news_{symbol}_{limit}_{datetime.now(TZ).strftime('%Y%m%d')}" if symbol else f"news_market_{limit}_{datetime.now(TZ).strftime('%Y%m%d')}"
     
@@ -2271,8 +2275,12 @@ async def get_news(symbol: str = None, limit: int = 3) -> list:
     ]
     # Thêm Google News RSS
     if symbol:
-        # Google News RSS cho mã cổ phiếu cụ thể (dùng truy vấn mã)
-        google_news_url = f"https://news.google.com/rss/search?q={symbol}+stock+site:vn&hl=vi&gl=VN&ceid=VN:vi"
+        # Nếu symbol là nhóm ngành/bluechip/midcap thì tạo query phù hợp
+        if symbol.lower() in special_groups:
+            query = f"{symbol} chứng khoán site:vn"
+        else:
+            query = f"{symbol} stock site:vn"
+        google_news_url = f"https://news.google.com/rss/search?q={query.replace(' ', '+')}&hl=vi&gl=VN&ceid=VN:vi"
     else:
         # Google News RSS cho thị trường chung
         google_news_url = "https://news.google.com/rss/search?q=chung+khoan+OR+stock+OR+vnindex+OR+thị+trường+chứng+khoán&hl=vi&gl=VN&ceid=VN:vi"
@@ -2287,21 +2295,25 @@ async def get_news(symbol: str = None, limit: int = 3) -> list:
         "market", "stock", "index", "shares", "trading", "finance", "investment"
     ]
     
-    # Từ khóa cho mã cụ thể
+    # Từ khóa cho mã cụ thể hoặc nhóm ngành
     symbol_keywords = []
     if symbol:
         symbol_lower = symbol.lower()
-        # Tạo các biến thể của mã để tăng khả năng tìm thấy
-        symbol_keywords = [
-            symbol_lower,
-            f"{symbol_lower} ",
-            f" {symbol_lower}",
-            f" {symbol_lower} ",
-            f"mã {symbol_lower}",
-            f"cổ phiếu {symbol_lower}",
-            f"{symbol_lower} stock",
-            f"{symbol.upper()}"
-        ]
+        if symbol_lower in special_groups:
+            # Từ khóa cho nhóm ngành
+            symbol_keywords = [symbol_lower, f"{symbol_lower} chứng khoán", f"ngành {symbol_lower}", f"{symbol_lower} stock", f"{symbol_lower} sector"]
+        else:
+            # Từ khóa cho mã cổ phiếu
+            symbol_keywords = [
+                symbol_lower,
+                f"{symbol_lower} ",
+                f" {symbol_lower}",
+                f" {symbol_lower} ",
+                f"mã {symbol_lower}",
+                f"cổ phiếu {symbol_lower}",
+                f"{symbol_lower} stock",
+                f"{symbol.upper()}"
+            ]
     
     # Tạo danh sách để lưu tin tức
     news_list = []
