@@ -1,0 +1,5 @@
+Nhập trên trình duyệt:
+https://anvt-1.onrender.com/setup?secret=botchatai_secret&url=https://anvt-1.onrender.com
+
+https://api.telegram.org/bot<7780930655:AAEPJ77fbGwtDeCj-jCzVUuA-rZgGxPsuMM>/getWebhookInfo
+

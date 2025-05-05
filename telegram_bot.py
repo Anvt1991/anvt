@@ -375,8 +375,11 @@ def create_app():
     bot = TelegramOnlyBot()
     app = FastAPI()
 
-    @app.post(f"/webhook/{{bot.bot_token}}")
-    async def telegram_webhook(request: Request):
+    @app.post("/webhook/{bot_token}")
+    async def telegram_webhook(request: Request, bot_token: str):
+        # Bảo mật: chỉ xử lý nếu token đúng
+        if bot_token != bot.bot_token:
+            return Response(content="Forbidden", status_code=403)
         data = await request.json()
         update = Update.de_json(data, bot.bot)
         await bot.application.process_update(update)
