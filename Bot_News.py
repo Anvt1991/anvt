@@ -90,7 +90,7 @@ async def analyze_news(title, summary, model=None):
     try:
         # Gọi Google Gemini API chính thức
         genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-pro")
+        model = genai.GenerativeModel("gemini-1.5-pro")
         response = await asyncio.to_thread(model.generate_content, prompt)
         return response.text
     except Exception as e:
