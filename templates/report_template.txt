@@ -1,3 +1,0 @@
-{{ report.title }}
-Ngày: {{ report.date }}
-{{ report.trading_note }} 

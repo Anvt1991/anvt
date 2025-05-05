@@ -1,0 +1,7 @@
+aiogram==3.4
+aiohttp
+feedparser
+asyncpg
+aioredis
+httpx
+python-dotenv
