@@ -169,6 +169,7 @@ async def approve_user_callback(cb: CallbackQuery):
 # --- Tin tức theo chu kỳ ---
 async def news_job():
     while True:
+        await delete_old_news(days=7)  # Xóa tin cũ hơn 7 ngày
         for url in FEED_URLS:
             feed = feedparser.parse(url)
             for entry in feed.entries:
@@ -201,10 +202,45 @@ async def news_job():
 
 # --- Webhook setup ---
 # (Không đăng ký bất kỳ handler nào cho lệnh từ user)
+async def init_db():
+    async with pool.acquire() as conn:
+        # Tạo bảng news_insights nếu chưa có
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS news_insights (
+            id SERIAL PRIMARY KEY,
+            title TEXT,
+            link TEXT UNIQUE,
+            summary TEXT,
+            sentiment TEXT,
+            ai_opinion TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+        ''')
+        # Đảm bảo cột created_at tồn tại (nếu migrate từ bản cũ)
+        await conn.execute('''
+        ALTER TABLE news_insights ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+        ''')
+        # Tạo bảng subscribed_users nếu chưa có
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS subscribed_users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            is_approved BOOLEAN DEFAULT FALSE
+        );
+        ''')
+
+# Hàm xóa tin cũ hơn 7 ngày
+async def delete_old_news(days=7):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days';"
+        )
+
 async def on_startup(app):
     global redis, pool
     redis = await aioredis.from_url(REDIS_URL)
     pool = await asyncpg.create_pool(dsn=DB_URL)
+    await init_db()  # Tự động tạo bảng nếu chưa có
     await bot.set_webhook(WEBHOOK_URL)
     asyncio.create_task(news_job())
 
