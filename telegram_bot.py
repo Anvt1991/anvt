@@ -77,6 +77,8 @@ class TelegramOnlyBot:
         self.application = Application.builder().token(self.bot_token).build()
         
         # Đăng ký các lệnh
+        self.whitelist_path = os.path.join("cache", "approved_users.json")
+        self.approved_users = self._load_whitelist()
         self._register_handlers()
         
         logger.info("BotChatAI (phiên bản Telegram only) đã khởi tạo thành công")
@@ -127,47 +129,82 @@ class TelegramOnlyBot:
         # Thiết lập múi giờ
         os.environ['TZ'] = 'Asia/Ho_Chi_Minh'
     
+    def _load_whitelist(self):
+        if os.path.exists(self.whitelist_path):
+            try:
+                with open(self.whitelist_path, "r", encoding="utf-8") as f:
+                    return set(json.load(f))
+            except Exception:
+                return set()
+        return set()
+
+    def _save_whitelist(self):
+        with open(self.whitelist_path, "w", encoding="utf-8") as f:
+            json.dump(list(self.approved_users), f)
+
+    def _is_admin(self, update):
+        return str(update.effective_chat.id) == str(self.chat_id)
+
+    def _is_approved(self, update):
+        return self._is_admin(update) or str(update.effective_user.id) in self.approved_users
+
     def _register_handlers(self):
-        """
-        Đăng ký các handler xử lý lệnh
-        """
-        # Lệnh help và start
-        self.application.add_handler(CommandHandler("start", self.help_command))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        
-        # Các lệnh phân tích
-        self.application.add_handler(CommandHandler("analyze", self.analyze_command))
-        self.application.add_handler(CommandHandler("market", self.market_command))
-        self.application.add_handler(CommandHandler("symbols", self.symbols_command))
-        self.application.add_handler(CommandHandler("history", self.history_command))
-        
-        # Các lệnh hệ thống
-        self.application.add_handler(CommandHandler("status", self.status_command))
+        # Thêm lại lệnh start, giữ các lệnh approve, remove, update, analyze, status
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("approve", self.approve_command))
+        self.application.add_handler(CommandHandler("remove", self.remove_command))
         self.application.add_handler(CommandHandler("update", self.update_command))
+        self.application.add_handler(CommandHandler("analyze", self.analyze_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
     
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /help hoặc /start
-        """
-        help_text = """
-🤖 *BotChatAI - Trợ lý phân tích chứng khoán*
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_approved(update):
+            await update.message.reply_text("⛔ Bạn chưa được duyệt sử dụng bot. Vui lòng liên hệ admin.")
+            return
+        welcome_text = (
+            "🤖 *Chào mừng bạn đến với BotChatAI!*\n\n"
+            "Bạn đã được duyệt sử dụng bot.\n"
+            "\n*Lệnh chính:*\n"
+            "/analyze <mã> - Phân tích mã chứng khoán (ví dụ: /analyze FPT)\n"
+            "/status - Kiểm tra trạng thái hệ thống\n"
+            "/update - Cập nhật dữ liệu (chỉ admin)\n"
+            "/approve <user_id> - Duyệt user (chỉ admin)\n"
+            "/remove <user_id> - Xóa user khỏi whitelist (chỉ admin)\n"
+            "\n_Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hiện._"
+        )
+        await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
-*Các lệnh có sẵn:*
-/analyze <mã> - Phân tích mã cụ thể (vd: /analyze FPT)
-/market - Thông tin thị trường hiện tại
-/symbols - Danh sách mã chứng khoán
-/history <mã> - Lịch sử phân tích mã
-/status - Kiểm tra trạng thái hệ thống
-/help - Hiển thị trợ giúp này
+    async def approve_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_admin(update):
+            await update.message.reply_text("⛔ Bạn không có quyền sử dụng lệnh này.")
+            return
+        if not context.args:
+            await update.message.reply_text("⚠️ Vui lòng nhập user_id cần duyệt. Ví dụ: /approve 123456789")
+            return
+        user_id = context.args[0]
+        self.approved_users.add(user_id)
+        self._save_whitelist()
+        await update.message.reply_text(f"✅ Đã duyệt user_id: {user_id}")
 
-_Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hiện._
-"""
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
-    
+    async def remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_admin(update):
+            await update.message.reply_text("⛔ Bạn không có quyền sử dụng lệnh này.")
+            return
+        if not context.args:
+            await update.message.reply_text("⚠️ Vui lòng nhập user_id cần xóa. Ví dụ: /remove 123456789")
+            return
+        user_id = context.args[0]
+        if user_id in self.approved_users:
+            self.approved_users.remove(user_id)
+            self._save_whitelist()
+            await update.message.reply_text(f"✅ Đã xóa user_id: {user_id} khỏi whitelist")
+        else:
+            await update.message.reply_text(f"❌ user_id: {user_id} không có trong whitelist")
+
     async def analyze_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /analyze <mã>
-        """
+        if not self._is_approved(update):
+            await update.message.reply_text("⛔ Bạn chưa được duyệt sử dụng bot. Vui lòng liên hệ admin.")
+            return
         if not context.args:
             await update.message.reply_text("⚠️ Vui lòng nhập mã chứng khoán. Ví dụ: /analyze FPT")
             return
@@ -186,92 +223,10 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
             logger.error(f"Lỗi khi phân tích {symbol}: {str(e)}", exc_info=True)
             await loading_message.edit_text(f"❌ Lỗi khi phân tích {symbol}: {str(e)}")
     
-    async def market_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /market để hiển thị thông tin thị trường
-        """
-        loading_message = await update.message.reply_text("⏳ Đang lấy thông tin thị trường...")
-        
-        try:
-            pipeline_result = self.process_symbol("VNINDEX")
-            if pipeline_result and pipeline_result.get("report"):
-                await loading_message.edit_text(pipeline_result["report"], parse_mode=ParseMode.MARKDOWN)
-            else:
-                error_msg = pipeline_result.get("error", "Không rõ lỗi")
-                await loading_message.edit_text(f"❌ Không thể lấy thông tin thị trường: {error_msg}")
-        except Exception as e:
-            logger.error(f"Lỗi khi lấy thông tin thị trường: {str(e)}", exc_info=True)
-            await loading_message.edit_text(f"❌ Lỗi khi lấy thông tin thị trường: {str(e)}")
-    
-    async def symbols_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /symbols để hiển thị danh sách mã
-        """
-        try:
-            # Lấy danh sách mã từ DataLoader
-            vn30_symbols = self.data_loader.get_vn30_stocks()
-            
-            # Format danh sách mã
-            if vn30_symbols:
-                text = "📋 *DANH SÁCH MÃ VN30*\n\n"
-                chunks = [vn30_symbols[i:i+5] for i in range(0, len(vn30_symbols), 5)]
-                for chunk in chunks:
-                    text += " - ".join(chunk) + "\n"
-                text += "\n💡 *Cách dùng:* /analyze <mã> để phân tích mã cụ thể"
-            else:
-                text = "❌ Không thể lấy danh sách mã."
-            
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.error(f"Lỗi khi lấy danh sách mã: {str(e)}")
-            await update.message.reply_text(f"❌ Lỗi khi lấy danh sách mã: {str(e)}")
-    
-    async def history_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /history <mã> để hiển thị lịch sử phân tích
-        """
-        if not context.args:
-            await update.message.reply_text("⚠️ Vui lòng nhập mã chứng khoán. Ví dụ: /history FPT")
-            return
-        
-        symbol = context.args[0].upper()
-        loading_message = await update.message.reply_text(f"⏳ Đang lấy lịch sử phân tích {symbol}...")
-        
-        try:
-            # Lấy lịch sử phân tích từ database
-            history = self.db.load_report_history(symbol)
-            
-            if history and len(history) > 0:
-                text = f"📜 *LỊCH SỬ PHÂN TÍCH {symbol}*\n\n"
-                
-                # Hiển thị tối đa 5 báo cáo gần nhất
-                for i, report in enumerate(history[:5]):
-                    date = report.get("date", "N/A")
-                    
-                    text += f"📊 *Báo cáo {i+1}:* {date}\n"
-                    
-                    # Thêm đoạn đầu của báo cáo
-                    report_content = report.get("report", "")
-                    if report_content:
-                        # Lấy 2 dòng đầu tiên
-                        first_lines = "\n".join(report_content.split("\n")[:2])
-                        text += f"{first_lines}...\n"
-                    
-                    text += "---------------------\n"
-                
-                text += f"\n💡 Sử dụng /analyze {symbol} để phân tích mới nhất"
-            else:
-                text = f"❌ Không có lịch sử phân tích cho {symbol}."
-            
-            await loading_message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
-        except Exception as e:
-            logger.error(f"Lỗi khi lấy lịch sử phân tích {symbol}: {str(e)}")
-            await loading_message.edit_text(f"❌ Lỗi khi lấy lịch sử phân tích {symbol}: {str(e)}")
-    
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /status để kiểm tra trạng thái hệ thống
-        """
+        if not self._is_approved(update):
+            await update.message.reply_text("⛔ Bạn chưa được duyệt sử dụng bot. Vui lòng liên hệ admin.")
+            return
         loading_message = await update.message.reply_text("⏳ Đang kiểm tra trạng thái hệ thống...")
         
         try:
@@ -303,14 +258,9 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
             await loading_message.edit_text(f"❌ Lỗi khi kiểm tra trạng thái: {str(e)}")
     
     async def update_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Xử lý lệnh /update để cập nhật thông tin thị trường
-        """
-        # Chỉ cho phép admin sử dụng lệnh này
-        if str(update.effective_chat.id) != str(self.chat_id):
+        if not self._is_admin(update):
             await update.message.reply_text("⛔ Bạn không có quyền sử dụng lệnh này.")
             return
-        
         loading_message = await update.message.reply_text("⏳ Đang cập nhật dữ liệu thị trường...")
         
         try:
