@@ -80,7 +80,7 @@ streamlit>=1.10.0
 pydantic-settings
 
 # Thư viện cơ bản
-numpy==1.24.3
+numpy
 pandas==2.0.1
 matplotlib==3.7.1
 seaborn==0.12.2
