@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+import signal
+import sys
 
 # Data processing imports
 import pandas as pd
@@ -182,25 +184,32 @@ class ChatSessionManager:
     
     async def cleanup_sessions(self):
         """Dọn dẹp các phiên chat quá hạn (sau 15 phút không hoạt động)"""
-        while True:
-            await asyncio.sleep(60)  # Kiểm tra mỗi phút
-            now = datetime.now(TZ)
-            expired_users = []
-            
-            for user_id, session in self.sessions.items():
-                # Kiểm tra thời gian không hoạt động
-                inactive_time = now - session["start_time"]
-                if inactive_time.total_seconds() > 900:  # 15 phút
-                    expired_users.append(user_id)
-            
-            # Xóa các phiên hết hạn
-            for user_id in expired_users:
-                logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
-                self.end_session(user_id)
-            
-            # Dừng task nếu không còn phiên nào
-            if not self.sessions:
-                break
+        try:
+            while True:
+                await asyncio.sleep(60)  # Kiểm tra mỗi phút
+                now = datetime.now(TZ)
+                expired_users = []
+                
+                for user_id, session in self.sessions.items():
+                    # Kiểm tra thời gian không hoạt động
+                    inactive_time = now - session["start_time"]
+                    if inactive_time.total_seconds() > 900:  # 15 phút
+                        expired_users.append(user_id)
+                
+                # Xóa các phiên hết hạn
+                for user_id in expired_users:
+                    logger.info(f"Phiên chat của user {user_id} đã hết hạn sau 15 phút không hoạt động")
+                    self.end_session(user_id)
+                
+                # Dừng task nếu không còn phiên nào
+                if not self.sessions:
+                    break
+        except asyncio.CancelledError:
+            # Xử lý khi task bị hủy, đảm bảo dừng thanh lịch
+            logger.info("Task cleanup_sessions đã bị hủy, dừng thanh lịch")
+            raise
+        except Exception as e:
+            logger.error(f"Lỗi trong cleanup_sessions: {str(e)}")
 
 # Khởi tạo chat session manager toàn cục
 chat_manager = ChatSessionManager()
@@ -2057,7 +2066,7 @@ class AIAnalyzer:
             if is_index:
                 # Prompt cho chỉ số
                 prompt = f"""
-Bạn là chuyên gia phân tích kỹ thuật, trader chuyên nghiệp, chuyên gia với 30 năm kinh nghiệm trong phân tích thị trường chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho chỉ số {symbol} ({index_type}):
+Bạn là chuyên gia phân tích kỹ thuật với 30 năm kinh nghiệm trong phân tích thị trường chứng khoán Việt Nam. Hãy viết báo cáo chi tiết cho chỉ số {symbol} ({index_type}):
 
 **Thông tin chung:**
 - Chỉ số: {symbol} ({index_type})
@@ -2133,7 +2142,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
 3. Phân tích chi tiết các chỉ số kỹ thuật, vùng hỗ trợ/kháng cự của chỉ số.
 4. Đánh giá rủi ro thị trường và mức tâm lý nhà đầu tư.
 5. Đưa ra dự báo xu hướng thị trường và các kịch bản có thể xảy ra.
-6. Đề cập đến tác động của các yếu tố vĩ mô nếu có.
+6. Đề cập đến tác động của các tin tức, yếu tố vĩ mô nếu có.
 7. Nếu là VNINDEX, hãy phân tích thêm về sức mạnh của nhóm ngành, bluechip và midcap.
 8. Nếu là VN30, hãy đề cập đến khả năng giao dịch phái sinh.
 9. Trình bày logic, súc tích nhưng đủ thông tin để người đọc có cái nhìn tổng quan về thị trường.
@@ -2147,7 +2156,7 @@ Bạn là chuyên gia phân tích kỹ thuật và cơ bản, trader chuyên ngh
                 # Hướng dẫn đặc biệt cho cổ phiếu
                 prompt += """
 **Yêu cầu:**
-1. Tóm tắt tổng quan.
+1. Tóm tắt tổng quan, tin tức.
 2. Phân tích đa khung thời gian, xu hướng ngắn hạn, trung hạn, dài hạn.
 3. Đánh giá các chỉ số kỹ thuật, mẫu hình, sóng, mô hình nến. Động lực thị trường.
 4. Xác định Hỗ trợ/kháng cự. Đưa ra kịch bản và xác suất % (tăng, giảm, sideway).
@@ -3363,69 +3372,66 @@ async def exit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- MAIN ----------
 def main():
-    """
-    Hàm chính khởi chạy ứng dụng Telegram bot
-    """
-    # Tạo và khởi tạo application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # Thêm các handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("analyze", analyze_command))
-    application.add_handler(CommandHandler("getid", get_id))
-    application.add_handler(CommandHandler("approve", approve_user))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("exit", exit_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-
-    # Thiết lập event loop
+    """Khởi chạy bot và webhook"""
     try:
+        # Khởi tạo logger
+        init_logger()
+        logger.info(f"Bot V19.5 đã khởi chạy trên Render với webhook: {WEBHOOK_URL}")
+        
+        # Setup Postgres Migration tự động
         loop = asyncio.get_event_loop()
-    except RuntimeError:
-        # Tạo event loop mới nếu không có
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    # Khởi tạo cơ sở dữ liệu PostgreSQL
-    loop.run_until_complete(init_db())
-    
-    # Thực hiện di chuyển dữ liệu từ cơ sở dữ liệu cũ (nếu có)
-    loop.run_until_complete(migrate_database())
-    
-    # Thiết lập scheduler cho auto training
-    scheduler = AsyncIOScheduler(event_loop=loop)
-    # Chạy training vào 2 giờ sáng ngày 1 mỗi tháng
-    scheduler.add_job(auto_train_models, 'cron', day=1, hour=2, minute=0, 
-                     misfire_grace_time=3600, coalesce=True, max_instances=1)
-    scheduler.start()
-    logger.info("Auto training scheduler đã khởi động.")
-
-    # Xác định chế độ chạy (webhook trên Render hoặc polling cho local)
-    is_render = RENDER_EXTERNAL_URL and RENDER_SERVICE_NAME
-    
-    if is_render:
-        # Thiết lập webhook cho Render
-        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+        loop.run_until_complete(init_db())
+        loop.run_until_complete(migrate_database())
+        
+        # Thiết lập shutdown event handler
+        def stop_application(signum, frame):
+            logger.info("Nhận tín hiệu dừng ứng dụng...")
+            # Hủy task cleanup_sessions nếu đang chạy
+            if chat_manager.cleanup_task and not chat_manager.cleanup_task.done():
+                logger.info("Hủy task cleanup_sessions...")
+                chat_manager.cleanup_task.cancel()
+            # Dừng application
+            application.stop()
+            # Thoát ứng dụng
+            sys.exit(0)
+        
+        # Đăng ký tín hiệu thoát
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, stop_application)
+        
+        # Tạo application telegram
+        application = Application.builder().token(TOKEN).build()
+        
+        # Thêm handlers
+        application.add_handler(CommandHandler(['analyze', 'a'], analyze_command))
+        application.add_handler(CommandHandler('help', help_command))
+        application.add_handler(CommandHandler('start', start))
+        application.add_handler(CommandHandler('getid', get_id))
+        application.add_handler(CommandHandler('approve', approve_user))
+        application.add_handler(CommandHandler('exit', exit_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+        
+        # Thiết lập scheduler cho auto training
+        scheduler = AsyncIOScheduler(event_loop=loop)
+        # Chạy training vào 2 giờ sáng ngày 1 mỗi tháng
+        scheduler.add_job(auto_train_models, 'cron', day=1, hour=2, minute=0, 
+                         misfire_grace_time=3600, coalesce=True, max_instances=1)
+        scheduler.start()
+        logger.info("Auto training scheduler đã khởi động.")
+        
+        # Chạy webhook
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path="webhook",
-            webhook_url=webhook_url
+            url_path=TOKEN,
+            webhook_url=WEBHOOK_URL
         )
-        logger.info(f"Bot V19.5 đã khởi chạy trên Render với webhook: {webhook_url}")
-    else:
-        # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.5 đã khởi chạy (chế độ local).")
-        application.run_polling()
-
-if __name__ == "__main__":
-    # Đảm bảo event loop được khởi tạo đúng cách
-    try:
-        main()
     except Exception as e:
-        logger.error(f"Lỗi khi khởi động bot: {str(e)}")
-        # Nếu lỗi event loop, thử tạo mới và khởi động lại
-        if "no current event loop" in str(e).lower():
-            logger.info("Thử tạo event loop mới và khởi động lại...")
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            main()
+        logger.error(f"Lỗi khởi động bot: {str(e)}")
+        if 'application' in locals() and application:
+            # Hủy task cleanup_sessions nếu đang chạy
+            if chat_manager.cleanup_task and not chat_manager.cleanup_task.done():
+                logger.info("Hủy task cleanup_sessions do lỗi...")
+                chat_manager.cleanup_task.cancel()
+            # Dừng application
+            application.stop()
