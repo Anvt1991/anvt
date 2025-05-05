@@ -19,7 +19,7 @@ httpx>=0.24.1
 
 # Stock data APIs
 yfinance==0.2.18
-vnstock==3.2.4
+vnstock
 
 # Technical analysis
 ta==0.10.2
