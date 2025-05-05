@@ -1,0 +1,133 @@
+{
+    "version": "2.0",
+    "app": {
+        "name": "BotChatAI",
+        "description": "AI-powered Stock Market Analysis Bot (Telegram Only)",
+        "debug_mode": false,
+        "log_level": "INFO",
+        "locale": "vi_VN",
+        "timezone": "Asia/Ho_Chi_Minh"
+    },
+    "database": {
+        "file": "bot_sieucap_v19.db",
+        "optimize_interval": 86400,
+        "backup_enabled": true,
+        "backup_interval": 604800,
+        "max_history_days": 90
+    },
+    "data": {
+        "cache_ttl": 3600,
+        "max_cache_size": 200,
+        "default_source": "vnstock",
+        "fallback_source": "yfinance",
+        "default_period": "1y",
+        "default_interval": "1d",
+        "data_validation": {
+            "enabled": true,
+            "outlier_detection": "iqr",
+            "outlier_threshold": 3.0,
+            "min_data_points": 30
+        }
+    },
+    "ai": {
+        "providers": {
+            "groq": {
+                "enabled": true,
+                "model": "deepseek-r1-distill-llama-70b",
+                "temperature": 0.3,
+                "max_tokens": 4096,
+                "top_p": 0.9,
+                "max_retries": 3,
+                "retry_delay": 1.0
+            },
+            "gemini": {
+                "enabled": true,
+                "model": "gemini-1.5-pro",
+                "temperature": 0.2,
+                "max_tokens": 8192,
+                "top_p": 0.95,
+                "max_retries": 3,
+                "retry_delay": 1.0
+            }
+        }
+    },
+    "ml_model": {
+        "model_type": "classifier",
+        "model_name": "xgboost",
+        "feature_selection": {
+            "method": "rfe",
+            "n_features": 15
+        },
+        "training": {
+            "test_size": 0.2,
+            "random_state": 42,
+            "early_stopping_rounds": 20
+        },
+        "evaluation": {
+            "metrics": ["accuracy", "precision", "recall", "f1_score"]
+        }
+    },
+    "feature_engineering": {
+        "technical_indicators": [
+            {"name": "sma", "parameters": {"window": 20}},
+            {"name": "sma", "parameters": {"window": 50}},
+            {"name": "sma", "parameters": {"window": 200}},
+            {"name": "ema", "parameters": {"window": 12}},
+            {"name": "ema", "parameters": {"window": 26}},
+            {"name": "macd", "parameters": {"fast": 12, "slow": 26, "signal": 9}},
+            {"name": "rsi", "parameters": {"window": 14}},
+            {"name": "stoch", "parameters": {"window": 14, "smooth_window": 3}},
+            {"name": "bbands", "parameters": {"window": 20, "std": 2}},
+            {"name": "atr", "parameters": {"window": 14}},
+            {"name": "adx", "parameters": {"window": 14}},
+            {"name": "obv", "parameters": {}}
+        ]
+    },
+    "market_data": {
+        "indices": ["VNINDEX", "VN30", "HNX30", "HNXINDEX", "UPCOM"],
+        "benchmark": "VNINDEX",
+        "vn30_stocks": [
+            "ACB", "BID", "BVH", "CTG", "FPT", "GAS", "GVR", "HDB", "HPG", "MBB",
+            "MSN", "MWG", "NVL", "PDR", "PLX", "PNJ", "POW", "SAB", "SHB", "SSI",
+            "STB", "TCB", "TPB", "VCB", "VHM", "VIB", "VIC", "VJC", "VNM", "VPB"
+        ]
+    },
+    "technical_analysis": {
+        "short_term_period": 14,
+        "medium_term_period": 50,
+        "long_term_period": 200,
+        "volume_significance_threshold": 1.5,
+        "trend_change_threshold": 0.05
+    },
+    "sentiment_analysis": {
+        "news_days": 7,
+        "social_days": 3,
+        "min_news_count": 5,
+        "positive_threshold": 0.6,
+        "negative_threshold": 0.4
+    },
+    "telegram": {
+        "enabled": true,
+        "bot_token": "",
+        "chat_id": "",
+        "admin_users": [],
+        "parse_mode": "MARKDOWN",
+        "message_delay": 1,
+        "max_message_length": 4096,
+        "daily_report": {
+            "enabled": true,
+            "time": "17:30",
+            "symbols": ["VNINDEX", "VN30", "VCB", "VNM", "VHM", "FPT", "HPG"]
+        },
+        "auto_response": {
+            "enabled": true,
+            "greeting": "Chào mừng bạn đến với BotChatAI! Gõ /help để xem danh sách lệnh.",
+            "error": "Đã xảy ra lỗi. Vui lòng thử lại sau hoặc liên hệ admin."
+        },
+        "throttling": {
+            "enabled": true,
+            "max_requests_per_minute": 30,
+            "max_analyze_per_hour": 60
+        }
+    }
+} 

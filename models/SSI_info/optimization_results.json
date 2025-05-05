@@ -1,0 +1,74 @@
+{
+    "optimized_at": "2025-05-05T02:33:25.232274",
+    "best_model": "xgboost",
+    "best_value": 0.6233729200214708,
+    "best_params": {
+        "n_estimators": 259,
+        "max_depth": 8,
+        "learning_rate": 0.023248636200618435,
+        "subsample": 0.7744026543542324,
+        "colsample_bytree": 0.6563521630772755,
+        "min_child_weight": 5,
+        "gamma": 0.5408049110709378
+    },
+    "all_results": {
+        "random_forest": {
+            "best_params": {
+                "max_features": "log2",
+                "n_estimators": 417,
+                "max_depth": 9,
+                "min_samples_split": 2,
+                "min_samples_leaf": 10
+            },
+            "best_value": 0.5840473702542669
+        },
+        "xgboost": {
+            "best_params": {
+                "n_estimators": 259,
+                "max_depth": 8,
+                "learning_rate": 0.023248636200618435,
+                "subsample": 0.7744026543542324,
+                "colsample_bytree": 0.6563521630772755,
+                "min_child_weight": 5,
+                "gamma": 0.5408049110709378
+            },
+            "best_value": 0.6233729200214708
+        }
+    },
+    "method": "simple_grid_search",
+    "feature_names": [
+        "high_low_range_ma10",
+        "open",
+        "high",
+        "bb_width",
+        "sma_10",
+        "obv",
+        "ema_20",
+        "returns_std_5",
+        "atr_percent",
+        "sma_5",
+        "returns_mean_20",
+        "atr",
+        "volatility_10",
+        "sma_20",
+        "adx",
+        "macd",
+        "macd_signal",
+        "bb_lower",
+        "returns_lag_5",
+        "volatility_20",
+        "close_over_ema_10",
+        "obv_ma",
+        "stoch_k",
+        "bb_upper",
+        "close_over_sma_20",
+        "close_over_sma_10",
+        "ema_50",
+        "ema_100",
+        "close_over_ema_50",
+        "close_max_10",
+        "sma_50",
+        "mom_10",
+        "returns_lag_1"
+    ]
+}

@@ -1,23 +1,31 @@
+# render.yaml - Cấu hình triển khai BotChatAI trên Render.com
+
 services:
   - type: web
-    name: stock-bot
+    name: botchatai-telegram-bot
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
     plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn telegram_bot:main --host 0.0.0.0 --port 10000"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9
-      - key: REDIS_URL
-        sync: false
-      - key: DATABASE_URL
-        sync: false
-      - key: TELEGRAM_TOKEN
-        sync: false
+        value: 3.10
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # Điền giá trị thực tế trong dashboard Render
+      - key: SETUP_SECRET
+        sync: false  # Điền giá trị thực tế trong dashboard Render
+      - key: GROQ_API_KEY
+        sync: false  # Điền giá trị thực tế trong dashboard Render
       - key: GEMINI_API_KEY
-        sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
-    preDeployCommand: |
-      pip install --upgrade pip
-      pip install 'python-telegram-bot[webhooks]>=13.7'
+        sync: false  # Điền giá trị thực tế trong dashboard Render
+    autoDeploy: true
+
+# Ghi chú:
+# - Sau khi deploy, truy cập vào URL: https://your-app-name.onrender.com/setup?secret=YOUR_SETUP_SECRET&url=https://your-app-name.onrender.com
+# - Nơi YOUR_SETUP_SECRET là giá trị của biến môi trường SETUP_SECRET bạn đã đặt
+# - Webhook URL sẽ tự động được thiết lập là: https://your-app-name.onrender.com/webhook/{TELEGRAM_BOT_TOKEN}
+
+# Ghi chú:
+# - Đảm bảo file requirements.txt đã đầy đủ các thư viện cần thiết.
+# - Nếu cần chạy GUI hoặc các dịch vụ khác, tạo thêm service tương ứng.
+# - Để bảo mật, không commit file .env lên repo, chỉ cấu hình biến môi trường trên Render dashboard. 

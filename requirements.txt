@@ -1,55 +1,126 @@
-python-dotenv>=0.19.0
-aiohttp>=3.8.0
-tenacity
-asyncio
-feedparser
-pandas>=1.3.0
-numpy>=1.20.0
+# Core packages
+numpy==1.24.3
+pandas==2.0.1
+matplotlib==3.7.1
+scikit-learn==1.2.2
+requests==2.30.0
+python-dotenv==1.0.0
+pytz==2023.3
+python-telegram-bot[ext] >= 20.0
+tenacity==8.2.2
+cachetools==5.3.1
 
-ta
-yfinance
-vnstock>=0.2.0
+# FastAPI và Uvicorn cho Telegram Bot
+fastapi>=0.100
+uvicorn[standard]>=0.23
+pydantic>=1.10.7
+httpx>=0.24
 
-google-generativeai
-xgboost>=1.4.0
-prophet>=1.0.0
+# Stock data APIs
+yfinance==0.2.18
+vnstock==0.1.5
 
-matplotlib>=3.4.0
+# Technical analysis
+ta==0.10.2
 
-SQLAlchemy>=1.4.0
-asyncpg
+# Forecasting
+prophet==1.1.4
+xgboost==1.7.6
 
-redis>=4.0.0
+# Web APIs
+groq==0.4.0
+google-generativeai>=0.3
+aiohttp==3.8.4
+requests
 
-python-telegram-bot[webhooks]>=13.7
+# Database
+aiosqlite==0.19.0
 
-scikit-learn>=0.24.0
+# Scheduling
+apscheduler==3.10.1
 
-nest-asyncio>=1.5.0
+# Date handling
+holidays==0.33
 
-kaleido
+# HTTP extras
+requests-cache==1.1.0
+requests-ratelimiter==0.4.0
 
-psycopg2-binary>=2.9.0
+# Data processing
+feedparser==6.0.10
+beautifulsoup4==4.12.2
+lxml==4.9.3
 
-holiday
+# AI API clients
+openai>=1.0.0
 
-APScheduler>=3.7.0
+# Data visualization
+seaborn==0.12.2
 
-openrouter
+# Report generation
+jinja2==3.1.2
+python-docx==1.0.1
+fpdf2==2.7.5
 
-statsmodels>=0.13.0
+# Utility
+tqdm==4.65.0
+loguru>=0.7
 
-plotly>=5.3.0
+# Thư viện xử lý dữ liệu chứng khoán
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+rapidfuzz
 
-tqdm>=4.62.0
+# Thư viện giao diện người dùng
+flask>=2.1.0
+streamlit>=1.10.0
 
-beautifulsoup4>=4.10.0
-requests>=2.26.0
-lxml>=4.6.0
-pytz>=2021.1
+# Additional dependencies
+pydantic-settings==2.1.0
 
-optuna>=3.0.0
+# Thư viện cơ bản
+numpy>=1.23
+pandas>=1.5
+matplotlib==3.7.1
+seaborn==0.12.2
+scikit-learn>=1.2
+yfinance>=0.2
+vnstock==0.1.5
 
+# Thư viện xử lý dữ liệu và đồ thị
+plotly==5.14.1
+cufflinks==0.17.3
+ta==0.10.2
 
+# Các thư viện hỗ trợ
+python-dotenv>=1.0
+joblib==1.2.0
+tenacity==8.2.2
+requests==2.30.0
+wheel==0.40.0
+pytz>=2023.3
+tqdm==4.65.0
+pydantic==1.10.7
 
+# Thư viện UI
+tk==0.1.0
 
+# Thư viện API AI
+httpx==0.24
+aiohttp==3.8.4
+async-timeout==4.0.2
+groq==0.4.0
+google-generativeai==0.3.1
+loguru==0.7.0
+
+# Dev tools
+pylint==2.17.4
+pytest==7.3.1
+black==23.3.0
+isort==5.12.0
+
+# Additional dependencies
+SQLAlchemy[asyncio] >= 2.0
+asyncpg >= 0.27
+redis[asyncio] >= 4.5
+PyYAML >= 6.0 

@@ -1,0 +1,133 @@
+2025-04-29 20:05:36,919 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: cannot import name 'send_report_to_telegram' from partially initialized module 'core.data.db' (most likely due to a circular import) (D:\BotChatAI\LocalV1.9\core\data\db.py)
+2025-04-29 20:05:36,920 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV1.9\app\main.py", line 152, in main
+    from core.data.db import DBManager
+  File "D:\BotChatAI\LocalV1.9\core\data\db.py", line 20, in <module>
+    from core.data.db import send_report_to_telegram
+ImportError: cannot import name 'send_report_to_telegram' from partially initialized module 'core.data.db' (most likely due to a circular import) (D:\BotChatAI\LocalV1.9\core\data\db.py)
+
+2025-04-29 20:06:25,739 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: No module named 'core.ml_model'
+2025-04-29 20:06:25,742 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV1.9\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV1.9\core\chatbot\chatbot.py", line 40, in <module>
+    from core.ai.enhanced_predictor import EnhancedPredictor
+  File "D:\BotChatAI\LocalV1.9\core\ai\enhanced_predictor.py", line 22, in <module>
+    from core.ml_model import ModelTuner
+ModuleNotFoundError: No module named 'core.ml_model'
+
+2025-05-04 14:45:39,617 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: cannot import name 'AccumulationDistributionIndicator' from 'ta.volume' (C:\Users\antdh\AppData\Local\Programs\Python\Python310\lib\site-packages\ta\volume.py)
+2025-05-04 14:45:39,617 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 46, in <module>
+    from pipeline.processor import PipelineProcessor
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\processor.py", line 35, in <module>
+    from pipeline.report_generator import ReportGenerator
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\report_generator.py", line 26, in <module>
+    from ta.volume import OnBalanceVolumeIndicator, AccumulationDistributionIndicator
+ImportError: cannot import name 'AccumulationDistributionIndicator' from 'ta.volume' (C:\Users\antdh\AppData\Local\Programs\Python\Python310\lib\site-packages\ta\volume.py)
+
+2025-05-04 14:46:40,004 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: No module named 'db'
+2025-05-04 14:46:40,020 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 46, in <module>
+    from pipeline.processor import PipelineProcessor
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\processor.py", line 36, in <module>
+    from db import DBManager
+ModuleNotFoundError: No module named 'db'
+
+2025-05-04 14:47:44,006 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: No module named 'groq_handler'
+2025-05-04 14:47:44,006 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 46, in <module>
+    from pipeline.processor import PipelineProcessor
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\processor.py", line 37, in <module>
+    from core.ai.ai_interface import AIInterface
+  File "D:\BotChatAI\LocalV2.3.2\core\ai\ai_interface.py", line 24, in <module>
+    from groq_handler import GroqHandler
+ModuleNotFoundError: No module named 'groq_handler'
+
+2025-05-04 17:22:35,959 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: duplicate argument 'y_train' in function definition (model_manager.py, line 520)
+2025-05-04 17:22:35,959 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 39, in <module>
+    from core.ai.enhanced_predictor import EnhancedPredictor
+  File "D:\BotChatAI\LocalV2.3.2\core\ai\enhanced_predictor.py", line 22, in <module>
+    from core.ai.model_manager import ModelManager
+  File "D:\BotChatAI\LocalV2.3.2\core\ai\model_manager.py", line 520
+    def _simple_optimize(self, symbol: str, X_train, y_train, X_test, y_train, selected_features):
+                                                                      ^^^^^^^
+SyntaxError: duplicate argument 'y_train' in function definition
+
+2025-05-04 19:12:59,621 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: cannot import name 'ModelTuner' from 'core.model.ml_model' (D:\BotChatAI\LocalV2.3.2\core\model\ml_model.py)
+2025-05-04 19:12:59,621 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 39, in <module>
+    from core.ai.enhanced_predictor import EnhancedPredictor
+  File "D:\BotChatAI\LocalV2.3.2\core\ai\enhanced_predictor.py", line 18, in <module>
+    from core.model.ml_model import MLPredictor, ModelTuner
+ImportError: cannot import name 'ModelTuner' from 'core.model.ml_model' (D:\BotChatAI\LocalV2.3.2\core\model\ml_model.py)
+
+2025-05-04 19:33:24,607 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: No module named 'core.ai.enhanced_predictor'
+2025-05-04 19:33:24,607 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 39, in <module>
+    from core.ai.enhanced_predictor import EnhancedPredictor
+ModuleNotFoundError: No module named 'core.ai.enhanced_predictor'
+
+2025-05-04 19:35:33,564 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: No module named 'core.model.feature_engineering'
+2025-05-04 19:35:33,564 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 45, in <module>
+    from pipeline.processor import PipelineProcessor
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\processor.py", line 29, in <module>
+    from core.model.feature_engineering import FeatureEngineer
+ModuleNotFoundError: No module named 'core.model.feature_engineering'
+
+2025-05-04 22:07:07,690 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: No module named 'core.ai.config'
+2025-05-04 22:07:07,692 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 39, in <module>
+    from core.model.enhanced_predictor import EnhancedPredictor
+  File "D:\BotChatAI\LocalV2.3.2\core\model\enhanced_predictor.py", line 25, in <module>
+    from core.ai.config import ConfigManager
+ModuleNotFoundError: No module named 'core.ai.config'
+
+2025-05-05 07:28:08,261 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: cannot import name 'DBManager' from partially initialized module 'core.data.db' (most likely due to a circular import) (D:\BotChatAI\LocalV2.3.2\core\data\db.py)
+2025-05-05 07:28:08,261 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 152, in main
+    from core.data.db import DBManager
+  File "D:\BotChatAI\LocalV2.3.2\core\data\db.py", line 21, in <module>
+    from core.telegram.notify import send_report_to_telegram
+  File "D:\BotChatAI\LocalV2.3.2\core\telegram\__init__.py", line 8, in <module>
+    from core.telegram.bot import BotChatAITelegramBot, setup_webhook, start_bot
+  File "D:\BotChatAI\LocalV2.3.2\core\telegram\bot.py", line 20, in <module>
+    from pipeline.processor import PipelineProcessor
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\processor.py", line 34, in <module>
+    from core.data.db import DBManager
+ImportError: cannot import name 'DBManager' from partially initialized module 'core.data.db' (most likely due to a circular import) (D:\BotChatAI\LocalV2.3.2\core\data\db.py)
+
+2025-05-05 07:46:27,801 - botchatai.main - ERROR - main.py:169 - main - Critical error during startup: cannot import name 'PipelineProcessor' from partially initialized module 'pipeline.processor' (most likely due to a circular import) (D:\BotChatAI\LocalV2.3.2\pipeline\processor.py)
+2025-05-05 07:46:27,801 - botchatai.main - ERROR - main.py:170 - main - Traceback (most recent call last):
+  File "D:\BotChatAI\LocalV2.3.2\app\main.py", line 159, in main
+    from core.chatbot.chatbot import ChatbotGUI
+  File "D:\BotChatAI\LocalV2.3.2\core\chatbot\chatbot.py", line 44, in <module>
+    from pipeline.processor import PipelineProcessor
+  File "D:\BotChatAI\LocalV2.3.2\pipeline\processor.py", line 39, in <module>
+    from core.report.manager import ReportManager
+  File "D:\BotChatAI\LocalV2.3.2\core\report\manager.py", line 6, in <module>
+    from core.telegram.notify import send_report_to_telegram
+  File "D:\BotChatAI\LocalV2.3.2\core\telegram\__init__.py", line 8, in <module>
+    from core.telegram.bot import BotChatAITelegramBot, setup_webhook, start_bot
+  File "D:\BotChatAI\LocalV2.3.2\core\telegram\bot.py", line 20, in <module>
+    from pipeline.processor import PipelineProcessor
+ImportError: cannot import name 'PipelineProcessor' from partially initialized module 'pipeline.processor' (most likely due to a circular import) (D:\BotChatAI\LocalV2.3.2\pipeline\processor.py)
+

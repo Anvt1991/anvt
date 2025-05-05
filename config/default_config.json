@@ -1,0 +1,245 @@
+{
+    "version": "1.7",
+    "app": {
+        "name": "BotChatAI",
+        "description": "AI-powered Stock Market Analysis Bot",
+        "debug_mode": false,
+        "log_level": "INFO",
+        "locale": "vi_VN",
+        "timezone": "Asia/Ho_Chi_Minh"
+    },
+    "database": {
+        "file": "bot_sieucap_v19.db",
+        "optimize_interval": 86400,
+        "backup_enabled": true,
+        "backup_interval": 604800,
+        "max_history_days": 90
+    },
+    "data": {
+        "cache_ttl": 3600,
+        "max_cache_size": 200,
+        "default_source": "vnstock",
+        "fallback_source": "yfinance",
+        "default_period": "1y",
+        "default_interval": "1d",
+        "data_validation": {
+            "enabled": true,
+            "outlier_detection": "iqr",
+            "outlier_threshold": 3.0,
+            "min_data_points": 30
+        }
+    },
+    "ai": {
+        "providers": {
+            "groq": {
+                "enabled": true,
+                "model": "deepseek-r1-distill-llama-70b",
+                "temperature": 0.3,
+                "max_tokens": 4096,
+                "top_p": 0.9,
+                "max_retries": 3,
+                "retry_delay": 1.0
+            },
+            "gemini": {
+                "enabled": true,
+                "model": "gemini-pro",
+                "temperature": 0.2,
+                "max_tokens": 8192,
+                "top_p": 0.95,
+                "max_retries": 3,
+                "retry_delay": 1.0
+            },
+            "local": {
+                "enabled": false,
+                "model_path": "models/local_model"
+            }
+        },
+        "prompts": {
+            "pattern_analysis": {
+                "system_message": "config/prompts/pattern_analysis_system.txt",
+                "temperature": 0.3
+            },
+            "market_analysis": {
+                "system_message": "config/prompts/market_analysis_system.txt",
+                "temperature": 0.2
+            },
+            "portfolio_optimization": {
+                "system_message": "config/prompts/portfolio_system.txt",
+                "temperature": 0.1
+            }
+        }
+    },
+    "ml_model": {
+        "model_type": "classifier",
+        "model_name": "xgboost",
+        "feature_selection": {
+            "method": "rfe",
+            "n_features": 15
+        },
+        "optimization": {
+            "enabled": true,
+            "method": "optuna",
+            "cv": 5,
+            "n_trials": 50
+        },
+        "training": {
+            "test_size": 0.2,
+            "random_state": 42,
+            "early_stopping_rounds": 20
+        },
+        "evaluation": {
+            "metrics": ["accuracy", "precision", "recall", "f1_score"]
+        },
+        "hyperparameters": {
+            "xgboost": {
+                "n_estimators": 200,
+                "learning_rate": 0.05,
+                "max_depth": 6,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "gamma": 0.1,
+                "min_child_weight": 1
+            },
+            "lightgbm": {
+                "n_estimators": 200,
+                "learning_rate": 0.05,
+                "max_depth": 6,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "min_child_samples": 20
+            },
+            "random_forest": {
+                "n_estimators": 200,
+                "max_depth": 10,
+                "min_samples_split": 5,
+                "min_samples_leaf": 2,
+                "max_features": "sqrt"
+            }
+        }
+    },
+    "ensemble": {
+        "enabled": true,
+        "voting_type": "soft",
+        "weight_optimization": true,
+        "models": ["random_forest", "xgboost", "lightgbm"],
+        "meta_model": "lightgbm"
+    },
+    "online_learning": {
+        "enabled": true,
+        "min_samples": 10,
+        "update_frequency": 7,
+        "learning_rate": 0.05
+    },
+    "predictor": {
+        "weights": {
+            "technical": 0.30,
+            "sentiment": 0.15,
+            "ai": 0.45,
+            "market": 0.10
+        },
+        "confidence_threshold": {
+            "high": 0.75,
+            "medium": 0.6,
+            "low": 0.5
+        }
+    },
+    "feature_engineering": {
+        "technical_indicators": [
+            {"name": "sma", "parameters": {"window": 20}},
+            {"name": "sma", "parameters": {"window": 50}},
+            {"name": "sma", "parameters": {"window": 200}},
+            {"name": "ema", "parameters": {"window": 12}},
+            {"name": "ema", "parameters": {"window": 26}},
+            {"name": "macd", "parameters": {"fast": 12, "slow": 26, "signal": 9}},
+            {"name": "rsi", "parameters": {"window": 14}},
+            {"name": "stoch", "parameters": {"window": 14, "smooth_window": 3}},
+            {"name": "bbands", "parameters": {"window": 20, "std": 2}},
+            {"name": "atr", "parameters": {"window": 14}},
+            {"name": "adx", "parameters": {"window": 14}},
+            {"name": "obv", "parameters": {}},
+            {"name": "ichimoku", "parameters": {}}
+        ],
+        "momentum_indicators": [
+            {"name": "roc", "parameters": {"window": 12}},
+            {"name": "mom", "parameters": {"window": 10}},
+            {"name": "cci", "parameters": {"window": 20}}
+        ],
+        "volatility_indicators": [
+            {"name": "atr", "parameters": {"window": 14}},
+            {"name": "bollinger_width", "parameters": {"window": 20, "std": 2}}
+        ],
+        "volume_indicators": [
+            {"name": "obv", "parameters": {}},
+            {"name": "vwap", "parameters": {}},
+            {"name": "mfi", "parameters": {"window": 14}}
+        ],
+        "custom_features": [
+            {"name": "price_to_sma_ratio", "parameters": {"sma_window": 50}},
+            {"name": "returns", "parameters": {"window": 5}},
+            {"name": "volatility", "parameters": {"window": 20}}
+        ]
+    },
+    "backtester": {
+        "default_capital": 100000000,
+        "commission_rate": 0.0015,
+        "slippage": 0.001,
+        "metrics": [
+            "total_return",
+            "annual_return",
+            "sharpe_ratio",
+            "max_drawdown",
+            "win_rate"
+        ]
+    },
+    "portfolio": {
+        "optimization_method": "efficient_frontier",
+        "risk_free_rate": 0.03,
+        "max_stock_weight": 0.25,
+        "optimization_period": "6m",
+        "rebalance_frequency": 30
+    },
+    "market_data": {
+        "indices": ["VNINDEX", "VN30", "HNX30", "HNXINDEX", "UPCOM"],
+        "benchmark": "VNINDEX",
+        "vn30_stocks": [
+            "ACB", "BID", "BVH", "CTG", "FPT", "GAS", "GVR", "HDB", "HPG", "MBB",
+            "MSN", "MWG", "NVL", "PDR", "PLX", "PNJ", "POW", "SAB", "SHB", "SSI",
+            "STB", "TCB", "TPB", "VCB", "VHM", "VIB", "VIC", "VJC", "VNM", "VPB"
+        ]
+    },
+    "technical_analysis": {
+        "short_term_period": 14,
+        "medium_term_period": 50,
+        "long_term_period": 200,
+        "volume_significance_threshold": 1.5,
+        "trend_change_threshold": 0.05
+    },
+    "sentiment_analysis": {
+        "news_days": 7,
+        "social_days": 3,
+        "min_news_count": 5,
+        "positive_threshold": 0.6,
+        "negative_threshold": 0.4
+    },
+    "report_generator": {
+        "max_length": 2000,
+        "summary_length": 200,
+        "include_charts": true,
+        "chart_timeframes": ["1m", "3m", "6m"],
+        "template_dir": "templates/reports"
+    },
+    "api": {
+        "host": "localhost",
+        "port": 8000,
+        "workers": 4,
+        "cors_origins": ["*"],
+        "rate_limit": {
+            "requests_per_minute": 60
+        }
+    },
+    "telegram_bot": {
+        "enabled": false,
+        "poll_interval": 5,
+        "max_message_length": 4096
+    }
+} 

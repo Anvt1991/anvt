@@ -1,0 +1,378 @@
+2025-05-05 12:45:30,014 - core.data.data - INFO - data_loader.py is now a wrapper for load_data.py. Consider updating your imports to use load_data.py directly.
+2025-05-05 12:45:31,498 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 12:45:31,498 - core.technical - INFO - TechnicalAnalyzer initialized
+2025-05-05 12:45:31,514 - core.model.config - INFO - Configuration loaded from config/default_config.json
+2025-05-05 12:45:31,514 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 12:45:31,514 - core.model.ml_model - INFO - MLPredictor initialized with model_type=classifier, model_name=xgboost
+2025-05-05 12:45:31,514 - core.strategy.backtester - INFO - Backtester initialized
+2025-05-05 12:45:32,217 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getMe "HTTP/1.1 200 OK"
+2025-05-05 12:45:32,420 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/deleteWebhook "HTTP/1.1 200 OK"
+2025-05-05 12:45:32,420 - apscheduler.scheduler - INFO - Scheduler started
+2025-05-05 12:45:32,420 - telegram.ext.Application - INFO - Application started
+2025-05-05 12:45:43,047 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:45:53,268 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:03,482 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:06,156 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:06,998 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/sendMessage "HTTP/1.1 200 OK"
+2025-05-05 12:46:16,402 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:26,605 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:36,824 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:47,037 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:54,868 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:46:55,698 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/sendMessage "HTTP/1.1 200 OK"
+2025-05-05 12:46:56,189 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/editMessageText "HTTP/1.1 200 OK"
+2025-05-05 12:47:05,087 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:47:15,309 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:47:25,518 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:47:35,729 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:47:45,937 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:47:56,142 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:48:06,382 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:48:16,593 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:48:26,798 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:48:37,016 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:48:47,220 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:48:57,432 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:49:07,654 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:49:17,906 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:49:28,122 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:49:38,332 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:49:48,542 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:49:58,766 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:50:08,968 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:50:19,191 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:50:29,402 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:50:39,628 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:50:51,899 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 12:50:59,321 - vnai.scope.promo - INFO - ██╗   ██╗███╗   ██╗███████╗████████╗ ██████╗  ██████╗██╗  ██╗
+██║   ██║████╗  ██║██╔════╝╚══██╔══╝██╔═══██╗██╔════╝██║ ██╔╝
+██║   ██║██╔██╗ ██║███████╗   ██║   ██║   ██║██║     █████╔╝ 
+╚██╗ ██╔╝██║╚██╗██║╚════██║   ██║   ██║   ██║██║     ██╔═██╗ 
+ ╚████╔╝ ██║ ╚████║███████║   ██║   ╚██████╔╝╚██████╗██║  ██╗
+  ╚═══╝  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚═════╝  ╚═════╝╚═╝  ╚═╝
+
+     🚀 Biến Khoa Học Dữ Liệu Thành Lợi Thế Đầu Tư 🚀
+
+🎯 Giúp lan toả Vnstock với 1000 stars trên GitHub – Chỉ còn 200 ⭐ nữa thôi!
+
+⭐ https://github.com/thinh-vu/vnstock ⭐
+
+Mỗi ⭐ của bạn là động lực để Vnstock nhanh hơn, mạnh mẽ hơn và mã nguồn mở cho cộng đồng. Thả Star ngay!
+2025-05-05 12:51:01,540 - core.data.data - INFO - data_loader.py is now a wrapper for load_data.py. Consider updating your imports to use load_data.py directly.
+2025-05-05 12:51:04,103 - telegram_bot_main - INFO - Đã tải cấu hình từ config\telegram_config.json
+2025-05-05 12:51:04,103 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 12:51:04,103 - core.data.load_data - INFO - DataLoader được khởi tạo với nguồn: vnstock
+2025-05-05 12:51:04,118 - core.data.load_data - INFO - DataLoader được khởi tạo với nguồn: vnstock
+2025-05-05 12:51:04,118 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 12:51:04,118 - core.technical - INFO - TechnicalAnalyzer initialized
+2025-05-05 12:51:04,118 - core.model.config - INFO - Configuration loaded from config/default_config.json
+2025-05-05 12:51:04,118 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 12:51:04,118 - core.model.ml_model - INFO - MLPredictor initialized with model_type=classifier, model_name=xgboost
+2025-05-05 12:51:04,118 - core.strategy.backtester - INFO - Backtester initialized
+2025-05-05 12:51:04,118 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 12:51:04,259 - telegram_bot_main - INFO - BotChatAI (phiên bản Telegram only) đã khởi tạo thành công
+2025-05-05 12:51:04,259 - telegram_bot_main - INFO - Khởi động bot ở chế độ polling...
+2025-05-05 12:51:04,930 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getMe "HTTP/1.1 200 OK"
+2025-05-05 12:51:05,133 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/deleteWebhook "HTTP/1.1 200 OK"
+2025-05-05 12:51:05,133 - apscheduler.scheduler - INFO - Scheduler started
+2025-05-05 12:51:05,133 - telegram.ext.Application - INFO - Application started
+2025-05-05 12:51:15,763 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:51:25,966 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:51:36,169 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:51:46,374 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:51:56,593 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:52:06,808 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:52:17,011 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:52:27,215 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:52:37,429 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:52:47,636 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:52:57,841 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:53:08,070 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:53:18,262 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:53:28,478 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:53:38,685 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:53:48,884 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:53:59,087 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:55:18,795 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 12:55:25,717 - vnai.scope.promo - INFO - ██╗   ██╗███╗   ██╗███████╗████████╗ ██████╗  ██████╗██╗  ██╗
+██║   ██║████╗  ██║██╔════╝╚══██╔══╝██╔═══██╗██╔════╝██║ ██╔╝
+██║   ██║██╔██╗ ██║███████╗   ██║   ██║   ██║██║     █████╔╝ 
+╚██╗ ██╔╝██║╚██╗██║╚════██║   ██║   ██║   ██║██║     ██╔═██╗ 
+ ╚████╔╝ ██║ ╚████║███████║   ██║   ╚██████╔╝╚██████╗██║  ██╗
+  ╚═══╝  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚═════╝  ╚═════╝╚═╝  ╚═╝
+
+     🚀 Biến Khoa Học Dữ Liệu Thành Lợi Thế Đầu Tư 🚀
+
+🎯 Giúp lan toả Vnstock với 1000 stars trên GitHub – Chỉ còn 200 ⭐ nữa thôi!
+
+⭐ https://github.com/thinh-vu/vnstock ⭐
+
+Mỗi ⭐ của bạn là động lực để Vnstock nhanh hơn, mạnh mẽ hơn và mã nguồn mở cho cộng đồng. Thả Star ngay!
+2025-05-05 12:55:27,482 - core.data.data - INFO - data_loader.py is now a wrapper for load_data.py. Consider updating your imports to use load_data.py directly.
+2025-05-05 12:55:29,951 - telegram_bot_main - INFO - Đã tải cấu hình từ config\telegram_config.json
+2025-05-05 12:55:29,951 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 12:55:29,951 - core.data.load_data - INFO - DataLoader được khởi tạo với nguồn: vnstock
+2025-05-05 12:55:29,951 - core.data.load_data - INFO - DataLoader được khởi tạo với nguồn: vnstock
+2025-05-05 12:55:29,951 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 12:55:29,951 - core.technical - INFO - TechnicalAnalyzer initialized
+2025-05-05 12:55:29,951 - core.model.config - INFO - Configuration loaded from config/default_config.json
+2025-05-05 12:55:29,951 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 12:55:29,967 - core.model.ml_model - INFO - MLPredictor initialized with model_type=classifier, model_name=xgboost
+2025-05-05 12:55:29,967 - core.strategy.backtester - INFO - Backtester initialized
+2025-05-05 12:55:29,967 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 12:55:30,092 - telegram_bot_main - INFO - BotChatAI (phiên bản Telegram only) đã khởi tạo thành công
+2025-05-05 12:55:30,092 - telegram_bot_main - INFO - Khởi động bot ở chế độ polling...
+2025-05-05 12:55:30,748 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getMe "HTTP/1.1 200 OK"
+2025-05-05 12:55:30,951 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/deleteWebhook "HTTP/1.1 200 OK"
+2025-05-05 12:55:30,967 - apscheduler.scheduler - INFO - Scheduler started
+2025-05-05 12:55:30,967 - telegram.ext.Application - INFO - Application started
+2025-05-05 12:55:41,576 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:55:44,671 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:55:45,483 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/sendMessage "HTTP/1.1 200 OK"
+2025-05-05 12:55:45,484 - PipelineProcessor - INFO - Starting pipeline processing for FPT (mode=predict)
+2025-05-05 12:55:45,486 - core.data.load_data - ERROR - Lỗi trong quá trình load_data: Cannot run the event loop while another loop is running
+2025-05-05 12:55:45,600 - core.data.data_validator - WARNING - DataFrame rỗng, bỏ qua validate schema
+2025-05-05 12:55:45,600 - core.data.load_data - WARNING - Không có dữ liệu lịch sử giá cho FPT
+2025-05-05 12:55:45,602 - PipelineProcessor - INFO - _pipeline_data_loader executed in 0.12 seconds
+2025-05-05 12:55:45,602 - PipelineProcessor - ERROR - Pipeline processing stopped due to data loading error: Không thể tải dữ liệu cho FPT
+2025-05-05 12:55:45,603 - PipelineProcessor - INFO - process executed in 0.12 seconds
+2025-05-05 12:55:45,603 - PipelineProcessor - INFO - [MERGE] keys: ['symbol', 'timestamp', 'technical_analysis', 'news', 'ml_scores', 'portfolio', 'backtest', 'price_info']
+2025-05-05 12:55:45,604 - PipelineProcessor - INFO - [MERGE] raw_data last date: N/A
+2025-05-05 12:55:45,604 - PipelineProcessor - INFO - [MERGE] current_price: None, price_change: None, price_change_percent: None, indicators: None
+2025-05-05 12:55:55,808 - core.data.db - INFO - Đã lưu báo cáo cho FPT vào report_history
+2025-05-05 12:55:55,824 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:55:56,629 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/editMessageText "HTTP/1.1 200 OK"
+2025-05-05 12:56:06,031 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:56:16,243 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:56:26,449 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:56:36,656 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:56:46,860 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:56:57,066 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:57:07,264 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:57:17,465 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:57:27,676 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:57:37,881 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:57:48,075 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:57:58,291 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:58:08,489 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:58:18,702 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:58:28,907 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:58:39,101 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:58:49,313 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:58:59,526 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:59:09,719 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:59:19,943 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:59:30,147 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:59:40,351 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 12:59:50,558 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:00:00,767 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:00:10,976 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:00:21,186 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:00:31,404 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:00:41,603 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:00:51,812 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:01:02,021 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:01:12,226 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:01:22,424 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:01:32,631 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:01:42,842 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:01:53,050 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:02:03,245 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:02:13,452 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:02:23,660 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:02:33,857 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:02:44,079 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:02:54,289 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:03:04,499 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:03:14,692 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:03:24,892 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:03:35,097 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:03:45,316 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:03:55,520 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:04:05,715 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:04:15,936 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:04:26,131 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:04:36,375 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:04:46,574 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:04:56,782 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:05:06,988 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:05:17,195 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:05:27,470 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:05:37,680 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:05:47,901 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:05:58,102 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:06:08,310 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:06:18,507 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:06:28,711 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:06:38,915 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:06:49,125 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:06:59,324 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:07:09,536 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:07:19,735 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:07:29,938 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:07:40,138 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:11:36,333 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 13:11:42,398 - vnai.scope.promo - INFO - ██╗   ██╗███╗   ██╗███████╗████████╗ ██████╗  ██████╗██╗  ██╗
+██║   ██║████╗  ██║██╔════╝╚══██╔══╝██╔═══██╗██╔════╝██║ ██╔╝
+██║   ██║██╔██╗ ██║███████╗   ██║   ██║   ██║██║     █████╔╝ 
+╚██╗ ██╔╝██║╚██╗██║╚════██║   ██║   ██║   ██║██║     ██╔═██╗ 
+ ╚████╔╝ ██║ ╚████║███████║   ██║   ╚██████╔╝╚██████╗██║  ██╗
+  ╚═══╝  ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚═════╝  ╚═════╝╚═╝  ╚═╝
+
+     🚀 Biến Khoa Học Dữ Liệu Thành Lợi Thế Đầu Tư 🚀
+
+🎯 Giúp lan toả Vnstock với 1000 stars trên GitHub – Chỉ còn 200 ⭐ nữa thôi!
+
+⭐ https://github.com/thinh-vu/vnstock ⭐
+
+Mỗi ⭐ của bạn là động lực để Vnstock nhanh hơn, mạnh mẽ hơn và mã nguồn mở cho cộng đồng. Thả Star ngay!
+2025-05-05 13:11:44,039 - core.data.data - INFO - data_loader.py is now a wrapper for load_data.py. Consider updating your imports to use load_data.py directly.
+2025-05-05 13:11:45,383 - telegram_bot_main - INFO - Đã tải cấu hình từ config\telegram_config.json
+2025-05-05 13:11:45,383 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 13:11:45,383 - core.data.load_data - INFO - DataLoader được khởi tạo với nguồn: vnstock
+2025-05-05 13:11:45,383 - core.data.load_data - INFO - DataLoader được khởi tạo với nguồn: vnstock
+2025-05-05 13:11:45,383 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 13:11:45,383 - core.technical - INFO - TechnicalAnalyzer initialized
+2025-05-05 13:11:45,383 - core.model.config - INFO - Configuration loaded from config/default_config.json
+2025-05-05 13:11:45,383 - core.model.feature_generator - INFO - FeatureEngineer initialized
+2025-05-05 13:11:45,383 - core.model.ml_model - INFO - MLPredictor initialized with model_type=classifier, model_name=xgboost
+2025-05-05 13:11:45,383 - core.strategy.backtester - INFO - Backtester initialized
+2025-05-05 13:11:45,383 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 13:11:45,446 - telegram_bot_main - INFO - BotChatAI (phiên bản Telegram only) đã khởi tạo thành công
+2025-05-05 13:11:45,446 - telegram_bot_main - INFO - Khởi động bot ở chế độ polling...
+2025-05-05 13:11:46,087 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getMe "HTTP/1.1 200 OK"
+2025-05-05 13:11:46,290 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/deleteWebhook "HTTP/1.1 200 OK"
+2025-05-05 13:11:46,290 - apscheduler.scheduler - INFO - Scheduler started
+2025-05-05 13:11:46,305 - telegram.ext.Application - INFO - Application started
+2025-05-05 13:11:56,912 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:12:04,493 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:12:05,321 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/sendMessage "HTTP/1.1 200 OK"
+2025-05-05 13:12:14,714 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:12:24,916 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:12:27,228 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 13:12:28,041 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/sendMessage "HTTP/1.1 200 OK"
+2025-05-05 13:12:28,056 - PipelineProcessor - INFO - Starting pipeline processing for VIX (mode=predict)
+2025-05-05 13:12:28,072 - core.data.load_data - INFO - Tải dữ liệu VIX từ 2024-05-05 13:12:28.056953 đến 2025-05-05 13:12:28.056953 với khung thời gian 1D
+2025-05-05 13:12:30,182 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,182 - core.data.load_data - INFO - [DEBUG] System now: 2025-05-05 13:12:30.182156 | Last data index: 2025-05-05 00:00:00+07:00
+2025-05-05 13:12:30,182 - core.data.load_data - INFO - Đã tải 247 dòng dữ liệu từ vnstock cho VIX
+2025-05-05 13:12:30,197 - core.data.load_data - INFO - Dữ liệu VIX sau khi làm sạch: 247 dòng. Không loại bỏ outlier tự động. Chỉ cảnh báo các điểm bất thường.
+2025-05-05 13:12:30,541 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,573 - PipelineProcessor - INFO - _pipeline_data_loader executed in 2.52 seconds
+2025-05-05 13:12:30,573 - PipelineProcessor - INFO - Starting data validation for VIX
+2025-05-05 13:12:30,588 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,588 - PipelineProcessor - INFO - ✓ Dữ liệu VIX đã được xác thực và làm sạch
+2025-05-05 13:12:30,588 - PipelineProcessor - INFO - _pipeline_data_validation executed in 0.02 seconds
+2025-05-05 13:12:30,588 - PipelineProcessor - INFO - Starting technical analysis for VIX
+2025-05-05 13:12:30,588 - PipelineProcessor - INFO - Starting news analysis for VIX
+2025-05-05 13:12:30,588 - PipelineProcessor - INFO - Starting Groq pattern analysis for VIX
+2025-05-05 13:12:30,588 - PipelineProcessor - INFO - Starting feature engineering for VIX
+2025-05-05 13:12:30,620 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,666 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,682 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,698 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:30,729 - PipelineProcessor - INFO - ✓ Phân tích kỹ thuật hoàn tất cho VIX
+2025-05-05 13:12:30,745 - PipelineProcessor - INFO - _pipeline_technical_analysis executed in 0.16 seconds
+2025-05-05 13:12:30,745 - core.model.feature_generator - INFO - Generated 46 technical features
+2025-05-05 13:12:30,760 - core.model.feature_generator - INFO - Generated 15 lagged and rolling features
+2025-05-05 13:12:30,838 - core.model.feature_generator - INFO - Prepared 67 features with 247 rows (feature_set: full)
+2025-05-05 13:12:30,838 - PipelineProcessor - INFO - ✓ Đã tạo 67 đặc trưng cho VIX
+2025-05-05 13:12:30,838 - PipelineProcessor - INFO - _pipeline_feature_engineering executed in 0.25 seconds
+2025-05-05 13:12:46,027 - vnai.news - INFO - Thu thập 10 tin tức cho mã VIX (limit=10, days=7)
+2025-05-05 13:12:46,027 - PipelineProcessor - INFO - ✓ Phân tích tin tức hoàn tất: 10 tin
+2025-05-05 13:12:46,027 - PipelineProcessor - INFO - _pipeline_news_analysis executed in 15.44 seconds
+2025-05-05 13:12:46,386 - httpx - INFO - HTTP Request: POST https://api.groq.com/openai/v1/chat/completions "HTTP/1.1 400 Bad Request"
+2025-05-05 13:12:46,386 - PipelineProcessor - INFO - ✓ Groq pattern analysis completed for VIX
+2025-05-05 13:12:46,386 - PipelineProcessor - INFO - _pipeline_groq_analysis executed in 15.80 seconds
+2025-05-05 13:12:46,386 - PipelineProcessor - INFO - Starting enhanced prediction for VIX
+2025-05-05 13:12:46,386 - core.model.enhanced_predictor - INFO - Starting enhanced prediction for VIX
+2025-05-05 13:12:46,386 - core.model.ml_model - INFO - Loading model from models\VIX_model.joblib
+2025-05-05 13:12:46,574 - core.model.ml_model - INFO - Loaded 36 feature names from model metadata
+2025-05-05 13:12:46,574 - core.model.ml_model - INFO - Model mong đợi 36 features (từ n_features_in_)
+2025-05-05 13:12:46,574 - core.model.ml_model - INFO - Model loaded successfully
+2025-05-05 13:12:46,574 - core.model.model_trainer - WARNING - Model feature_names mismatch. Retraining model for VIX...
+2025-05-05 13:12:46,574 - core.model.model_trainer - WARNING - Model exists but failed to load or feature mismatch: Feature mismatch
+2025-05-05 13:12:46,574 - core.model.model_trainer - INFO - Training model for VIX (auto sync)...
+2025-05-05 13:12:46,590 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 13:12:46,605 - core.model.feature_generator - INFO - Generated 46 technical features
+2025-05-05 13:12:46,621 - core.model.feature_generator - INFO - Generated 15 lagged and rolling features
+2025-05-05 13:12:46,699 - core.model.feature_generator - INFO - Prepared 71 features with 247 rows (feature_set: full)
+2025-05-05 13:12:46,996 - core.model.model_trainer - INFO - Feature selection bắt đầu với 71 features
+2025-05-05 13:12:47,011 - core.model.model_trainer - INFO - Loại bỏ 10 features có tương quan cao > 0.9
+2025-05-05 13:12:47,152 - core.model.model_trainer - INFO - Chọn 49 features dựa trên mutual information > 0.01
+2025-05-05 13:12:47,402 - core.model.model_trainer - INFO - Chọn 36/49 features dựa trên feature importance > 0.015064118592054981
+2025-05-05 13:12:47,402 - core.model.model_trainer - INFO - Kết thúc feature selection với 36 features được chọn từ 71 features ban đầu
+2025-05-05 13:12:47,511 - core.model.ml_model - INFO - Sử dụng max_features với giá trị nguyên thủy: log2
+2025-05-05 13:12:47,511 - core.model.ml_model - INFO - Using max_features value: log2 (converted to: log2)
+2025-05-05 13:12:47,511 - core.model.ml_model - INFO - Sử dụng max_features với giá trị nguyên thủy: log2
+2025-05-05 13:12:47,511 - core.model.ml_model - INFO - Using max_features value: log2 (converted to: log2)
+2025-05-05 13:12:54,157 - core.model.model_trainer - INFO - CV Score cho random_forest: 0.3630 ± 0.2362
+2025-05-05 13:12:58,142 - core.model.model_trainer - INFO - CV Score cho xgboost: 0.3449 ± 0.2214
+2025-05-05 13:12:58,142 - core.model.ml_model - INFO - Sử dụng max_features với giá trị nguyên thủy: log2
+2025-05-05 13:12:58,142 - core.model.ml_model - INFO - Using max_features value: log2 (converted to: log2)
+2025-05-05 13:12:58,438 - core.model.ml_model - INFO - Model evaluation: {'accuracy': 0.4897959183673469, 'precision': 1.0, 'recall': 0.24242424242424243, 'f1': 0.3902439024390244, 'positive_rate': 0.16326530612244897}
+2025-05-05 06:12:58,688 - core.model.ml_model - INFO - Model evaluation: {'accuracy': 0.32653061224489793, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'positive_rate': 0.0}
+2025-05-05 06:12:58,688 - core.model.ml_model - INFO - Set 36 feature names
+2025-05-05 06:12:58,782 - core.model.ml_model - INFO - Model saved to models\VIX_model.joblib with 36 features
+2025-05-05 06:13:01,017 - core.model.ml_model - INFO - Feature importance plot saved to models\VIX_feature_importance.png
+2025-05-05 06:13:01,033 - core.model.model_trainer - INFO - Model trained for VIX - Best model: random_forest - Metrics: {'accuracy': 0.4897959183673469, 'precision': 1.0, 'recall': 0.24242424242424243, 'f1': 0.3902439024390244, 'positive_rate': 0.16326530612244897}
+2025-05-05 06:13:01,595 - core.model.model_trainer - INFO - Đã lưu toàn bộ features train vào models\VIX_features_train.parquet
+2025-05-05 06:13:01,627 - core.model.model_trainer - INFO - Đã lưu features predictor vào models\VIX_features_predict.parquet
+2025-05-05 06:13:01,658 - core.model.model_trainer - INFO - Hash SHA256 của features_predict: b770b474ed294dde113060efc565dfbc0f687fad0953cd2b0e94bff1918cceef
+2025-05-05 06:13:01,705 - core.model.ml_model - INFO - Model saved to models\VIX_model.joblib with 36 features
+2025-05-05 06:13:01,720 - core.model.model_trainer - INFO - Model and scaler for VIX trained and saved.
+2025-05-05 06:13:01,752 - core.data.data_validator - INFO - Schema validation thành công
+2025-05-05 06:13:01,799 - core.model.feature_generator - INFO - Generated 46 technical features
+2025-05-05 06:13:01,814 - core.model.feature_generator - INFO - Generated 15 lagged and rolling features
+2025-05-05 06:13:02,002 - core.model.feature_generator - INFO - Prepared 71 features with 247 rows (feature_set: full)
+2025-05-05 06:13:02,002 - core.model.ml_model - INFO - ====== Bắt đầu tính điểm ML cho VIX ======
+2025-05-05 06:13:02,095 - core.model.ml_model - INFO - ML score for VIX: {'short_term': 0.5316664826373843, 'medium_term': 0.42533318610990745, 'long_term': 0.31899988958243053}
+2025-05-05 06:13:02,095 - core.model.enhanced_predictor - INFO - Enhanced prediction completed for VIX
+2025-05-05 06:13:02,111 - PipelineProcessor - INFO - ✓ Enhanced prediction completed for VIX
+2025-05-05 06:13:02,111 - PipelineProcessor - INFO - _pipeline_enhanced_prediction executed in 15.72 seconds
+2025-05-05 06:13:02,111 - PipelineProcessor - INFO - Starting backtesting for VIX
+2025-05-05 06:13:02,189 - core.strategy.backtester - INFO - Backtest completed - Final equity: 10,000,000 VND, Total return: 0.00%
+2025-05-05 06:13:02,189 - PipelineProcessor - INFO - ✓ Backtest hoàn tất, tổng lợi nhuận: 0.00%
+2025-05-05 06:13:02,189 - PipelineProcessor - INFO - _pipeline_backtest executed in 0.08 seconds
+2025-05-05 06:13:02,486 - PipelineProcessor - INFO - [MERGE] keys: ['symbol', 'timestamp', 'raw_data', 'validation_result', 'feature_engineering_result', 'news_result', 'backtest_result', 'data_validation', 'technical_analysis', 'feature_engineering', 'news', 'news_sentiment', 'news_count', 'enhanced_prediction', 'backtest', 'ml_scores', 'portfolio', 'price_info', 'current_price', 'price_change', 'price_change_percent', 'indicators']
+2025-05-05 06:13:02,486 - PipelineProcessor - INFO - [MERGE] raw_data last date: 2025-05-05 00:00:00+07:00
+2025-05-05 06:13:02,486 - PipelineProcessor - INFO - [MERGE] current_price: 12.4, price_change: 0.45000000000000107, price_change_percent: 3.765690376569047, indicators: {'rsi': 53.99565033841205, 'ma_20': 12.175, 'ma_50': 12.007, 'ma_200': 11.1923, 'macd': {'macd_value': 0.06193657066224034, 'signal_line': 0.10302631113284699, 'histogram': -0.04108974047060665, 'interpretation': 'MACD cắt xuống signal line, histogram âm → Tín hiệu bán mạnh'}}
+2025-05-05 06:13:02,486 - PipelineProcessor - INFO - Starting report generation for VIX
+2025-05-05 06:13:02,486 - PipelineProcessor - INFO - [DEBUG] merged_data: keys=['symbol', 'timestamp', 'raw_data', 'validation_result', 'feature_engineering_result', 'news_result', 'backtest_result', 'data_validation', 'technical_analysis', 'feature_engineering', 'news', 'news_sentiment', 'news_count', 'enhanced_prediction', 'backtest', 'ml_scores', 'portfolio', 'price_info', 'current_price', 'price_change', 'price_change_percent', 'indicators'], raw_data_rows=247, last_date=2025-05-05 00:00:00+07:00, close=12.4, prev_close=11.95, RSI=None, MA20=None, MA50=None, MA200=None, MACD=None
+2025-05-05 06:13:02,486 - core.data.db - INFO - Đã kết nối đến cơ sở dữ liệu bot_sieucap_v19.db
+2025-05-05 06:13:15,255 - core.data.db - INFO - Đã lưu báo cáo cho VIX vào report_history
+2025-05-05 06:13:16,146 - telegram_notify - INFO - Đã gửi báo cáo Telegram thành công (phần 1/1)
+2025-05-05 06:13:16,146 - PipelineProcessor - INFO - ✓ Tạo báo cáo hoàn tất (ReportManager)
+2025-05-05 06:13:16,146 - PipelineProcessor - INFO - _pipeline_report_generation executed in 13.66 seconds
+2025-05-05 06:13:16,146 - PipelineProcessor - INFO - Bỏ qua lưu/gửi báo cáo trong _pipeline_save_to_database (đã tích hợp ReportManager)
+2025-05-05 06:13:16,146 - PipelineProcessor - INFO - _pipeline_save_to_database executed in 0.00 seconds
+2025-05-05 06:13:16,146 - PipelineProcessor - INFO - Pipeline processing completed for VIX in -25151.91 seconds
+2025-05-05 06:13:16,161 - PipelineProcessor - INFO - process executed in 48.10 seconds
+2025-05-05 06:13:16,521 - PipelineProcessor - INFO - [MERGE] keys: ['symbol', 'timestamp', 'validation_result', 'feature_engineering_result', 'news_result', 'backtest_result', 'technical_analysis', 'news', 'ml_scores', 'portfolio', 'backtest', 'price_info']
+2025-05-05 06:13:16,521 - PipelineProcessor - INFO - [MERGE] raw_data last date: N/A
+2025-05-05 06:13:16,521 - PipelineProcessor - INFO - [MERGE] current_price: None, price_change: None, price_change_percent: None, indicators: None
+2025-05-05 06:13:28,717 - core.data.db - INFO - Đã lưu báo cáo cho VIX vào report_history
+2025-05-05 06:13:28,717 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:13:29,560 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/editMessageText "HTTP/1.1 200 OK"
+2025-05-05 06:13:38,932 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:13:49,129 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:13:59,359 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:14:09,568 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:14:19,784 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:14:29,985 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:14:40,212 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:14:50,413 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:15:00,638 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:15:10,845 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:15:21,065 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:15:31,307 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:15:41,529 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:15:51,747 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:16:01,962 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:16:12,172 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:16:22,381 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:16:32,604 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:16:42,816 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:16:53,024 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:17:03,244 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
+2025-05-05 06:17:13,449 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7575292977:AAEBynlxf3uKYdmjmlSwj-P2CsjETldpNoA/getUpdates "HTTP/1.1 200 OK"
