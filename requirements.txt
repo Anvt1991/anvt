@@ -76,9 +76,6 @@ rapidfuzz
 flask>=2.1.0
 streamlit>=1.10.0
 
-# Additional dependencies
-pydantic-settings
-
 # Thư viện cơ bản
 pandas==2.0.1
 matplotlib==3.7.1
