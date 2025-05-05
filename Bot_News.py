@@ -4,7 +4,7 @@ import feedparser
 import httpx
 import asyncio
 import asyncpg
-import aioredis
+import redis.asyncio as aioredis
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application

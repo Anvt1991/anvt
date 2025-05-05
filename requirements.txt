@@ -2,6 +2,6 @@ aiogram==3.4
 aiohttp
 feedparser
 asyncpg
-aioredis
 httpx
 python-dotenv
+redis[async]>=4.2.0
