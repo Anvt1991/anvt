@@ -53,6 +53,12 @@ FEED_URLS = [
     "https://news.google.com/rss/search?q=breaking+news+economy+finance&hl=en&gl=US&ceid=US:en",
 ]
 
+# --- Kiểm tra biến môi trường bắt buộc ---
+REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]  # Không còn CHANNEL_ID
+for var in REQUIRED_ENV_VARS:
+    if not os.getenv(var):
+        raise RuntimeError(f"Missing required environment variable: {var}")
+
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -173,8 +179,11 @@ async def news_job():
 
                 await save_news(entry, ai_summary, sentiment)
 
-                # Gửi tin vào channel duy nhất
-                await bot.send_message(CHANNEL_ID, f"📰 *{title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}", parse_mode="Markdown")
+                # Gửi tin vào channel duy nhất nếu có CHANNEL_ID
+                if CHANNEL_ID:
+                    await bot.send_message(CHANNEL_ID, f"📰 *{title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}", parse_mode="Markdown")
+                else:
+                    logging.warning("CHANNEL_ID chưa được cấu hình. Không gửi tin.")
 
         await asyncio.sleep(14 * 60)  # 14 phút
 
