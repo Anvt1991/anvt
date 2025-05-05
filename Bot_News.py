@@ -119,6 +119,9 @@ async def analyze_news(title, summary, model=None):
                 }
             )
             result = response.json()
+            if "choices" not in result:
+                logging.error(f"OpenRouter API error (model={model}): {result}")
+                raise RuntimeError(f"OpenRouter API error: {result}")
             return result["choices"][0]["message"]["content"]
     except Exception as e:
         if model == GEMINI_MODEL:

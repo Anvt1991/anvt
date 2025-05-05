@@ -1,31 +1,22 @@
-import requests
-import json
+from telegram import Update
+from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-# 👉 Thay bằng token bot thật của bạn
-BOT_TOKEN = "7780930655:AAEPJ77fbGwtDeCj-jCzVUuA-rZgGxPsuMM"
+async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    print(f"Chat Type: {chat.type}")  # Kiểm tra loại chat
+    print(f"Chat Title: {chat.title}")  # Kiểm tra tên kênh
+    print(f"Chat ID: {chat.id}")  # Lấy ID của kênh
 
-# Gọi getUpdates
-url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+async def main():
+    # Thay "YOUR_BOT_TOKEN" bằng token thực tế của bot của bạn
+    application = Application.builder().token("7780930655:AAEPJ77fbGwtDeCj-jCzVUuA-rZgGxPsuMM").build()
 
-try:
-    response = requests.get(url)
-    response.raise_for_status()  # Kiểm tra lỗi HTTP
+    # Đăng ký handler để bắt tin nhắn
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.CHANNEL, get_chat_id))
 
-    data = response.json()
+    # Bắt đầu bot
+    await application.run_polling()
 
-    if data.get("ok") and data.get("result"):
-        for update in data["result"]:
-            if "channel_post" in update:
-                chat_id = update["channel_post"]["chat"]["id"]
-                title = update["channel_post"]["chat"]["title"]
-                print(f"📢 Channel Name: {title}")
-                print(f"🆔 Channel ID: {chat_id}")
-            else:
-                print("⚠️ Không có bài đăng từ kênh trong update này.")
-    else:
-        print("⚠️ Không có dữ liệu hợp lệ hoặc bot chưa được thêm vào kênh.")
-
-except requests.exceptions.RequestException as e:
-    print(f"❌ Lỗi HTTP: {e}")
-except Exception as ex:
-    print(f"❌ Lỗi khác: {ex}")
+# Khởi chạy bot
+import asyncio
+asyncio.run(main())
