@@ -383,6 +383,9 @@ def create_app():
         # Đảm bảo Application đã được initialize
         if not bot.application._initialized:
             await bot.application.initialize()
+        # Đảm bảo Bot đã được initialize
+        if not bot.bot._initialized:
+            await bot.bot.initialize()
         data = await request.json()
         update = Update.de_json(data, bot.bot)
         await bot.application.process_update(update)
