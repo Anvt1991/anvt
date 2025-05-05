@@ -18,7 +18,8 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
 DB_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-CHANNEL_ID = os.getenv("CHANNEL_ID")  # Chat id của channel Telegram
+TARGET_USER_ID = None  # Không dùng nữa, gửi cho nhiều user đã duyệt
+CHANNEL_ID = None  # Không dùng nữa
 # Danh sách nguồn tin Google News RSS theo chủ đề nóng (tiếng Việt và tiếng Anh)
 FEED_URLS = [
     # --- Tiếng Việt ---
@@ -36,21 +37,6 @@ FEED_URLS = [
     "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
     # Tin nóng
     "https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi",
-    # --- Tiếng Anh ---
-    # Stock market
-    "https://news.google.com/rss/search?q=stock+market&hl=en&gl=US&ceid=US:en",
-    # Economic policy
-    "https://news.google.com/rss/search?q=economic+policy&hl=en&gl=US&ceid=US:en",
-    # Macro economics
-    "https://news.google.com/rss/search?q=macroeconomics&hl=en&gl=US&ceid=US:en",
-    # Federal Reserve (Fed)
-    "https://news.google.com/rss/search?q=federal+reserve+OR+fed&hl=en&gl=US&ceid=US:en",
-    # Interest rates
-    "https://news.google.com/rss/search?q=interest+rates&hl=en&gl=US&ceid=US:en",
-    # War (vĩ mô, địa chính trị)
-    "https://news.google.com/rss/search?q=war&hl=en&gl=US&ceid=US:en",
-    # Breaking news (kinh tế, tài chính)
-    "https://news.google.com/rss/search?q=breaking+news+economy+finance&hl=en&gl=US&ceid=US:en",
 ]
 
 # --- Kiểm tra biến môi trường bắt buộc ---
@@ -139,19 +125,46 @@ async def analyze_news_cached(entry_id, title, summary):
     await redis.set(cache_key, result, ex=21600)  # TTL 6h
     return result
 
-# --- Dịch tự động với LibreTranslate ---
-async def translate_text(text, source_lang="en", target_lang="vi"):
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://libretranslate.de/translate",
-            data={
-                "q": text,
-                "source": source_lang,
-                "target": target_lang,
-                "format": "text"
-            }
+# --- Lệnh đăng ký user ---
+@dp.message(Command("register"))
+async def register_user(msg: types.Message):
+    user_id = msg.from_user.id
+    username = msg.from_user.username or ""
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT * FROM subscribed_users WHERE user_id=$1", user_id)
+        if user:
+            if user["is_approved"]:
+                await msg.answer("Bạn đã được duyệt và sẽ nhận tin tức!")
+            else:
+                await msg.answer("Bạn đã đăng ký, vui lòng chờ admin duyệt!")
+            return
+        await conn.execute(
+            "INSERT INTO subscribed_users (user_id, username, is_approved) VALUES ($1, $2, FALSE) ON CONFLICT (user_id) DO NOTHING",
+            user_id, username
         )
-        return response.json()["translatedText"]
+    # Gửi thông báo cho admin
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Duyệt user này", callback_data=f"approve_{user_id}")]]
+    )
+    await bot.send_message(
+        ADMIN_ID,
+        f"Yêu cầu duyệt user mới: @{username} (ID: {user_id})",
+        reply_markup=kb
+    )
+    await msg.answer("Đã gửi yêu cầu đăng ký, vui lòng chờ admin duyệt!")
+
+# --- Xử lý callback admin duyệt user ---
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve_user_callback(cb: CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Chỉ admin mới được duyệt!", show_alert=True)
+        return
+    user_id = int(cb.data.split("_")[1])
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE subscribed_users SET is_approved=TRUE WHERE user_id=$1", user_id)
+        user = await conn.fetchrow("SELECT username FROM subscribed_users WHERE user_id=$1", user_id)
+    await bot.send_message(user_id, "Bạn đã được admin duyệt, sẽ nhận tin tức từ bot!")
+    await cb.answer(f"Đã duyệt user @{user['username']} ({user_id})")
 
 # --- Tin tức theo chu kỳ ---
 async def news_job():
@@ -166,13 +179,8 @@ async def news_job():
                 title = entry.title
                 summary = entry.summary
 
-                is_english = any(ord(c) < 128 for c in title)
-
-                if is_english:
-                    ai_summary_en = await analyze_news_cached(entry.id, title, summary)
-                    ai_summary = await translate_text(ai_summary_en, source_lang="en", target_lang="vi")
-                else:
-                    ai_summary = await analyze_news_cached(entry.id, title, summary)
+                # Luôn phân tích AI, không dịch nữa
+                ai_summary = await analyze_news_cached(entry.id, title, summary)
 
                 sentiment = "Trung lập"
                 for line in ai_summary.splitlines():
@@ -182,11 +190,12 @@ async def news_job():
 
                 await save_news(entry, ai_summary, sentiment)
 
-                # Gửi tin vào channel duy nhất nếu có CHANNEL_ID
-                if CHANNEL_ID:
-                    await bot.send_message(CHANNEL_ID, f"📰 *{title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}", parse_mode="Markdown")
-                else:
-                    logging.warning("CHANNEL_ID chưa được cấu hình. Không gửi tin.")
+                # Lấy danh sách user đã duyệt từ DB và gửi tin
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
+                for row in rows:
+                    await bot.send_message(row["user_id"], f"📰 *{title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}", parse_mode="Markdown")
+                break  # Chỉ gửi 1 tin mới đầu tiên mỗi nguồn
 
         await asyncio.sleep(14 * 60)  # 14 phút
 
