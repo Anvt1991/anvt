@@ -19,7 +19,7 @@ httpx>=0.24.1
 
 # Stock data APIs
 yfinance==0.2.18
-vnstock==0.1.5
+vnstock==3.2.4
 
 # Technical analysis
 ta==0.10.2
@@ -86,7 +86,7 @@ matplotlib==3.7.1
 seaborn==0.12.2
 scikit-learn==1.2.2
 yfinance==0.2.18
-vnstock==0.1.5
+
 
 # Thư viện xử lý dữ liệu và đồ thị
 plotly==5.14.1
