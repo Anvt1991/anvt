@@ -62,6 +62,9 @@ class TelegramOnlyBot:
         self.bot_token = self.config.get('telegram', {}).get('bot_token') or os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = self.config.get('telegram', {}).get('chat_id') or os.getenv("TELEGRAM_CHAT_ID")
         
+        # Tự động duyệt admin
+        self.ADMIN_ID = os.getenv("ADMIN_ID") or self.config.get('telegram', {}).get('admin_id')
+        
         if not self.bot_token:
             logger.error("Không tìm thấy TELEGRAM_BOT_TOKEN! Hãy cung cấp thông qua biến môi trường hoặc file config.")
             sys.exit(1)
@@ -79,6 +82,11 @@ class TelegramOnlyBot:
         # Đăng ký các lệnh
         self.whitelist_path = os.path.join("cache", "approved_users.json")
         self.approved_users = self._load_whitelist()
+        # Tự động duyệt admin nếu chưa có
+        if self.ADMIN_ID and self.ADMIN_ID not in self.approved_users:
+            self.approved_users.add(self.ADMIN_ID)
+            self._save_whitelist()
+            logger.info(f"Tự động duyệt admin: {self.ADMIN_ID}")
         self._register_handlers()
         
         logger.info("BotChatAI (phiên bản Telegram only) đã khởi tạo thành công")
