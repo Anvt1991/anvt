@@ -241,5 +241,14 @@
         "enabled": false,
         "poll_interval": 5,
         "max_message_length": 4096
+    },
+    "gui": {
+        "theme": "default",
+        "font_size": 10,
+        "window_size": {
+            "width": 900,
+            "height": 700
+        },
+        "max_history": 100
     }
 } 

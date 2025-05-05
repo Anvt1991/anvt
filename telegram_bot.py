@@ -16,6 +16,7 @@ from datetime import datetime
 import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional
+from fastapi import FastAPI, Request, Response, HTTPException
 
 # Cấu hình logging
 console_handler = logging.StreamHandler(sys.stdout)
@@ -175,7 +176,7 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
         loading_message = await update.message.reply_text(f"⏳ Đang phân tích {symbol}...")
         
         try:
-            pipeline_result = await self.process_symbol(symbol)
+            pipeline_result = self.process_symbol(symbol)
             if pipeline_result and pipeline_result.get("report"):
                 await loading_message.edit_text(pipeline_result["report"], parse_mode=ParseMode.MARKDOWN)
             else:
@@ -192,7 +193,7 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
         loading_message = await update.message.reply_text("⏳ Đang lấy thông tin thị trường...")
         
         try:
-            pipeline_result = await self.process_symbol("VNINDEX")
+            pipeline_result = self.process_symbol("VNINDEX")
             if pipeline_result and pipeline_result.get("report"):
                 await loading_message.edit_text(pipeline_result["report"], parse_mode=ParseMode.MARKDOWN)
             else:
@@ -238,7 +239,7 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
         
         try:
             # Lấy lịch sử phân tích từ database
-            history = await self.db.load_report_history(symbol)
+            history = self.db.load_report_history(symbol)
             
             if history and len(history) > 0:
                 text = f"📜 *LỊCH SỬ PHÂN TÍCH {symbol}*\n\n"
@@ -352,9 +353,15 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
             logger.error(f"Lỗi khi cập nhật dữ liệu: {str(e)}")
             await loading_message.edit_text(f"❌ Lỗi khi cập nhật dữ liệu: {str(e)}")
     
-    async def process_symbol(self, symbol: str) -> Dict[str, Any]:
+    def process_symbol(self, symbol: str) -> Dict[str, Any]:
         """
-        Xử lý phân tích mã cổ phiếu (async)
+        Xử lý phân tích mã cổ phiếu
+        
+        Args:
+            symbol: Mã cổ phiếu cần phân tích
+            
+        Returns:
+            Dict với kết quả phân tích
         """
         try:
             # Sử dụng pipeline processor để phân tích (sync)
@@ -374,7 +381,7 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
             # Tổng hợp dữ liệu
             aggregated_data = self.pipeline.aggregate_pipeline_result(pipeline_data)
             # Sinh báo cáo
-            report_result = await self.report_manager.generate_report(
+            report_result = self.report_manager.generate_report(
                 aggregated_data, 
                 symbol,
                 meta={
@@ -387,7 +394,7 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
                 logger.error(f"Lỗi khi sinh báo cáo cho {symbol}: {error_msg}")
                 return {"success": False, "error": error_msg}
             # Lưu báo cáo vào DB
-            await self.report_manager.save_report(
+            self.report_manager.save_report(
                 symbol,
                 report_result["report"],
                 aggregated_data.get("current_price", 0),
@@ -405,17 +412,6 @@ _Bot đang trong giai đoạn phát triển, vui lòng báo lỗi nếu phát hi
         logger.info("Khởi động bot ở chế độ polling...")
         self.application.run_polling()
 
-    def run_webhook(self, webhook_url: str, port: int = 8443):
-        """
-        Chạy bot ở chế độ webhook (dùng cho deploy cloud như Render)
-        """
-        logger.info(f"Khởi động bot ở chế độ webhook trên cổng {port} với URL {webhook_url}")
-        self.application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            webhook_url=webhook_url
-        )
-
 def parse_args():
     """
     Parse command line arguments
@@ -425,26 +421,49 @@ def parse_args():
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     return parser.parse_args()
 
+def create_app():
+    bot = TelegramOnlyBot()
+    app = FastAPI()
+
+    @app.post(f"/webhook/{{bot.bot_token}}")
+    async def telegram_webhook(request: Request):
+        data = await request.json()
+        update = Update.de_json(data, bot.bot)
+        await bot.application.process_update(update)
+        return Response(content="OK", status_code=200)
+
+    @app.get("/setup")
+    async def setup_webhook(secret: str, url: str):
+        setup_secret = os.getenv("SETUP_SECRET", "botchatai_secret")
+        if secret != setup_secret:
+            raise HTTPException(status_code=403, detail="Secret không hợp lệ")
+        webhook_url = f"{url}/webhook/{bot.bot_token}"
+        result = await bot.bot.set_webhook(webhook_url)
+        if result:
+            return {"success": True, "message": f"Webhook đã được thiết lập tại {webhook_url}"}
+        else:
+            raise HTTPException(status_code=500, detail="Không thể thiết lập webhook")
+
+    @app.get("/")
+    async def root():
+        return {"status": "online", "bot": "BotChatAI Telegram Bot"}
+
+    return app
+
 if __name__ == "__main__":
     # Parse arguments
     args = parse_args()
-    
     # Set debug mode if specified
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
-    
     try:
-        # Initialize bot
+        # Initialize bot (for local dev/testing)
         bot = TelegramOnlyBot(args.config)
-        
-        # Lấy thông tin webhook từ biến môi trường hoặc config
-        WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # VD: https://your-app-name.onrender.com/webhook/<TOKEN>
-        PORT = int(os.getenv("PORT", 8443))
-        if WEBHOOK_URL:
-            bot.run_webhook(webhook_url=WEBHOOK_URL, port=PORT)
-        else:
-            logger.critical("WEBHOOK_URL không được thiết lập. Vui lòng cấu hình biến môi trường WEBHOOK_URL để chạy bot ở chế độ webhook.")
-            sys.exit(1)
+        # Thông báo không hỗ trợ polling nữa
+        logger.info("Chế độ polling đã bị loại bỏ. Hãy chạy bằng Uvicorn/FastAPI để sử dụng webhook.")
     except Exception as e:
         logger.critical(f"Lỗi nghiêm trọng: {str(e)}", exc_info=True)
-        sys.exit(1) 
+        sys.exit(1)
+
+# FastAPI app cho Render/production
+app = create_app() 

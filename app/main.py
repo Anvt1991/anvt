@@ -8,6 +8,8 @@ Main entry point for BotChatAI - Stock Market AI Advisor
 import os
 import sys
 import logging
+import tkinter as tk
+import json
 import time
 import traceback
 from datetime import datetime
@@ -138,6 +140,14 @@ def main():
         # Display startup information
         display_startup_info(config)
         
+        # Initialize tkinter
+        root = tk.Tk()
+        
+        # Set window icon
+        icon_path = os.path.join(parent_dir, "assets", "app_icon.ico")
+        if os.path.exists(icon_path):
+            root.iconbitmap(icon_path)
+        
         # Optimize database if needed
         from core.data.db import DBManager
         db = DBManager()
@@ -145,8 +155,15 @@ def main():
             logger.info("Optimizing database...")
             db.optimize_database()
         
+        # Import GUI after environment setup
+        from core.chatbot.chatbot import ChatbotGUI
+        
+        # Create GUI with config
+        app = ChatbotGUI(root, config)
+        
         # Start main loop
         logger.info(f"Application startup completed in {time.time() - start_time:.2f}s")
+        root.mainloop()
         
     except Exception as e:
         logger.error(f"Critical error during startup: {str(e)}")

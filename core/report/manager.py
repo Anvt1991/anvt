@@ -1,7 +1,6 @@
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-import asyncio
 
 logger = logging.getLogger("report_manager")
 
@@ -56,7 +55,7 @@ class ReportManager:
         self.gemini = gemini_handler
         self.openrouter = None
 
-    async def generate_report(self, merged_data: Dict[str, Any], symbol: str, meta: dict = None) -> Dict[str, Any]:
+    def generate_report(self, merged_data: Dict[str, Any], symbol: str, meta: dict = None) -> Dict[str, Any]:
         # Rút gọn merged_data trước khi truyền vào AI
         merged_data = optimize_merged_data_for_ai(merged_data)
         # Import GeminiHandler và OpenRouterHandler động
@@ -114,7 +113,7 @@ class ReportManager:
             logger.error(f"Lỗi sinh báo cáo: {e}")
             return {"success": False, "error": str(e), "report": None}
 
-    async def save_report(self, symbol: str, report: str, close_today: float = None, close_yesterday: float = None, timeframe: str = '1D') -> bool:
+    def save_report(self, symbol: str, report: str, close_today: float = None, close_yesterday: float = None, timeframe: str = '1D') -> bool:
         # Import DBManager động
         try:
             from core.data.db import DBManager
@@ -124,13 +123,12 @@ class ReportManager:
         db = self.db or DBManager()
         try:
             # Truyền đúng 5 tham số (symbol, report, close_today, close_yesterday, timeframe)
-            await db.save_report_history(symbol, report, close_today, close_yesterday, timeframe)
-            return True
+            return db.save_report_history(symbol, report, close_today, close_yesterday, timeframe)
         except Exception as e:
             logger.error(f"Lỗi lưu báo cáo vào DB: {e}")
             return False
 
-    async def send_report(self, report_text: str, chat_id: str = None, bot_token: str = None) -> bool:
+    def send_report(self, report_text: str, chat_id: str = None, bot_token: str = None) -> bool:
         # Import notify động
         try:
             from core.telegram.notify import send_report_to_telegram
@@ -138,19 +136,16 @@ class ReportManager:
             logger.error(f"Không thể import send_report_to_telegram: {e}")
             return False
         try:
-            result = send_report_to_telegram(report_text, chat_id=chat_id, bot_token=bot_token)
-            if asyncio.iscoroutine(result):
-                return await result
-            return result
+            return send_report_to_telegram(report_text, chat_id=chat_id, bot_token=bot_token)
         except Exception as e:
             logger.error(f"Lỗi gửi báo cáo Telegram: {e}")
             return False
 
-    async def create_and_send_report(self, merged_data: Dict[str, Any], symbol: str, meta: dict = None) -> Dict[str, Any]:
+    def create_and_send_report(self, merged_data: Dict[str, Any], symbol: str, meta: dict = None) -> Dict[str, Any]:
         # Rút gọn merged_data trước khi truyền vào AI
         merged_data = optimize_merged_data_for_ai(merged_data)
         # Sinh báo cáo
-        report_result = await self.generate_report(merged_data, symbol, meta=meta)
+        report_result = self.generate_report(merged_data, symbol, meta=meta)
         if not report_result.get("success") or not report_result.get("report"):
             logger.error(f"Không thể sinh báo cáo cho {symbol}: {report_result.get('error', 'Không rõ lỗi')}")
             return {"success": False, "error": report_result.get("error", "Không thể sinh báo cáo"), "report": None}
@@ -162,12 +157,12 @@ class ReportManager:
         # Lưu DB
         close_today = meta.get("close_today") if meta else None
         close_yesterday = meta.get("close_yesterday") if meta else None
-        save_ok = await self.save_report(symbol, report, close_today, close_yesterday)
+        save_ok = self.save_report(symbol, report, close_today, close_yesterday)
         if not save_ok:
             logger.error(f"Không thể lưu báo cáo vào DB cho {symbol}")
             return {"success": False, "error": "Không thể lưu báo cáo vào DB", "report": report}
         # Gửi Telegram
-        send_ok = await self.send_report(report)
+        send_ok = self.send_report(report)
         if not send_ok:
             logger.error(f"Không thể gửi báo cáo Telegram cho {symbol}")
             return {"success": False, "error": "Không thể gửi báo cáo Telegram", "report": report, "saved": save_ok, "sent": send_ok}

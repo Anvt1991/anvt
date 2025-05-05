@@ -9,6 +9,7 @@ pytz==2023.3
 python-telegram-bot>=20.3
 tenacity==8.2.2
 cachetools==5.3.1
+pyyaml>=6.0
 
 # FastAPI và Uvicorn cho Telegram Bot
 fastapi>=0.95.1
@@ -18,7 +19,7 @@ httpx>=0.24.1
 
 # Stock data APIs
 yfinance==0.2.18
-vnstock==3.2.4
+vnstock==0.1.5
 
 # Technical analysis
 ta==0.10.2
@@ -31,6 +32,7 @@ xgboost==1.7.6
 groq==0.4.0
 google-generativeai==0.3.1
 aiohttp==3.8.4
+requests
 
 # Database
 aiosqlite==0.19.0
@@ -66,6 +68,8 @@ tqdm==4.65.0
 loguru==0.7.0
 
 # Thư viện xử lý dữ liệu chứng khoán
+requests>=2.28.0
+beautifulsoup4>=4.11.0
 rapidfuzz
 
 # Thư viện giao diện người dùng
@@ -75,19 +79,40 @@ streamlit>=1.10.0
 # Additional dependencies
 pydantic-settings==2.1.0
 
+# Thư viện cơ bản
+numpy==1.24.3
+pandas==2.0.1
+matplotlib==3.7.1
+seaborn==0.12.2
+scikit-learn==1.2.2
+yfinance==0.2.18
+vnstock==0.1.5
+
 # Thư viện xử lý dữ liệu và đồ thị
 plotly==5.14.1
 cufflinks==0.17.3
+ta==0.10.2
 
 # Các thư viện hỗ trợ
+python-dotenv==1.0.0
 joblib==1.2.0
+tenacity==8.2.2
+requests==2.30.0
 wheel==0.40.0
+pytz==2023.3
+tqdm==4.65.0
+pydantic==1.10.7
 
 # Thư viện UI
 tk==0.1.0
 
 # Thư viện API AI
+httpx==0.24.1
+aiohttp==3.8.4
 async-timeout==4.0.2
+groq==0.4.0
+google-generativeai==0.3.1
+loguru==0.7.0
 
 # Dev tools
 pylint==2.17.4
