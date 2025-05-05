@@ -380,6 +380,9 @@ def create_app():
         # Bảo mật: chỉ xử lý nếu token đúng
         if bot_token != bot.bot_token:
             return Response(content="Forbidden", status_code=403)
+        # Đảm bảo Application đã được initialize
+        if not bot.application._initialized:
+            await bot.application.initialize()
         data = await request.json()
         update = Update.de_json(data, bot.bot)
         await bot.application.process_update(update)
