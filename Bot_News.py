@@ -11,6 +11,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+import google.generativeai as genai
 
 # --- Config ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -74,10 +75,9 @@ async def save_news(entry, ai_summary, sentiment):
 # --- AI Analysis (Gemini) ---
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
 OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
 
 async def analyze_news(title, summary, model=None):
-    if model is None:
-        model = GEMINI_MODEL
     prompt = f"""
     Đây là một tin tức tài chính:
     ---
@@ -94,27 +94,33 @@ async def analyze_news(title, summary, model=None):
     - Cảm xúc:
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7
-                }
-            )
-            result = response.json()
-            if "choices" not in result:
-                logging.error(f"OpenRouter API error (model={model}): {result}")
-                raise RuntimeError(f"OpenRouter API error: {result}")
-            return result["choices"][0]["message"]["content"]
+        # Gọi Google Gemini API chính thức
+        genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-pro")
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        return response.text
     except Exception as e:
-        if model == GEMINI_MODEL:
-            print(f"Gemini lỗi: {e}, fallback sang {OPENROUTER_FALLBACK_MODEL}")
-            return await analyze_news(title, summary, model=OPENROUTER_FALLBACK_MODEL)
-        else:
-            raise e
+        logging.error(f"Gemini API lỗi: {e}, fallback sang OpenRouter {OPENROUTER_FALLBACK_MODEL}")
+        # Fallback sang OpenRouter
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",},
+                    json={
+                        "model": OPENROUTER_FALLBACK_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.7
+                    }
+                )
+                result = response.json()
+                if "choices" not in result:
+                    logging.error(f"OpenRouter API error (model={OPENROUTER_FALLBACK_MODEL}): {result}")
+                    raise RuntimeError(f"OpenRouter API error: {result}")
+                return result["choices"][0]["message"]["content"]
+        except Exception as e2:
+            logging.error(f"OpenRouter fallback cũng lỗi: {e2}")
+            raise e2
 
 async def analyze_news_cached(entry_id, title, summary):
     cache_key = f"ai_summary:{entry_id}"
