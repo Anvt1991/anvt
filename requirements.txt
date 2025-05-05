@@ -4,4 +4,4 @@ feedparser
 asyncpg
 httpx
 python-dotenv
-redis[async]>=4.2.0
+redis[async]>=4.2.0,<5
