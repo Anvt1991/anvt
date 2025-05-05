@@ -4,6 +4,6 @@ feedparser
 asyncpg
 httpx
 python-dotenv
-redis[async]>=4.2.0,<5
+redis>=4.2.0,<5
 openrouter
 google-generativeai==0.3.2

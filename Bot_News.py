@@ -24,6 +24,15 @@ class Config:
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+    FEED_URLS = [
+        "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=ch%E1%BB%A9ng+kho%C3%A1n&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=v%C4%A9+m%C3%B4&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=chi%E1%BA%BFn+tranh&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=l%C3%A3i+su%E1%BA%A5t&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi",
+    ]
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]  # Không còn CHANNEL_ID
@@ -161,7 +170,7 @@ async def approve_user_callback(cb: CallbackQuery):
 async def news_job():
     while True:
         await delete_old_news(days=7)  # Xóa tin cũ hơn 7 ngày
-        for url in FEED_URLS:
+        for url in Config.FEED_URLS:
             feed = feedparser.parse(url)
             for entry in feed.entries:
                 if await is_sent(entry.id):
