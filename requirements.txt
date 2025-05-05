@@ -1,5 +1,5 @@
 # Core packages
-numpy==1.24.3
+numpy>=2.0.2
 pandas==2.0.1
 matplotlib==3.7.1
 scikit-learn==1.2.2
@@ -61,7 +61,7 @@ seaborn==0.12.2
 # Report generation
 jinja2==3.1.2
 python-docx==1.0.1
-fpdf2==2.7.5
+
 
 # Utility
 tqdm==4.65.0
@@ -80,7 +80,6 @@ streamlit>=1.10.0
 pydantic-settings
 
 # Thư viện cơ bản
-numpy
 pandas==2.0.1
 matplotlib==3.7.1
 seaborn==0.12.2
