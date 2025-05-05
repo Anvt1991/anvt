@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Bot Chứng Khoán Toàn Diện 
+Bot Chứng Khoán Toàn Diện 19.5
 """
 
 # Standard library imports
@@ -95,7 +95,7 @@ NEWS_CACHE_EXPIRE = 900     # 15 phút
 DEFAULT_CANDLES = 100
 DEFAULT_TIMEFRAME = '1D'
 TZ = pytz.timezone('Asia/Bangkok')
-VERSION = "V19.3"           
+VERSION = "V19.5"           
 
 # ---------- KẾT NỐI REDIS (Async) ----------
 class RedisManager:
@@ -1213,13 +1213,50 @@ class DataLoader:
         try:
             stock = Vnstock().stock(symbol=symbol, source='TCBS')
             fundamental_data = {}
-            ratios = stock.finance.ratio()
-            if ratios is not None and not ratios.empty:
-                fundamental_data.update(ratios.iloc[-1].to_dict())
-            if hasattr(stock.finance, 'valuation'):
-                valuation = stock.finance.valuation()
-                if valuation is not None and not valuation.empty:
-                    fundamental_data.update(valuation.iloc[-1].to_dict())
+            # 1. Company overview
+            try:
+                overview = stock.company.overview()
+                if overview is not None and not overview.empty:
+                    fundamental_data.update(overview.iloc[-1].to_dict())
+            except Exception as e:
+                logger.warning(f"Lỗi lấy company.overview cho {symbol}: {str(e)}")
+            # 2. Financial ratios
+            try:
+                ratios = stock.finance.ratio()
+                if ratios is not None and not ratios.empty:
+                    fundamental_data.update(ratios.iloc[-1].to_dict())
+            except Exception as e:
+                logger.warning(f"Lỗi lấy finance.ratio cho {symbol}: {str(e)}")
+            # 3. Valuation
+            try:
+                if hasattr(stock.finance, 'valuation'):
+                    valuation = stock.finance.valuation()
+                    if valuation is not None and not valuation.empty:
+                        fundamental_data.update(valuation.iloc[-1].to_dict())
+            except Exception as e:
+                logger.warning(f"Lỗi lấy finance.valuation cho {symbol}: {str(e)}")
+            # 4. Balance sheet
+            try:
+                balance = stock.finance.balance_sheet(period='year', dropna=True)
+                if balance is not None and not balance.empty:
+                    fundamental_data.update(balance.iloc[-1].to_dict())
+            except Exception as e:
+                logger.warning(f"Lỗi lấy balance_sheet cho {symbol}: {str(e)}")
+            # 5. Income statement
+            try:
+                income = stock.finance.income_statement(period='year', dropna=True)
+                if income is not None and not income.empty:
+                    fundamental_data.update(income.iloc[-1].to_dict())
+            except Exception as e:
+                logger.warning(f"Lỗi lấy income_statement cho {symbol}: {str(e)}")
+            # 6. Cash flow
+            try:
+                cashflow = stock.finance.cash_flow(period='year', dropna=True)
+                if cashflow is not None and not cashflow.empty:
+                    fundamental_data.update(cashflow.iloc[-1].to_dict())
+            except Exception as e:
+                logger.warning(f"Lỗi lấy cash_flow cho {symbol}: {str(e)}")
+            # Chỉ trả về nếu có ít nhất 1 trường dữ liệu
             if not fundamental_data:
                 raise ValueError("Không có dữ liệu cơ bản từ VNStock")
             return fundamental_data
@@ -1699,9 +1736,13 @@ class AIAnalyzer:
         Phân tích dữ liệu kỹ thuật sau đây để nhận diện mô hình giá (pattern) theo Elliott Wave, Wyckoff, và các mô hình nến Nhật.
         Hãy xác định chính xác các mô hình đang xuất hiện trên biểu đồ dựa trên dữ liệu được cung cấp.
         
-        Dữ liệu:
-        {}
+        Đặc biệt, nếu có mô hình Wyckoff, hãy chỉ rõ:
+        - Giai đoạn Wyckoff (A, B, C, D, E)
+        - Loại Wyckoff: tích lũy (accumulation), phân phối (distribution), spring, test, SOS (Sign of Strength), SOW (Sign of Weakness), v.v.
+        - Nếu có thể, hãy mô tả ngắn gọn vị trí hiện tại của giá trong chu kỳ Wyckoff.
         
+        Dữ liệu:
+        {}        
         Trả về kết quả dưới dạng JSON với định dạng:
         ```json
         {{
@@ -2228,6 +2269,14 @@ async def get_news(symbol: str = None, limit: int = 3) -> list:
         "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml",
         "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
     ]
+    # Thêm Google News RSS
+    if symbol:
+        # Google News RSS cho mã cổ phiếu cụ thể (dùng truy vấn mã)
+        google_news_url = f"https://news.google.com/rss/search?q={symbol}+stock+site:vn&hl=vi&gl=VN&ceid=VN:vi"
+    else:
+        # Google News RSS cho thị trường chung
+        google_news_url = "https://news.google.com/rss/search?q=chung+khoan+OR+stock+OR+vnindex+OR+thị+trường+chứng+khoán&hl=vi&gl=VN&ceid=VN:vi"
+    rss_urls.append(google_news_url)
     
     # Từ khóa tìm kiếm
     market_keywords = [
@@ -2383,49 +2432,177 @@ async def fetch_rss(url: str, keywords: list, is_symbol_search: bool = False) ->
 async def auto_train_models():
     """
     Tự động huấn luyện mô hình cho các mã đã có trong lịch sử báo cáo.
-    Sử dụng PostgreSQL database.
+    Sử dụng PostgreSQL database. Tích hợp Optuna để tối ưu hóa siêu tham số Prophet và XGBoost.
     """
     # Lấy danh sách mã cần training
     symbols = await db.get_training_symbols()
     if not symbols:
         logger.info("Không có mã nào trong ReportHistory, bỏ qua auto training.")
         return
-        
+    
     for symbol in symbols:
         try:
-            logger.info(f"Bắt đầu auto training cho mã: {symbol}")
+            logger.info(f"Bắt đầu auto training + Optuna cho mã: {symbol}")
             loader = DataLoader()
             tech_analyzer = TechnicalAnalyzer()
             raw_df, cleaned_df, _ = await loader.load_data(symbol, '1D', 500)
             df = tech_analyzer.calculate_indicators(cleaned_df)
             features = ['sma20', 'sma50', 'sma200', 'rsi', 'macd', 'signal', 'bb_high', 'bb_low', 'ichimoku_a', 'ichimoku_b', 'vwap', 'mfi']
-            
-            # Huấn luyện mô hình
-            prophet_model, prophet_perf = await run_in_thread(train_prophet_model, df)
-            xgb_model, xgb_perf = await run_in_thread(train_xgboost_model, df, features)
-            
-            # Chuẩn bị tham số
-            prophet_params = {
-                'changepoint_prior_scale': 0.05,
-                'seasonality_prior_scale': 10,
-                'seasonality_mode': 'multiplicative'
-            }
-            xgb_params = {
-                'features': features,
-                'data_points': len(df)
-            }
-            
-            # Lưu mô hình với thông tin version và params
+
+            # --- Optuna cho Prophet ---
+            def objective_prophet(trial):
+                from prophet import Prophet
+                changepoint_prior_scale = trial.suggest_float('changepoint_prior_scale', 0.001, 0.5)
+                seasonality_prior_scale = trial.suggest_float('seasonality_prior_scale', 1, 20)
+                seasonality_mode = trial.suggest_categorical('seasonality_mode', ['additive', 'multiplicative'])
+                model = Prophet(
+                    changepoint_prior_scale=changepoint_prior_scale,
+                    seasonality_prior_scale=seasonality_prior_scale,
+                    seasonality_mode=seasonality_mode
+                )
+                model.add_seasonality(name='weekly', period=5, fourier_order=5)
+                model.add_seasonality(name='monthly', period=21, fourier_order=5)
+                last_value = df['close'].iloc[-1]
+                growth_cap = last_value * 1.5
+                growth_floor = last_value * 0.5
+                if 'date' in df.columns:
+                    df_reset = df.copy()
+                    df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+                else:
+                    df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+                df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
+                df_reset['cap'] = growth_cap
+                df_reset['floor'] = growth_floor
+                model.fit(df_reset[['ds', 'y', 'cap', 'floor']])
+                future = model.make_future_dataframe(periods=0)
+                future['cap'] = growth_cap
+                future['floor'] = growth_floor
+                forecast = model.predict(future)
+                actual = df['close'].values
+                predicted = forecast['yhat'].values
+                if len(actual) != len(predicted):
+                    return 1.0  # Penalize
+                mse = np.mean((actual - predicted) ** 2)
+                mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+                score = 0.7 * (1 / (1 + mse)) + 0.3 * max(0, 1 - (mape / 30))
+                return -score  # Optuna minimize
+
+            study_prophet = optuna.create_study()
+            study_prophet.optimize(objective_prophet, n_trials=20, show_progress_bar=False)
+            best_params_prophet = study_prophet.best_params
+            logger.info(f"Best Prophet params for {symbol}: {best_params_prophet}")
+            # Train lại Prophet với best params
+            from prophet import Prophet
+            model = Prophet(
+                changepoint_prior_scale=best_params_prophet['changepoint_prior_scale'],
+                seasonality_prior_scale=best_params_prophet['seasonality_prior_scale'],
+                seasonality_mode=best_params_prophet['seasonality_mode']
+            )
+            model.add_seasonality(name='weekly', period=5, fourier_order=5)
+            model.add_seasonality(name='monthly', period=21, fourier_order=5)
+            last_value = df['close'].iloc[-1]
+            growth_cap = last_value * 1.5
+            growth_floor = last_value * 0.5
+            if 'date' in df.columns:
+                df_reset = df.copy()
+                df_reset.rename(columns={'date': 'ds', 'close': 'y'}, inplace=True)
+            else:
+                df_reset = df.reset_index().rename(columns={'date': 'ds', 'close': 'y'})
+            df_reset['ds'] = pd.to_datetime(df_reset['ds']).dt.tz_localize(None)
+            df_reset['cap'] = growth_cap
+            df_reset['floor'] = growth_floor
+            model.fit(df_reset[['ds', 'y', 'cap', 'floor']])
+            future = model.make_future_dataframe(periods=0)
+            future['cap'] = growth_cap
+            future['floor'] = growth_floor
+            forecast = model.predict(future)
+            actual = df['close'].values
+            predicted = forecast['yhat'].values
+            if len(actual) != len(predicted):
+                prophet_perf = 0.0
+            else:
+                mse = np.mean((actual - predicted) ** 2)
+                mape = np.mean(np.abs((actual - predicted) / actual)) * 100
+                prophet_perf = 0.7 * (1 / (1 + mse)) + 0.3 * max(0, 1 - (mape / 30))
+            prophet_model = model
+            prophet_params = best_params_prophet
+            # --- Optuna cho XGBoost ---
+            def objective_xgb(trial):
+                import xgboost as xgb
+                from sklearn.metrics import accuracy_score
+                max_depth = trial.suggest_int('max_depth', 2, 8)
+                learning_rate = trial.suggest_float('learning_rate', 0.01, 0.3)
+                n_estimators = trial.suggest_int('n_estimators', 50, 200)
+                subsample = trial.suggest_float('subsample', 0.5, 1.0)
+                colsample_bytree = trial.suggest_float('colsample_bytree', 0.5, 1.0)
+                df2 = df.copy()
+                df2['target'] = (df2['close'] > df2['close'].shift(1)).astype(int)
+                X = df2[features].shift(1)
+                y = df2['target']
+                valid_idx = X.notna().all(axis=1) & y.notna()
+                X = X[valid_idx]
+                y = y[valid_idx]
+                if len(X) < 100:
+                    return 1.0
+                X_train = X.iloc[:-1]
+                y_train = y.iloc[:-1]
+                model = xgb.XGBClassifier(
+                    max_depth=max_depth,
+                    learning_rate=learning_rate,
+                    n_estimators=n_estimators,
+                    subsample=subsample,
+                    colsample_bytree=colsample_bytree,
+                    use_label_encoder=False,
+                    eval_metric='logloss',
+                    verbosity=0
+                )
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_train)
+                acc = accuracy_score(y_train, y_pred)
+                return -acc
+            study_xgb = optuna.create_study()
+            study_xgb.optimize(objective_xgb, n_trials=20, show_progress_bar=False)
+            best_params_xgb = study_xgb.best_params
+            logger.info(f"Best XGBoost params for {symbol}: {best_params_xgb}")
+            import xgboost as xgb
+            df2 = df.copy()
+            df2['target'] = (df2['close'] > df2['close'].shift(1)).astype(int)
+            X = df2[features].shift(1)
+            y = df2['target']
+            valid_idx = X.notna().all(axis=1) & y.notna()
+            X = X[valid_idx]
+            y = y[valid_idx]
+            if len(X) < 100:
+                xgb_model = xgb.XGBClassifier()
+                xgb_perf = 0.0
+            else:
+                X_train = X.iloc[:-1]
+                y_train = y.iloc[:-1]
+                xgb_model = xgb.XGBClassifier(
+                    max_depth=best_params_xgb['max_depth'],
+                    learning_rate=best_params_xgb['learning_rate'],
+                    n_estimators=best_params_xgb['n_estimators'],
+                    subsample=best_params_xgb['subsample'],
+                    colsample_bytree=best_params_xgb['colsample_bytree'],
+                    use_label_encoder=False,
+                    eval_metric='logloss',
+                    verbosity=0
+                )
+                xgb_model.fit(X_train, y_train)
+                y_pred = xgb_model.predict(X_train)
+                from sklearn.metrics import accuracy_score
+                xgb_perf = accuracy_score(y_train, y_pred)
+            xgb_params = best_params_xgb
+            # --- Lưu mô hình với params tối ưu ---
             await db.store_trained_model(
                 symbol, 'prophet', prophet_model, prophet_perf, 
-                version="1.1", params=prophet_params
+                version="optuna-1.0", params=prophet_params
             )
             await db.store_trained_model(
                 symbol, 'xgboost', xgb_model, xgb_perf,
-                version="1.1", params=xgb_params
+                version="optuna-1.0", params=xgb_params
             )
-            
-            logger.info(f"Auto training cho {symbol} hoàn tất.")
+            logger.info(f"Auto training + Optuna cho {symbol} hoàn tất.")
         except Exception as e:
             logger.error(f"Lỗi auto training cho {symbol}: {str(e)}")
             logger.error(traceback.format_exc())  # Thêm stack trace đầy đủ
@@ -2795,19 +2972,19 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         loader = DataLoader()
         main_df = None
         fundamental_data = {}
-        
+        news = []
         try:
             # Tải dữ liệu cơ bản (chỉ timeframe mặc định)
             timeframe = DEFAULT_TIMEFRAME
             num_candles = DEFAULT_CANDLES
-            
             # Tải dữ liệu chứng khoán
             raw_df, cleaned_df, outlier_report = await loader.load_data(symbol, timeframe, num_candles)
             main_df = raw_df
-            
             # Tải dữ liệu cơ bản nếu có
             if not DataValidator.is_index(symbol):
                 fundamental_data = await loader.get_fundamental_data(symbol)
+            # Lấy tin tức mới nhất (bao gồm Google News)
+            news = await get_news(symbol)
         except Exception as e:
             logger.error(f"Lỗi tải dữ liệu cho chat: {str(e)}")
             # Tiếp tục mà không cần dữ liệu
@@ -2823,7 +3000,8 @@ async def handle_chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Chuẩn bị các giá trị hiển thị với xử lý None
         current_price_str = f"{context_info['current_price']:.2f}" if context_info['current_price'] is not None else "N/A"
         change_pct_str = f"{context_info['change_pct']:.2f}" if context_info['change_pct'] is not None else "N/A"
-        
+        # Thêm tin tức vào context_text
+        news_text = "\n".join([f"📰 {n['title']}\n🔗 {n['link']}\n📝 {n['summary']}" for n in news]) if news else "Không có tin tức mới."
         context_text = f"""
 Bạn là chuyên gia tư vấn đầu tư chứng khoán Việt Nam. Hãy trò chuyện với nhà đầu tư về mã {symbol}.
 
@@ -2844,11 +3022,8 @@ Thông tin cơ bản:
 - Nợ/Vốn chủ sở hữu: {fundamental_data.get('debtToEquity', 'N/A')}
 - Cổ tức: {fundamental_data.get('dividendYield', 'N/A')}
 - Beta: {fundamental_data.get('beta', 'N/A')}
-
-Khi trả lời về phương án phân bổ vốn, hãy đề xuất cụ thể: X% vào cổ phiếu này, Y% để dự phòng và giải thích lý do dựa trên phân tích fundamental và technical. Cung cấp các kịch bản và tỷ lệ risk/reward.
-
-Khi đánh giá tiềm năng công ty, hãy phân tích mô hình kinh doanh, lợi thế cạnh tranh, triển vọng ngành và chất lượng ban lãnh đạo. Nêu rõ điểm mạnh, điểm yếu và so sánh với đối thủ trong ngành.
 """
+        context_text += f"\nTin tức mới nhất:\n{news_text}\n"
         
         # Lấy lịch sử chat
         chat_history = []
@@ -3120,7 +3295,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Tiếp tục xử lý, không dừng lại vì lỗi này
     
     # Tạo phiên bản và thời gian
-    version = "V19.3"
+    version = "V19.5"
     current_time = datetime.now(TZ).strftime("%d/%m/%Y %H:%M:%S")
     
     await update.message.reply_text(
@@ -3207,8 +3382,8 @@ def main():
     
     # Thiết lập scheduler cho auto training
     scheduler = AsyncIOScheduler(event_loop=loop)
-    # Chạy training vào 2 giờ sáng hàng ngày
-    scheduler.add_job(auto_train_models, 'cron', hour=2, minute=0, 
+    # Chạy training vào 2 giờ sáng ngày 1 mỗi tháng
+    scheduler.add_job(auto_train_models, 'cron', day=1, hour=2, minute=0, 
                      misfire_grace_time=3600, coalesce=True, max_instances=1)
     scheduler.start()
     logger.info("Auto training scheduler đã khởi động.")
@@ -3225,10 +3400,10 @@ def main():
             url_path="webhook",
             webhook_url=webhook_url
         )
-        logger.info(f"Bot V19.3 đã khởi chạy trên Render với webhook: {webhook_url}")
+        logger.info(f"Bot V19.5 đã khởi chạy trên Render với webhook: {webhook_url}")
     else:
         # Chạy mode polling cho môi trường local
-        logger.info("Bot V19.3 đã khởi chạy (chế độ local).")
+        logger.info("Bot V19.5 đã khởi chạy (chế độ local).")
         application.run_polling()
 
 if __name__ == "__main__":
