@@ -14,31 +14,16 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 import google.generativeai as genai
 
 # --- Config ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
-DB_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-TARGET_USER_ID = None  # Không dùng nữa, gửi cho nhiều user đã duyệt
-CHANNEL_ID = None  # Không dùng nữa
-# Danh sách nguồn tin Google News RSS theo chủ đề nóng (tiếng Việt và tiếng Anh)
-FEED_URLS = [
-    # --- Tiếng Việt ---
-    # Kinh tế
-    "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
-    # Chứng khoán
-    "https://news.google.com/rss/search?q=ch%E1%BB%A9ng+kho%C3%A1n&hl=vi&gl=VN&ceid=VN:vi",
-    # Vĩ mô
-    "https://news.google.com/rss/search?q=v%C4%A9+m%C3%B4&hl=vi&gl=VN&ceid=VN:vi",
-    # Chiến tranh
-    "https://news.google.com/rss/search?q=chi%E1%BA%BFn+tranh&hl=vi&gl=VN&ceid=VN:vi",
-    # Lãi suất
-    "https://news.google.com/rss/search?q=l%C3%A3i+su%E1%BA%A5t&hl=vi&gl=VN&ceid=VN:vi",
-    # Fed
-    "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
-    # Tin nóng
-    "https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi",
-]
+class Config:
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
+    DB_URL = os.getenv("DATABASE_URL")
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+    GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
+    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+    OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]  # Không còn CHANNEL_ID
@@ -48,7 +33,7 @@ for var in REQUIRED_ENV_VARS:
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=Config.BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # --- Redis ---
@@ -73,9 +58,9 @@ async def save_news(entry, ai_summary, sentiment):
         """, entry.title, entry.link, entry.summary, sentiment, ai_summary)
 
 # --- AI Analysis (Gemini) ---
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
-OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
-GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
+GEMINI_MODEL = Config.GEMINI_MODEL
+OPENROUTER_FALLBACK_MODEL = Config.OPENROUTER_FALLBACK_MODEL
+GOOGLE_GEMINI_API_KEY = Config.GOOGLE_GEMINI_API_KEY
 
 async def analyze_news(title, summary, model=None):
     prompt = f"""
@@ -153,7 +138,7 @@ async def register_user(msg: types.Message):
         inline_keyboard=[[InlineKeyboardButton(text="Duyệt user này", callback_data=f"approve_{user_id}")]]
     )
     await bot.send_message(
-        ADMIN_ID,
+        Config.ADMIN_ID,
         f"Yêu cầu duyệt user mới: @{username} (ID: {user_id})",
         reply_markup=kb
     )
@@ -162,7 +147,7 @@ async def register_user(msg: types.Message):
 # --- Xử lý callback admin duyệt user ---
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_user_callback(cb: CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
+    if cb.from_user.id != Config.ADMIN_ID:
         await cb.answer("Chỉ admin mới được duyệt!", show_alert=True)
         return
     user_id = int(cb.data.split("_")[1])
@@ -244,10 +229,10 @@ async def delete_old_news(days=7):
 
 async def on_startup(app):
     global redis, pool
-    redis = await aioredis.from_url(REDIS_URL)
-    pool = await asyncpg.create_pool(dsn=DB_URL)
+    redis = await aioredis.from_url(Config.REDIS_URL)
+    pool = await asyncpg.create_pool(dsn=Config.DB_URL)
     await init_db()  # Tự động tạo bảng nếu chưa có
-    await bot.set_webhook(WEBHOOK_URL)
+    await bot.set_webhook(Config.WEBHOOK_URL)
     asyncio.create_task(news_job())
 
 async def on_shutdown(app):
