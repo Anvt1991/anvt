@@ -24,6 +24,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 # Import cho sentiment analysis tiếng Việt
 import numpy as np
+import requests
 
 # --- 1. Config & setup ---
 class Config:
@@ -57,9 +58,10 @@ class Config:
     RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "3"))  # Số ngày để lấy tin gần đây để so sánh
     
     # Cấu hình mô hình sentiment analysis
-    USE_ML_SENTIMENT = os.getenv("USE_ML_SENTIMENT", "true").lower() == "true"  # Bật/tắt mô hình ML
-    SENTIMENT_MODEL_NAME = os.getenv("SENTIMENT_MODEL_NAME", "NlpHUST/vibert4news-base-cased-sentiment")
-    MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "256"))  # Giới hạn độ dài text cho sentiment model
+    USE_HF_API = os.getenv("USE_HF_API", "true").lower() == "true"  # Bật/tắt HF API
+    HF_API_TOKEN = os.getenv("HF_API_TOKEN")  # Token cho HuggingFace API
+    HF_API_MODEL = os.getenv("HF_API_MODEL", "NlpHUST/vibert4news-base-cased-sentiment")  # Model để sử dụng
+    HF_API_TIMEOUT = int(os.getenv("HF_API_TIMEOUT", "10"))  # Timeout cho API request (giây)
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
@@ -152,11 +154,9 @@ async def is_in_db(entry):
 async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
     try:
         async with pool.acquire() as conn:
-            # Dùng trực tiếp NOW() của PostgreSQL với AT TIME ZONE để đảm bảo nhất quán
-            await conn.execute("""
-                DELETE FROM news_insights 
-                WHERE created_at < (NOW() AT TIME ZONE 'UTC' - INTERVAL '%s days')
-            """, days)
+            await conn.execute(
+                f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days'"
+            )
             count = await conn.fetchval("SELECT count(*) FROM news_insights")
             logger.info(f"Đã xóa tin cũ hơn {days} ngày. Còn lại {count} tin trong DB.")
     except Exception as e:
@@ -198,68 +198,55 @@ async def analyze_news(prompt, model=None):
             raise e2
 
 # --- Extract sentiment from AI result ---
-# Lazy loading cho mô hình sentiment analysis - chỉ tải khi cần dùng
-_sentiment_model = None
-_sentiment_tokenizer = None
-
-def load_sentiment_model():
-    """Lazy load mô hình sentiment analysis khi cần dùng"""
-    global _sentiment_model, _sentiment_tokenizer
-    if _sentiment_model is None or _sentiment_tokenizer is None:
-        try:
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
-            import torch
-
-            model_name = Config.SENTIMENT_MODEL_NAME
-            logging.info(f"Đang tải mô hình sentiment analysis: {model_name}")
-            
-            _sentiment_tokenizer = AutoTokenizer.from_pretrained(model_name)
-            _sentiment_model = AutoModelForSequenceClassification.from_pretrained(model_name)
-            
-            logging.info(f"Đã tải xong mô hình sentiment analysis")
-        except Exception as e:
-            logging.error(f"Lỗi khi tải mô hình sentiment analysis: {e}")
-            _sentiment_model = None
-            _sentiment_tokenizer = None
-    return _sentiment_model, _sentiment_tokenizer
-
-async def predict_sentiment_ml(text):
-    """Dự đoán cảm xúc sử dụng mô hình ML"""
+async def predict_sentiment_hf_api(text):
+    """Dự đoán cảm xúc sử dụng Hugging Face Inference API"""
     try:
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
-        import torch
-        
-        # Tải mô hình nếu chưa tải
-        model, tokenizer = load_sentiment_model()
-        if model is None or tokenizer is None:
-            logging.warning("Không thể tải mô hình sentiment analysis, sử dụng phương pháp rule-based")
+        if not Config.HF_API_TOKEN:
+            logging.warning("Chưa cấu hình HF_API_TOKEN, không thể gọi HuggingFace API")
             return None
+            
+        # Giới hạn độ dài văn bản để tránh lỗi và tiết kiệm băng thông
+        if len(text) > 1000:
+            text = text[:1000]
+            
+        api_url = f"https://api-inference.huggingface.co/models/{Config.HF_API_MODEL}"
+        headers = {"Authorization": f"Bearer {Config.HF_API_TOKEN}"}
+        payload = {"inputs": text}
         
-        # Giới hạn kích thước text để tránh quá tải RAM
-        if len(text) > Config.MAX_TEXT_LENGTH * 4:  # Ước lượng chars vs tokens
-            text = text[:Config.MAX_TEXT_LENGTH * 4]  # Cắt bớt
-        
-        # Tokenize và dự đoán
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=Config.MAX_TEXT_LENGTH)
-        
-        # Thêm phần tính điểm
-        with torch.no_grad():
-            logits = model(**inputs).logits
-        
-        # Lấy xác suất cho từng nhãn
-        probs = torch.softmax(logits, dim=1).numpy()[0]
-        pred_class = int(np.argmax(probs))
-        
-        # Mô hình này có 3 nhãn: 0=Negative, 1=Neutral, 2=Positive
-        labels = ["Tiêu cực", "Trung lập", "Tích cực"]
-        confidence = float(probs[pred_class])
-        
-        logging.info(f"Phân tích cảm xúc bằng ML: {labels[pred_class]} (confidence: {confidence:.2f})")
-        return labels[pred_class]
-        
+        async with httpx.AsyncClient(timeout=Config.HF_API_TIMEOUT) as client:
+            response = await client.post(api_url, headers=headers, json=payload)
+            
+        if response.status_code == 200:
+            result = response.json()
+            logging.info(f"HuggingFace API response: {result}")
+            
+            # Xử lý kết quả từ API
+            if isinstance(result, list) and len(result) > 0:
+                # Format 1: List của dict với label/score
+                if isinstance(result[0], dict) and 'label' in result[0]:
+                    # Sắp xếp kết quả theo score (cao nhất trước)
+                    sorted_results = sorted(result, key=lambda x: x.get('score', 0), reverse=True)
+                    label = sorted_results[0]['label'].lower()
+                    score = sorted_results[0].get('score', 0)
+                    logging.info(f"Sentiment từ HF API: {label} (score: {score:.2f})")
+                    
+                    # Chuyển đổi nhãn từ tiếng Anh sang tiếng Việt
+                    if 'positive' in label or 'tích cực' in label:
+                        return "Tích cực"
+                    elif 'negative' in label or 'tiêu cực' in label:
+                        return "Tiêu cực"
+                    else:
+                        return "Trung lập"
+                        
+            # Nếu không xử lý được kết quả
+            logging.warning(f"Không nhận dạng được định dạng kết quả từ HF: {result}")
+        else:
+            logging.error(f"Lỗi HuggingFace API: {response.status_code}, {response.text}")
+            
     except Exception as e:
-        logging.error(f"Lỗi khi dự đoán sentiment bằng ML: {e}")
-        return None
+        logging.error(f"Lỗi khi gọi HuggingFace API: {e}")
+        
+    return None
 
 def extract_sentiment_rule_based(ai_summary):
     """Extract sentiment from AI summary using rule-based approach"""
@@ -288,18 +275,18 @@ def extract_sentiment_rule_based(ai_summary):
     return sentiment
 
 async def extract_sentiment(ai_summary):
-    """Extract sentiment from AI summary, sử dụng mô hình ML nếu có thể, 
+    """Extract sentiment from AI summary, sử dụng HuggingFace API nếu có thể, 
     hoặc fallback sang rule-based"""
-    if Config.USE_ML_SENTIMENT:
+    if Config.USE_HF_API:
         try:
-            # Thử dùng mô hình ML trước
-            ml_sentiment = await predict_sentiment_ml(ai_summary)
-            if ml_sentiment:
-                return ml_sentiment  # Trả về kết quả ML nếu có
+            # Thử dùng HuggingFace API trước
+            hf_sentiment = await predict_sentiment_hf_api(ai_summary)
+            if hf_sentiment:
+                return hf_sentiment  # Trả về kết quả API nếu có
         except Exception as e:
-            logging.warning(f"Lỗi khi phân tích sentiment ML, fallback sang rule-based: {e}")
+            logging.warning(f"Lỗi khi phân tích sentiment qua HF API, fallback sang rule-based: {e}")
     
-    # Fallback sang rule-based nếu ML không thành công hoặc không được bật
+    # Fallback sang rule-based nếu API không thành công hoặc không được bật
     return extract_sentiment_rule_based(ai_summary)
 
 def is_hot_news(entry, ai_summary, sentiment):
@@ -728,7 +715,7 @@ async def get_recent_news_texts(days=Config.RECENT_NEWS_DAYS):
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT title, summary FROM news_insights WHERE created_at > NOW() - INTERVAL '%s days'", days
+                f"SELECT title, summary FROM news_insights WHERE created_at > NOW() - INTERVAL '{days} days'"
             )
             # Ghép tiêu đề và tóm tắt để so sánh
             return [f"{row['title']} {row['summary']}" for row in rows]
@@ -1120,9 +1107,12 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                     # Gọi model AI và lưu kết quả
                     try:
                         ai_summary = await analyze_news(prompt)
-                        sentiment = await extract_sentiment(ai_summary)
-                        is_hot = is_hot_news(entry, ai_summary, sentiment)
-                        
+                        # Phát hiện tin hot trước khi phân tích cảm xúc
+                        is_hot = is_hot_news(entry, ai_summary, 'Trung lập')
+                        if is_hot:
+                            sentiment = await extract_sentiment(ai_summary)
+                        else:
+                            sentiment = 'Trung lập'
                         # Lưu vào database với timezone
                         await save_news(entry, ai_summary, sentiment, is_hot)
                         
