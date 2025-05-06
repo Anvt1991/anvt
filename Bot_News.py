@@ -275,132 +275,164 @@ async def approve_user_callback(cb: CallbackQuery):
     await bot.send_message(user_id, "Bạn đã được admin duyệt, sẽ nhận tin tức từ bot!")
     await cb.answer(f"Đã duyệt user @{user['username']} ({user_id})")
 
-# --- Tin tức theo chu kỳ ---
+# Biến toàn cục để theo dõi trạng thái của news_job task
+news_job_running = False
+
 async def news_job():
-    while True:
-        await delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS)
-        new_entries = []
-        cached_results = {}
-        entries_to_analyze = []
-
-        try:
-            now = datetime.datetime.utcnow()
-            # Collect entries from feeds
-            for url in Config.FEED_URLS:
-                feed = await parse_feed(url)
-                for entry in feed.entries:
-                    # Kiểm tra ngày xuất bản
-                    pub_date = None
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        pub_date = datetime.datetime(*entry.published_parsed[:6])
-                    elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                        pub_date = datetime.datetime(*entry.updated_parsed[:6])
-                    if pub_date and (now - pub_date).days > 2:
-                        continue  # Bỏ tin cũ hơn 2 ngày
-                    normalized_title = normalize_title(getattr(entry, 'title', ''))
-                    if (
-                        await is_sent(entry.id)
-                        or await is_in_db(entry)
-                        or not normalized_title
-                        or await is_title_sent(normalized_title)
-                    ):
-                        continue
-                    await mark_sent(entry.id)
-                    await mark_title_sent(normalized_title)
-                    cache_key = f"ai_summary:{entry.id}"
-                    cached = await redis.get(cache_key)
-                    if cached:
-                        cached_results[entry.id] = cached.decode()
-                    else:
-                        entries_to_analyze.append(entry)
-                    new_entries.append(entry)
-                    if len(new_entries) >= Config.MAX_NEWS_PER_CYCLE:
-                        break
-                if len(new_entries) >= Config.MAX_NEWS_PER_CYCLE:
-                    break
-
-            # Gọi Gemini cho các entry chưa có cache
-            ai_results = {}
-            if entries_to_analyze:
-                prompt = "Đây là các tin tức tài chính:\n"
-                for idx, entry in enumerate(entries_to_analyze, 1):
-                    prompt += f"\n---\nTin số {idx}:\n{entry.title}\n{entry.summary}\n"
-                prompt += '''
-Hãy với mỗi tin:
-1. Tóm tắt ngắn gọn (dưới 2 câu)
-2. Đưa ra nhận định thị trường ngắn gọn (dưới 2 câu)
-3. Phân tích cảm xúc: tích cực / tiêu cực / trung lập.
-Trả về kết quả cho từng tin theo định dạng:
-- Tin số X:
-  - Tóm tắt:
-  - Nhận định:
-  - Cảm xúc:
-'''
-                ai_result = await analyze_news(prompt)
+    """
+    Hàm chạy định kỳ để kiểm tra, phân tích và gửi tin tức mới.
+    Được thiết kế để tránh chạy nhiều instance cùng lúc.
+    """
+    global news_job_running
+    
+    # Nếu đã có một instance của news_job đang chạy, trở về
+    if news_job_running:
+        logging.info("Phát hiện news_job đã đang chạy, bỏ qua việc khởi tạo task mới")
+        return
+    
+    # Đánh dấu task đang chạy
+    news_job_running = True
+    logging.info("News job bắt đầu chạy")
+    
+    try:
+        while True:
+            try:
+                # Xóa tin cũ khỏi DB định kỳ
+                await delete_old_news()
                 
-                try:
-                    # Parse kết quả từ Gemini
-                    results = re.split(r"- Tin số \d+:", ai_result)[1:]  # Sửa regex
+                # Lấy danh sách URL nguồn tin
+                feed_urls = Config.FEED_URLS
+                all_entries = []
+                all_normalized_titles = {}  # Lưu trữ tiêu đề đã chuẩn hóa
+                
+                # Lấy tin từ tất cả các nguồn
+                for url in feed_urls:
+                    feed = await parse_feed(url)
+                    for entry in feed.entries:
+                        # Tạo ID duy nhất nếu không có
+                        if not hasattr(entry, 'id'):
+                            entry.id = entry.link
+                        
+                        # Chuẩn hóa tiêu đề để tránh trùng lặp
+                        normalized_title = normalize_title(entry.title)
+                        # Lưu mapping giữa id và tiêu đề chuẩn hóa
+                        all_normalized_titles[entry.id] = normalized_title
+                        
+                        # Kiểm tra xem tin đã được gửi hoặc đã lưu trong DB chưa
+                        sent = await is_sent(entry.id) or await is_title_sent(normalized_title)
+                        in_db = await is_in_db(entry)
+                        
+                        if not sent and not in_db:
+                            all_entries.append(entry)
+                
+                # Sắp xếp tin mới theo thời gian nếu có thông tin published
+                all_entries.sort(
+                    key=lambda e: getattr(e, 'published_parsed', 0) or 0,
+                    reverse=True
+                )
+                
+                # Giới hạn số lượng tin phân tích mỗi chu kỳ
+                new_entries = all_entries[:Config.MAX_NEWS_PER_CYCLE]
+                
+                if not new_entries:
+                    logging.info("Không có tin mới trong chu kỳ này")
+                else:
+                    logging.info(f"Phát hiện {len(new_entries)} tin mới cần phân tích")
+                
+                # Phân tích AI cho tất cả tin mới
+                ai_results = {}
+                cached_results = {}
+                
+                for entry in new_entries:
+                    try:
+                        # Kiểm tra cache Redis trước
+                        cached_summary = await redis.get(f"ai_summary:{entry.id}")
+                        if cached_summary:
+                            cached_results[entry.id] = cached_summary.decode('utf-8')
+                            logging.info(f"Đã tìm thấy kết quả AI từ cache cho {entry.title}")
+                            continue
+                        
+                        # Chuẩn bị prompt cho AI
+                        prompt = f"""Phân tích tin tức sau và đưa ra nhận định với góc nhìn của nhà đầu tư:
+Tiêu đề: {entry.title}
+Tóm tắt: {getattr(entry, 'summary', 'Không có tóm tắt')}
+URL: {entry.link}
+
+Yêu cầu:
+1. Tóm tắt ngắn gọn nội dung chính trong 1-2 câu
+2. Giải thích ý nghĩa với thị trường tài chính/chứng khoán
+3. Phân tích tác động ngắn và dài hạn có thể có
+4. Cảm xúc: Tích cực/Tiêu cực/Trung lập (đặt ở cuối phân tích)
+
+Viết ngắn gọn, súc tích trong 4-6 dòng."""
+                        
+                        # Phân tích bằng AI
+                        ai_summary = await analyze_news(prompt)
+                        ai_results[entry.id] = ai_summary
+                        
+                        # Lưu kết quả vào Redis cache
+                        await redis.set(f"ai_summary:{entry.id}", ai_summary.encode('utf-8'), ex=Config.REDIS_TTL)
+                        
+                        # Đánh dấu đã gửi ngay sau khi phân tích
+                        await mark_sent(entry.id)
+                        await mark_title_sent(all_normalized_titles[entry.id])
+                        
+                        logging.info(f"Đã phân tích tin: {entry.title}")
+                        # Đợi một chút giữa các lần gọi API để tránh rate limit
+                        await asyncio.sleep(2)
+                        
+                    except Exception as e:
+                        logging.error(f"Lỗi phân tích tin {entry.title}: {str(e)}")
+                
+                # Lấy danh sách người dùng được duyệt để gửi tin
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
+                    users_to_notify = {row["user_id"] for row in rows}
+                    users_to_notify.add(Config.ADMIN_ID)  # Luôn thêm admin vào danh sách nhận tin
+                
+                for entry in new_entries:
+                    if entry.id in cached_results:
+                        ai_summary = cached_results[entry.id]
+                    elif entry.id in ai_results:
+                        ai_summary = ai_results[entry.id]
+                    else:
+                        continue  # Không có kết quả AI
+
+                    sentiment = extract_sentiment(ai_summary)
+                    is_hot = is_hot_news(entry, ai_summary, sentiment)
+                    await save_news(entry, ai_summary, sentiment, is_hot)
                     
-                    # Check if we have enough results for all entries
-                    if len(results) >= len(entries_to_analyze):
-                        for entry, idx, result in zip(entries_to_analyze, range(1, len(entries_to_analyze)+1), results):
-                            ai_summary = f"- Tin số {idx}:{result.strip()}"
-                            ai_results[entry.id] = ai_summary
-                            await redis.set(f"ai_summary:{entry.id}", ai_summary, ex=Config.REDIS_TTL)
+                    # Lấy nguồn từ link (domain)
+                    domain = urlparse(entry.link).netloc.replace('www.', '') if hasattr(entry, 'link') else ''
+                    message = f"📰 *{entry.title}*\nNguồn: {domain}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
+                    
+                    # Phát hiện và gửi thông báo đặc biệt cho tin nóng
+                    if is_hot:
+                        hot_message = f"🔥🔥 *TIN NÓNG - QUAN TRỌNG!* 🔥🔥\n\n{message}\n\n⚠️ *Tin này có thể ảnh hưởng lớn đến thị trường*"
+                        sending_tasks = []
+                        for user_id in users_to_notify:
+                            sending_tasks.append(send_message_to_user(user_id, hot_message, entry=entry, is_hot_news=True))
+                        if sending_tasks:
+                            await asyncio.gather(*sending_tasks, return_exceptions=True)
                     else:
-                        logging.warning(f"Gemini trả về không đủ kết quả: {len(results)} results for {len(entries_to_analyze)} entries")
-                        # Backup: tạo kết quả trống cho mọi entry chưa phân tích
-                        for entry in entries_to_analyze:
-                            if entry.id not in ai_results:
-                                ai_results[entry.id] = f"- Tin số 0:\n  - Tóm tắt: {entry.title}\n  - Nhận định: Không có đủ thông tin\n  - Cảm xúc: Trung lập"
-                except Exception as e:
-                    logging.error(f"Lỗi khi parse kết quả Gemini: {e}, kết quả: {ai_result}")
-                    # Tạo kết quả trống cho mọi entry chưa phân tích
-                    for entry in entries_to_analyze:
-                        ai_results[entry.id] = f"- Tin số 0:\n  - Tóm tắt: {entry.title}\n  - Nhận định: Lỗi phân tích\n  - Cảm xúc: Trung lập"
-
-            # Gửi và lưu DB cho tất cả entry
-            async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
-                users_to_notify = {row["user_id"] for row in rows}
-                users_to_notify.add(Config.ADMIN_ID)  # Luôn thêm admin vào danh sách nhận tin
-            
-            for entry in new_entries:
-                if entry.id in cached_results:
-                    ai_summary = cached_results[entry.id]
-                elif entry.id in ai_results:
-                    ai_summary = ai_results[entry.id]
-                else:
-                    continue  # Không có kết quả AI
-
-                sentiment = extract_sentiment(ai_summary)
-                is_hot = is_hot_news(entry, ai_summary, sentiment)
-                await save_news(entry, ai_summary, sentiment, is_hot)
+                        sending_tasks = []
+                        for user_id in users_to_notify:
+                            sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
+                        if sending_tasks:
+                            await asyncio.gather(*sending_tasks, return_exceptions=True)
+                    
+            except Exception as e:
+                logging.error(f"Lỗi trong chu kỳ news_job: {e}")
                 
-                # Lấy nguồn từ link (domain)
-                domain = urlparse(entry.link).netloc.replace('www.', '') if hasattr(entry, 'link') else ''
-                message = f"📰 *{entry.title}*\nNguồn: {domain}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
-                
-                # Phát hiện và gửi thông báo đặc biệt cho tin nóng
-                if is_hot:
-                    hot_message = f"🔥🔥 *TIN NÓNG - QUAN TRỌNG!* 🔥🔥\n\n{message}\n\n⚠️ *Tin này có thể ảnh hưởng lớn đến thị trường*"
-                    sending_tasks = []
-                    for user_id in users_to_notify:
-                        sending_tasks.append(send_message_to_user(user_id, hot_message, entry=entry, is_hot_news=True))
-                    if sending_tasks:
-                        await asyncio.gather(*sending_tasks, return_exceptions=True)
-                else:
-                    sending_tasks = []
-                    for user_id in users_to_notify:
-                        sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
-                    if sending_tasks:
-                        await asyncio.gather(*sending_tasks, return_exceptions=True)
-                
-        except Exception as e:
-            logging.error(f"Lỗi trong chu kỳ news_job: {e}")
-            
-        await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
+            await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
+    except asyncio.CancelledError:
+        logging.info("News job bị hủy")
+    except Exception as e:
+        logging.error(f"Lỗi nghiêm trọng trong news_job: {e}")
+    finally:
+        # Đánh dấu task đã kết thúc
+        news_job_running = False
+        logging.info("News job đã kết thúc")
 
 async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
     """Send message to user với error handling, kèm ảnh nếu có (chỉ gửi qua bot chính)"""
@@ -471,7 +503,12 @@ async def init_db():
 # --- 8. Webhook & main ---
 async def on_startup(app):
     try:
-        global redis, pool
+        global redis, pool, news_job_running
+        
+        # Reset trạng thái và hủy task cũ nếu có
+        news_job_running = False
+        await cancel_running_tasks()
+        
         logging.info("Bot khởi động, thiết lập kết nối Redis...")
         redis = await aioredis.from_url(Config.REDIS_URL)
         logging.info("Thiết lập kết nối PostgreSQL...")
@@ -488,7 +525,8 @@ async def on_startup(app):
         logging.info(f"WebhookInfo: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
         
         logging.info("Khởi động task gửi tin...")
-        asyncio.create_task(news_job())
+        task = asyncio.create_task(news_job())
+        task.set_name("news_job")
         logging.info("Bot đã sẵn sàng hoạt động!")
     except Exception as e:
         logging.error(f"Lỗi trong on_startup: {e}")
@@ -507,15 +545,154 @@ async def on_shutdown(app):
 async def healthcheck(request):
     return web.Response(text="Bot đang hoạt động!", status=200)
 
+# Route cho ping để giữ bot hoạt động
+async def ping_bot(request):
+    logging.info("Nhận yêu cầu ping")
+    return web.Response(text="pong", status=200)
+
+async def cancel_running_tasks():
+    """Hủy các task đang chạy để tránh bị treo"""
+    try:
+        for task in asyncio.all_tasks():
+            if task.get_name() == "news_job" and not task.done():
+                logging.info("Đang hủy task news_job cũ...")
+                task.cancel()
+                try:
+                    # Chờ task kết thúc nếu đang bị hủy
+                    await asyncio.wait_for(task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logging.warning("Hủy task news_job cũ bị timeout")
+                except asyncio.CancelledError:
+                    logging.info("Đã hủy thành công task news_job cũ")
+    except Exception as e:
+        logging.error(f"Lỗi khi hủy tasks: {e}")
+
+# Route cho restart từ bên ngoài (có thể sử dụng cronjob để gọi định kỳ)
+async def restart_bot(request):
+    try:
+        logging.info("Yêu cầu khởi động lại bot từ endpoint /restart")
+        
+        global redis, pool, news_job_running
+        
+        # Reset trạng thái news_job và hủy task cũ
+        news_job_running = False
+        await cancel_running_tasks()
+        
+        # Đóng kết nối cũ
+        if redis:
+            try:
+                await redis.close()
+                logging.info("Đã đóng kết nối Redis")
+            except Exception as e:
+                logging.warning(f"Không thể đóng kết nối Redis: {e}")
+        
+        if pool:
+            try:
+                await pool.close()
+                logging.info("Đã đóng kết nối PostgreSQL")
+            except Exception as e:
+                logging.warning(f"Không thể đóng kết nối PostgreSQL: {e}")
+        
+        # Khởi tạo lại kết nối
+        logging.info("Khởi tạo lại kết nối Redis...")
+        redis = await aioredis.from_url(Config.REDIS_URL)
+        
+        logging.info("Khởi tạo lại kết nối PostgreSQL...")
+        pool = await asyncpg.create_pool(dsn=Config.DB_URL)
+        
+        logging.info("Khởi tạo lại database...")
+        await init_db()
+        
+        # Thiết lập lại webhook
+        logging.info(f"Thiết lập lại webhook: {Config.WEBHOOK_URL}")
+        await bot.delete_webhook()
+        result = await bot.set_webhook(Config.WEBHOOK_URL)
+        logging.info(f"Kết quả thiết lập lại webhook: {result}")
+        
+        # Khởi động lại task tin tức
+        task = asyncio.create_task(news_job())
+        task.set_name("news_job")
+            
+        return web.Response(text="Bot đã được khởi động lại thành công!", status=200)
+    except Exception as e:
+        error_msg = f"Lỗi khi khởi động lại bot: {str(e)}"
+        logging.error(error_msg)
+        return web.Response(text=error_msg, status=500)
+
 @dp.message(Command("start"))
 async def start_command(msg: types.Message):
-    await msg.answer(
-        "Chào mừng bạn đến với bot tin tức tài chính!\n"
-        "- Gõ /register để đăng ký nhận tin tức.\n"
-        "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
-        "- Tin nóng sẽ được đánh dấu đặc biệt 🔥 và gửi thông báo.\n"
-        "- Gõ /help để xem hướng dẫn."
-    )
+    try:
+        # Thử khởi động lại bot và kết nối các dịch vụ
+        logging.info("Lệnh /start được gọi - đang khởi động lại các dịch vụ...")
+        
+        global redis, pool, news_job_running
+        
+        # Reset trạng thái news_job và hủy task cũ
+        news_job_running = False
+        await cancel_running_tasks()
+        
+        # Đóng kết nối cũ nếu có
+        if redis:
+            try:
+                await redis.close()
+                logging.info("Đã đóng kết nối Redis cũ")
+            except Exception as e:
+                logging.warning(f"Không thể đóng kết nối Redis cũ: {e}")
+        
+        if pool:
+            try:
+                await pool.close()
+                logging.info("Đã đóng kết nối PostgreSQL cũ")
+            except Exception as e:
+                logging.warning(f"Không thể đóng kết nối PostgreSQL cũ: {e}")
+        
+        # Khởi tạo lại kết nối Redis
+        logging.info("Khởi tạo lại kết nối Redis...")
+        redis = await aioredis.from_url(Config.REDIS_URL)
+        
+        # Khởi tạo lại kết nối PostgreSQL
+        logging.info("Khởi tạo lại kết nối PostgreSQL...")
+        pool = await asyncpg.create_pool(dsn=Config.DB_URL)
+        
+        # Khởi tạo lại database
+        logging.info("Khởi tạo lại database...")
+        await init_db()
+        
+        # Thiết lập lại webhook
+        logging.info(f"Thiết lập lại webhook: {Config.WEBHOOK_URL}")
+        await bot.delete_webhook()
+        result = await bot.set_webhook(Config.WEBHOOK_URL)
+        logging.info(f"Kết quả thiết lập lại webhook: {result}")
+        
+        # Kiểm tra webhook đã set đúng chưa
+        webhook_info = await bot.get_webhook_info()
+        logging.info(f"WebhookInfo: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
+        
+        # Khởi động lại task xử lý tin tức
+        task = asyncio.create_task(news_job())
+        task.set_name("news_job")
+        
+        logging.info("Bot đã được khởi động lại thành công!")
+        
+        # Gửi thông báo thành công
+        await msg.answer(
+            "✅ Bot đã được khởi động lại thành công!\n\n"
+            "Chào mừng bạn đến với bot tin tức tài chính!\n"
+            "- Gõ /register để đăng ký nhận tin tức.\n"
+            "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
+            "- Tin nóng sẽ được đánh dấu đặc biệt 🔥 và gửi thông báo.\n"
+            "- Gõ /help để xem hướng dẫn."
+        )
+    except Exception as e:
+        logging.error(f"Lỗi khi thử khởi động lại bot từ lệnh /start: {e}")
+        await msg.answer(
+            f"❌ Không thể khởi động lại bot: {str(e)}\n\n"
+            "Chào mừng bạn đến với bot tin tức tài chính!\n"
+            "- Gõ /register để đăng ký nhận tin tức.\n"
+            "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
+            "- Tin nóng sẽ được đánh dấu đặc biệt 🔥 và gửi thông báo.\n"
+            "- Gõ /help để xem hướng dẫn."
+        )
 
 @dp.message(Command("help"))
 async def help_command(msg: types.Message):
@@ -555,6 +732,8 @@ app = web.Application()
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 app.router.add_get("/", healthcheck)  # Thêm route / để kiểm tra bot sống
+app.router.add_get("/ping", ping_bot)  # Thêm route /ping để giữ bot hoạt động
+app.router.add_get("/restart", restart_bot)  # Thêm route /restart để khởi động lại bot
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
 setup_application(app, dp, bot=bot)
 
