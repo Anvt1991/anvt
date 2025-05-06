@@ -375,26 +375,22 @@ Trả về kết quả cho từng tin theo định dạng:
                     continue  # Không có kết quả AI
 
                 sentiment = extract_sentiment(ai_summary)
-                is_hot_news = is_hot_news(entry, ai_summary, sentiment)
-                await save_news(entry, ai_summary, sentiment, is_hot_news)
+                is_hot = is_hot_news(entry, ai_summary, sentiment)
+                await save_news(entry, ai_summary, sentiment, is_hot)
                 
                 # Lấy nguồn từ link (domain)
                 domain = urlparse(entry.link).netloc.replace('www.', '') if hasattr(entry, 'link') else ''
                 message = f"📰 *{entry.title}*\nNguồn: {domain}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
                 
                 # Phát hiện và gửi thông báo đặc biệt cho tin nóng
-                is_important = is_hot_news
-                if is_important:
+                if is_hot:
                     hot_message = f"🔥🔥 *TIN NÓNG - QUAN TRỌNG!* 🔥🔥\n\n{message}\n\n⚠️ *Tin này có thể ảnh hưởng lớn đến thị trường*"
-                    
-                    # Gửi thông báo đặc biệt
                     sending_tasks = []
                     for user_id in users_to_notify:
                         sending_tasks.append(send_message_to_user(user_id, hot_message, entry=entry, is_hot_news=True))
                     if sending_tasks:
                         await asyncio.gather(*sending_tasks, return_exceptions=True)
                 else:
-                    # Gửi thông báo thông thường nếu không phải tin nóng
                     sending_tasks = []
                     for user_id in users_to_notify:
                         sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
