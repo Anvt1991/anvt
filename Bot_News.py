@@ -281,7 +281,7 @@ Trả về kết quả cho từng tin theo định dạng:
                 # Send to all users (in parallel using gather)
                 sending_tasks = []
                 for user_id in users_to_notify:
-                    sending_tasks.append(send_message_to_user(user_id, message))
+                    sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
                 if sending_tasks:
                     await asyncio.gather(*sending_tasks, return_exceptions=True)
                 
@@ -290,10 +290,14 @@ Trả về kết quả cho từng tin theo định dạng:
             
         await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
 
-async def send_message_to_user(user_id, message):
-    """Send message to user with error handling"""
+async def send_message_to_user(user_id, message, entry=None):
+    """Send message to user with error handling, kèm ảnh nếu có"""
     try:
-        await bot.send_message(user_id, message, parse_mode="Markdown")
+        image_url = extract_image_url(entry) if entry else None
+        if image_url:
+            await bot.send_photo(user_id, image_url, caption=message, parse_mode="Markdown")
+        else:
+            await bot.send_message(user_id, message, parse_mode="Markdown")
     except Exception as e:
         logging.warning(f"Không gửi được tin cho user {user_id}: {e}")
 
@@ -357,3 +361,16 @@ setup_application(app, dp, bot=bot)
 
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=8000)
+
+def extract_image_url(entry):
+    # 1. RSS chuẩn có thể có media_content
+    if hasattr(entry, 'media_content') and entry.media_content:
+        return entry.media_content[0].get('url')
+    # 2. RSS có thể có media_thumbnail
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get('url')
+    # 3. Tìm ảnh trong summary (nếu có thẻ <img>)
+    match = re.search(r'<img[^>]+src=["\"]([^"\"]+)["\"]', getattr(entry, 'summary', ''))
+    if match:
+        return match.group(1)
+    return None
