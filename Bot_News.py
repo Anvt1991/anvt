@@ -16,6 +16,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 # Nhóm các import khác
 from aiohttp import web
 import re
+from urllib.parse import urlparse
 
 # --- 1. Config & setup ---
 class Config:
@@ -308,7 +309,9 @@ Trả về kết quả cho từng tin theo định dạng:
                 sentiment = extract_sentiment(ai_summary)
                 await save_news(entry, ai_summary, sentiment)
                 
-                message = f"📰 *{entry.title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
+                # Lấy nguồn từ link (domain)
+                domain = urlparse(entry.link).netloc.replace('www.', '') if hasattr(entry, 'link') else ''
+                message = f"📰 *{entry.title}*\nNguồn: {domain}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
                 
                 # Send to all users (in parallel using gather)
                 sending_tasks = []
