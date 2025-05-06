@@ -292,10 +292,10 @@ Trả về kết quả cho từng tin theo định dạng:
                         ai_results[entry.id] = f"- Tin số 0:\n  - Tóm tắt: {entry.title}\n  - Nhận định: Lỗi phân tích\n  - Cảm xúc: Trung lập"
 
             # Gửi và lưu DB cho tất cả entry
-            users_to_notify = []
             async with pool.acquire() as conn:
                 rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
-                users_to_notify = [row["user_id"] for row in rows]
+                users_to_notify = {row["user_id"] for row in rows}
+                users_to_notify.add(Config.ADMIN_ID)  # Luôn thêm admin vào danh sách nhận tin
             
             for entry in new_entries:
                 if entry.id in cached_results:
