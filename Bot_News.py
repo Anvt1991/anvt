@@ -7,18 +7,19 @@ import httpx
 import asyncpg
 import redis.asyncio as aioredis
 import google.generativeai as genai
-# Nhóm các import aiogram 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+# Nhóm import telegram
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 # Nhóm các import khác
-from aiohttp import web
 import re
 from urllib.parse import urlparse
 import unicodedata
 import datetime
+from typing import Dict, List, Any, Optional
+import pickle
+from functools import wraps
+import aiohttp
+import aiohttp.web
 
 # --- 1. Config & setup ---
 class Config:
@@ -81,6 +82,9 @@ class Config:
         "treasury", "usd", "eur", "jpy", "cny", "bitcoin", "crypto", "commodities", "wti", "brent"
     ]
 
+# Danh sách từ khóa bổ sung
+additional_keywords = []
+
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
 for var in REQUIRED_ENV_VARS:
@@ -89,21 +93,23 @@ for var in REQUIRED_ENV_VARS:
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=Config.BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+logger = logging.getLogger(__name__)
 
 # --- Redis ---
-redis = None
-
-async def is_sent(entry_id):
-    return await redis.sismember("sent_news", entry_id)
-
-async def mark_sent(entry_id):
-    await redis.sadd("sent_news", entry_id)
-    await redis.expire("sent_news", Config.REDIS_TTL)
+redis_client = None
 
 # --- PostgreSQL ---
 pool = None
+
+# Lưu trữ danh sách user đã được duyệt
+approved_users = set()
+
+async def is_sent(entry_id):
+    return await redis_client.sismember("sent_news", entry_id)
+
+async def mark_sent(entry_id):
+    await redis_client.sadd("sent_news", entry_id)
+    await redis_client.expire("sent_news", Config.REDIS_TTL)
 
 async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
     try:
@@ -221,659 +227,695 @@ def is_hot_news(entry, ai_summary, sentiment):
         return False
 
 # --- Parse RSS Feed & News Processing ---
+def normalize_text(text):
+    if not text:
+        return ""
+    # Loại bỏ dấu tiếng Việt
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join([c for c in text if unicodedata.category(c) != 'Mn'])
+    # Loại bỏ ký tự đặc biệt, chỉ giữ lại chữ và số
+    text = re.sub(r'[^a-zA-Z0-9 ]', '', text)
+    # Viết thường, loại bỏ khoảng trắng thừa
+    text = text.lower().strip()
+    return text
+
 def is_relevant_news(entry):
     """
-    Kiểm tra xem tin tức có liên quan đến các chủ đề quan tâm không dựa trên từ khóa
+    Kiểm tra xem tin tức có liên quan đến các chủ đề quan tâm không dựa trên từ khóa (chuẩn hóa)
     """
-    # Lấy nội dung từ tiêu đề và tóm tắt
-    title = getattr(entry, 'title', '').lower()
-    summary = getattr(entry, 'summary', '').lower()
-    content_text = f"{title} {summary}".lower()
-    
-    # Kiểm tra nếu có bất kỳ từ khóa nào trong danh sách RELEVANT_KEYWORDS
-    for keyword in Config.RELEVANT_KEYWORDS:
-        if keyword.lower() in content_text:
+    # Lấy nội dung từ tiêu đề và tóm tắt, chuẩn hóa
+    title = normalize_text(getattr(entry, 'title', ''))
+    summary = normalize_text(getattr(entry, 'summary', ''))
+    content_text = f"{title} {summary}"
+
+    # Chuẩn hóa từ khóa mặc định và bổ sung
+    all_keywords = [normalize_text(k) for k in Config.RELEVANT_KEYWORDS] + [normalize_text(k) for k in additional_keywords]
+
+    # So khớp từ khóa
+    for keyword in all_keywords:
+        if keyword and keyword in content_text:
             return True
-    
-    # Kiểm tra danh sách từ khóa bổ sung
-    for keyword in additional_keywords:
-        if keyword.lower() in content_text:
-            logging.info(f"Phát hiện tin liên quan theo từ khóa bổ sung '{keyword}': {title}")
-            return True
-    
     return False
 
 async def parse_feed(url):
-    """Parse RSS feed with error handling and retries"""
-    for attempt in range(Config.MAX_RETRIES):
-        try:
-            feed = feedparser.parse(url)
-            if not feed.entries and not hasattr(feed, 'status'):
-                raise Exception("Empty feed without status")
-            return feed
-        except Exception as e:
-            logging.warning(f"Error parsing feed {url}, attempt {attempt+1}/{Config.MAX_RETRIES}: {e}")
-            if attempt < Config.MAX_RETRIES - 1:
-                await asyncio.sleep(1)  # Short delay before retry
-            else:
-                logging.error(f"Failed to parse feed after {Config.MAX_RETRIES} attempts: {url}")
-                return feedparser.FeedParserDict(entries=[])  # Return empty feed
+    try:
+        feed_data = await asyncio.to_thread(feedparser.parse, url)
+        if not feed_data.entries:
+            logger.warning(f"Không tìm thấy tin tức từ feed: {url}")
+            return []
+        return feed_data.entries
+    except Exception as e:
+        logger.error(f"Lỗi khi parse RSS feed {url}: {e}")
+        return []
 
 def extract_image_url(entry):
-    if hasattr(entry, 'media_content') and entry.media_content:
-        return entry.media_content[0].get('url')
-    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-        return entry.media_thumbnail[0].get('url')
-    match = re.search(r'<img[^>]+src=["\"]([^"\"]+)["\"]', getattr(entry, 'summary', ''))
-    if match:
-        return match.group(1)
+    """Extract image URL from entry if available"""
+    try:
+        if 'media_content' in entry and entry.media_content:
+            for media in entry.media_content:
+                if 'url' in media:
+                    return media['url']
+        
+        # Try finding image in content
+        if 'content' in entry and entry.content:
+            for content in entry.content:
+                if 'value' in content:
+                    match = re.search(r'<img[^>]+src="([^">]+)"', content['value'])
+                    if match:
+                        return match.group(1)
+        
+        # Try finding image in summary
+        if hasattr(entry, 'summary'):
+            match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
+            if match:
+                return match.group(1)
+    except Exception as e:
+        logger.warning(f"Lỗi khi extract ảnh: {e}")
+    
     return None
     
-# --- Lệnh đăng ký user ---
-@dp.message(Command("register"))
-async def register_user(msg: types.Message):
-    user_id = msg.from_user.id
-    username = msg.from_user.username or ""
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT * FROM subscribed_users WHERE user_id=$1", user_id)
-        if user:
-            if user["is_approved"]:
-                await msg.answer("Bạn đã được duyệt và sẽ nhận tin tức!")
-            else:
-                await msg.answer("Bạn đã đăng ký, vui lòng chờ admin duyệt!")
+# --- Command Handler Functions ---
+
+# Admin only decorator
+def admin_only(func):
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id != Config.ADMIN_ID:
+            await update.message.reply_text("❌ Bạn không có quyền sử dụng lệnh này.")
             return
-            # Nếu là admin, tự động duyệt luôn
-            if user_id == Config.ADMIN_ID:
-                await conn.execute(
-                    "INSERT INTO subscribed_users (user_id, username, is_approved) VALUES ($1, $2, TRUE) ON CONFLICT (user_id) DO UPDATE SET is_approved=TRUE",
-                    user_id, username
-                )
-                await msg.answer("Bạn là admin, đã được duyệt và sẽ nhận tin tức!")
-                return
-            await conn.execute(
-                "INSERT INTO subscribed_users (user_id, username, is_approved) VALUES ($1, $2, FALSE) ON CONFLICT (user_id) DO NOTHING",
-                user_id, username
-            )
-        # Gửi thông báo cho admin
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Duyệt user này", callback_data=f"approve_{user_id}")]]
-        )
-        await bot.send_message(
-            Config.ADMIN_ID,
-            f"Yêu cầu duyệt user mới: @{username} (ID: {user_id})",
-            reply_markup=kb
-        )
-        await msg.answer("Đã gửi yêu cầu đăng ký, vui lòng chờ admin duyệt!")
+        return await func(update, context, *args, **kwargs)
+    return wrapped
 
-# --- Xử lý callback admin duyệt user ---
-@dp.callback_query(F.data.startswith("approve_"))
-async def approve_user_callback(cb: CallbackQuery):
-    if cb.from_user.id != Config.ADMIN_ID:
-        await cb.answer("Chỉ admin mới được duyệt!", show_alert=True)
-        return
-    user_id = int(cb.data.split("_")[1])
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE subscribed_users SET is_approved=TRUE WHERE user_id=$1", user_id)
-        user = await conn.fetchrow("SELECT username FROM subscribed_users WHERE user_id=$1", user_id)
-    await bot.send_message(user_id, "Bạn đã được admin duyệt, sẽ nhận tin tức từ bot!")
-    await cb.answer(f"Đã duyệt user @{user['username']} ({user_id})")
+# Registration system - Only approved users can use the bot
+async def is_user_approved(user_id):
+    """Kiểm tra xem user đã được duyệt chưa"""
+    global approved_users
+    return user_id == Config.ADMIN_ID or user_id in approved_users
 
-# Biến toàn cục để theo dõi trạng thái của news_job task
-news_job_running = False
-
-async def news_job():
-    """
-    Hàm chạy định kỳ để kiểm tra, phân tích và gửi tin tức mới.
-    Được thiết kế để tránh chạy nhiều instance cùng lúc.
-    """
-    global news_job_running
+# Registration commands
+async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
     
-    # Nếu đã có một instance của news_job đang chạy, trở về
-    if news_job_running:
-        logging.info("Phát hiện news_job đã đang chạy, bỏ qua việc khởi tạo task mới")
+    # Check if already approved
+    if await is_user_approved(user_id):
+        await update.message.reply_text("✅ Bạn đã được đăng ký sử dụng bot rồi!")
         return
     
-    # Đánh dấu task đang chạy
-    news_job_running = True
-    logging.info("News job bắt đầu chạy")
+    # Notify admin about registration request
+    keyboard = [
+        [
+            InlineKeyboardButton("Approve ✅", callback_data=f"approve_{user_id}"),
+            InlineKeyboardButton("Deny ❌", callback_data=f"deny_{user_id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    try:
-        while True:
-            try:
-                # Xóa tin cũ khỏi DB định kỳ
-                await delete_old_news()
-                
-                # Lấy danh sách URL nguồn tin
-                feed_urls = Config.FEED_URLS
-                all_entries = []
-                all_normalized_titles = {}  # Lưu trữ tiêu đề đã chuẩn hóa
-                filtered_count = 0  # Biến đếm tin đã lọc
-                
-                # Lấy tin từ tất cả các nguồn
-                for url in feed_urls:
-                    feed = await parse_feed(url)
-                    for entry in feed.entries:
-                        # Tạo ID duy nhất nếu không có
-                        if not hasattr(entry, 'id'):
-                            entry.id = entry.link
-                        
-                        # Kiểm tra xem tin có liên quan không trước khi xử lý
-                        if not is_relevant_news(entry):
-                            filtered_count += 1
-                            logging.info(f"Bỏ qua tin không liên quan: {entry.title}")
-                            continue
-                            
-                        # Chuẩn hóa tiêu đề để tránh trùng lặp
-                        normalized_title = normalize_title(entry.title)
-                        # Lưu mapping giữa id và tiêu đề chuẩn hóa
-                        all_normalized_titles[entry.id] = normalized_title
-                        
-                        # Kiểm tra xem tin đã được gửi hoặc đã lưu trong DB chưa
-                        sent = await is_sent(entry.id) or await is_title_sent(normalized_title)
-                        in_db = await is_in_db(entry)
-                        
-                        if not sent and not in_db:
-                            all_entries.append(entry)
-                
-                # Thống kê kết quả lọc tin
-                if filtered_count > 0:
-                    logging.info(f"Đã lọc bỏ {filtered_count} tin không liên quan trong chu kỳ này")
-                
-                # Sắp xếp tin mới theo thời gian nếu có thông tin published
-                all_entries.sort(
-                    key=lambda e: getattr(e, 'published_parsed', 0) or 0,
-                    reverse=True
-                )
-                
-                # Giới hạn số lượng tin phân tích mỗi chu kỳ
-                new_entries = all_entries[:Config.MAX_NEWS_PER_CYCLE]
-                
-                if not new_entries:
-                    logging.info("Không có tin mới trong chu kỳ này")
-                else:
-                    logging.info(f"Phát hiện {len(new_entries)} tin mới cần phân tích")
-                
-                # Phân tích AI cho tất cả tin mới
-                ai_results = {}
-                cached_results = {}
-                
-                for entry in new_entries:
-                    try:
-                        # Kiểm tra cache Redis trước
-                        cached_summary = await redis.get(f"ai_summary:{entry.id}")
-                        if cached_summary:
-                            cached_results[entry.id] = cached_summary.decode('utf-8')
-                            logging.info(f"Đã tìm thấy kết quả AI từ cache cho {entry.title}")
-                            continue
-                        
-                        # Chuẩn bị prompt cho AI
-                        prompt = f"""Phân tích tin tức sau và đưa ra nhận định với góc nhìn của nhà đầu tư:
-Tiêu đề: {entry.title}
-Tóm tắt: {getattr(entry, 'summary', 'Không có tóm tắt')}
-URL: {entry.link}
-
-Yêu cầu:
-1. Tóm tắt ngắn gọn nội dung chính trong 1-2 câu
-2. Giải thích ý nghĩa với thị trường tài chính/chứng khoán
-3. Phân tích tác động ngắn và dài hạn có thể có
-4. Cảm xúc: Tích cực/Tiêu cực/Trung lập (đặt ở cuối phân tích)
-
-Viết ngắn gọn, súc tích trong 4-6 dòng."""
-                        
-                        # Phân tích bằng AI
-                        ai_summary = await analyze_news(prompt)
-                        ai_results[entry.id] = ai_summary
-                        
-                        # Lưu kết quả vào Redis cache
-                        await redis.set(f"ai_summary:{entry.id}", ai_summary.encode('utf-8'), ex=Config.REDIS_TTL)
-                        
-                        # Đánh dấu đã gửi ngay sau khi phân tích
-                        await mark_sent(entry.id)
-                        await mark_title_sent(all_normalized_titles[entry.id])
-                        
-                        logging.info(f"Đã phân tích tin: {entry.title}")
-                        # Đợi một chút giữa các lần gọi API để tránh rate limit
-                        await asyncio.sleep(2)
-                        
-                    except Exception as e:
-                        logging.error(f"Lỗi phân tích tin {entry.title}: {str(e)}")
-                
-                # Lấy danh sách người dùng được duyệt để gửi tin
-                async with pool.acquire() as conn:
-                    rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
-                    users_to_notify = {row["user_id"] for row in rows}
-                    users_to_notify.add(Config.ADMIN_ID)  # Luôn thêm admin vào danh sách nhận tin
-                
-                for entry in new_entries:
-                    if entry.id in cached_results:
-                        ai_summary = cached_results[entry.id]
-                    elif entry.id in ai_results:
-                        ai_summary = ai_results[entry.id]
-                    else:
-                        continue  # Không có kết quả AI
-
-                    sentiment = extract_sentiment(ai_summary)
-                    is_hot = is_hot_news(entry, ai_summary, sentiment)
-                    await save_news(entry, ai_summary, sentiment, is_hot)
-                    
-                    # Lấy nguồn từ link (domain)
-                    domain = urlparse(entry.link).netloc.replace('www.', '') if hasattr(entry, 'link') else ''
-                    message = f"📰 *{entry.title}*\nNguồn: {domain}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
-                    
-                    # Phát hiện và gửi thông báo đặc biệt cho tin nóng
-                    if is_hot:
-                        hot_message = f"🔥🔥 *TIN NÓNG - QUAN TRỌNG!* 🔥🔥\n\n{message}\n\n⚠️ *Tin này có thể ảnh hưởng lớn đến thị trường*"
-                        sending_tasks = []
-                        for user_id in users_to_notify:
-                            sending_tasks.append(send_message_to_user(user_id, hot_message, entry=entry, is_hot_news=True))
-                        if sending_tasks:
-                            await asyncio.gather(*sending_tasks, return_exceptions=True)
-                    else:
-                        sending_tasks = []
-                        for user_id in users_to_notify:
-                            sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
-                        if sending_tasks:
-                            await asyncio.gather(*sending_tasks, return_exceptions=True)
-                    
-            except Exception as e:
-                logging.error(f"Lỗi trong chu kỳ news_job: {e}")
-                
-            await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
-    except asyncio.CancelledError:
-        logging.info("News job bị hủy")
-    except Exception as e:
-        logging.error(f"Lỗi nghiêm trọng trong news_job: {e}")
-    finally:
-        # Đánh dấu task đã kết thúc
-        news_job_running = False
-        logging.info("News job đã kết thúc")
-
-async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
-    """Send message to user với error handling, kèm ảnh nếu có (chỉ gửi qua bot chính)"""
-    try:
-        image_url = extract_image_url(entry) if entry else None
-        
-        # Nếu là hot news, thêm các tùy chọn đặc biệt
-        if is_hot_news:
-            # Gửi với disable_notification=False để đảm bảo thông báo push được gửi
-            if image_url:
-                await bot.send_photo(
-                    user_id, 
-                    image_url, 
-                    caption=message, 
-                    parse_mode="Markdown",
-                    disable_notification=False
-                )
-            else:
-                await bot.send_message(
-                    user_id, 
-                    message, 
-                    parse_mode="Markdown",
-                    disable_notification=False
-                )
-        else:
-            # Cho tin thông thường
-            if image_url:
-                await bot.send_photo(user_id, image_url, caption=message, parse_mode="Markdown")
-            else:
-                await bot.send_message(user_id, message, parse_mode="Markdown")
-    except Exception as e:
-        logging.warning(f"Không gửi được tin cho user {user_id}: {e}")
-
-# --- Webhook setup ---
-# (Không đăng ký bất kỳ handler nào cho lệnh từ user)
-async def init_db():
-    async with pool.acquire() as conn:
-        # Tạo bảng news_insights nếu chưa có
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS news_insights (
-            id SERIAL PRIMARY KEY,
-            title TEXT,
-            link TEXT UNIQUE,
-            summary TEXT,
-            sentiment TEXT,
-            ai_opinion TEXT,
-            is_hot_news BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        ''')
-        # Đảm bảo cột created_at tồn tại (nếu migrate từ bản cũ)
-        await conn.execute('''
-        ALTER TABLE news_insights ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
-        ''')
-        # Đảm bảo cột is_hot_news tồn tại (nếu migrate từ bản cũ)
-        await conn.execute('''
-        ALTER TABLE news_insights ADD COLUMN IF NOT EXISTS is_hot_news BOOLEAN DEFAULT FALSE;
-        ''')
-        # Tạo bảng subscribed_users nếu chưa có
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS subscribed_users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            is_approved BOOLEAN DEFAULT FALSE
-        );
-        ''')
-
-# --- 8. Webhook & main ---
-async def on_startup(app):
-    try:
-        global redis, pool, news_job_running
-        
-        # Reset trạng thái và hủy task cũ nếu có
-        news_job_running = False
-        await cancel_running_tasks()
-        
-        logging.info("Bot khởi động, thiết lập kết nối Redis...")
-        redis = await aioredis.from_url(Config.REDIS_URL)
-        logging.info("Thiết lập kết nối PostgreSQL...")
-        pool = await asyncpg.create_pool(dsn=Config.DB_URL)
-        logging.info("Khởi tạo database...")
-        await init_db()
-        logging.info(f"Thiết lập webhook: {Config.WEBHOOK_URL}")
-        await bot.delete_webhook() # Xóa webhook cũ nếu có
-        result = await bot.set_webhook(Config.WEBHOOK_URL)
-        logging.info(f"Kết quả thiết lập webhook: {result}")
-        
-        # Kiểm tra webhook đã set đúng chưa
-        webhook_info = await bot.get_webhook_info()
-        logging.info(f"WebhookInfo: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
-        
-        logging.info("Khởi động task gửi tin...")
-        task = asyncio.create_task(news_job())
-        task.set_name("news_job")
-        logging.info("Bot đã sẵn sàng hoạt động!")
-    except Exception as e:
-        logging.error(f"Lỗi trong on_startup: {e}")
-        raise e
-
-async def on_shutdown(app):
-    logging.info("Bot đang tắt...")
-    await bot.delete_webhook()
-    if pool:
-        await pool.close()
-    if redis:
-        await redis.close()
-    logging.info("Bot đã tắt hoàn toàn.")
-
-# Route cho healthcheck
-async def healthcheck(request):
-    return web.Response(text="Bot đang hoạt động!", status=200)
-
-# Route cho ping để giữ bot hoạt động
-async def ping_bot(request):
-    logging.info("Nhận yêu cầu ping")
-    return web.Response(text="pong", status=200)
-
-async def cancel_running_tasks():
-    """Hủy các task đang chạy để tránh bị treo"""
-    try:
-        for task in asyncio.all_tasks():
-            if task.get_name() == "news_job" and not task.done():
-                logging.info("Đang hủy task news_job cũ...")
-                task.cancel()
-                try:
-                    # Chờ task kết thúc nếu đang bị hủy
-                    await asyncio.wait_for(task, timeout=5.0)
-                except asyncio.TimeoutError:
-                    logging.warning("Hủy task news_job cũ bị timeout")
-                except asyncio.CancelledError:
-                    logging.info("Đã hủy thành công task news_job cũ")
-    except Exception as e:
-        logging.error(f"Lỗi khi hủy tasks: {e}")
-
-# Route cho restart từ bên ngoài (có thể sử dụng cronjob để gọi định kỳ)
-async def restart_bot(request):
-    try:
-        logging.info("Yêu cầu khởi động lại bot từ endpoint /restart")
-        
-        global redis, pool, news_job_running
-        
-        # Reset trạng thái news_job và hủy task cũ
-        news_job_running = False
-        await cancel_running_tasks()
-        
-        # Đóng kết nối cũ
-        if redis:
-            try:
-                await redis.close()
-                logging.info("Đã đóng kết nối Redis")
-            except Exception as e:
-                logging.warning(f"Không thể đóng kết nối Redis: {e}")
-        
-        if pool:
-            try:
-                await pool.close()
-                logging.info("Đã đóng kết nối PostgreSQL")
-            except Exception as e:
-                logging.warning(f"Không thể đóng kết nối PostgreSQL: {e}")
-        
-        # Khởi tạo lại kết nối
-        logging.info("Khởi tạo lại kết nối Redis...")
-        redis = await aioredis.from_url(Config.REDIS_URL)
-        
-        logging.info("Khởi tạo lại kết nối PostgreSQL...")
-        pool = await asyncpg.create_pool(dsn=Config.DB_URL)
-        
-        logging.info("Khởi tạo lại database...")
-        await init_db()
-        
-        # Thiết lập lại webhook
-        logging.info(f"Thiết lập lại webhook: {Config.WEBHOOK_URL}")
-        await bot.delete_webhook()
-        result = await bot.set_webhook(Config.WEBHOOK_URL)
-        logging.info(f"Kết quả thiết lập lại webhook: {result}")
-        
-        # Khởi động lại task tin tức
-        task = asyncio.create_task(news_job())
-        task.set_name("news_job")
-            
-        return web.Response(text="Bot đã được khởi động lại thành công!", status=200)
-    except Exception as e:
-        error_msg = f"Lỗi khi khởi động lại bot: {str(e)}"
-        logging.error(error_msg)
-        return web.Response(text=error_msg, status=500)
-
-@dp.message(Command("start"))
-async def start_command(msg: types.Message):
-    try:
-        # Thử khởi động lại bot và kết nối các dịch vụ
-        logging.info("Lệnh /start được gọi - đang khởi động lại các dịch vụ...")
-        
-        global redis, pool, news_job_running
-        
-        # Reset trạng thái news_job và hủy task cũ
-        news_job_running = False
-        await cancel_running_tasks()
-        
-        # Đóng kết nối cũ nếu có
-        if redis:
-            try:
-                await redis.close()
-                logging.info("Đã đóng kết nối Redis cũ")
-            except Exception as e:
-                logging.warning(f"Không thể đóng kết nối Redis cũ: {e}")
-        
-        if pool:
-            try:
-                await pool.close()
-                logging.info("Đã đóng kết nối PostgreSQL cũ")
-            except Exception as e:
-                logging.warning(f"Không thể đóng kết nối PostgreSQL cũ: {e}")
-        
-        # Khởi tạo lại kết nối Redis
-        logging.info("Khởi tạo lại kết nối Redis...")
-        redis = await aioredis.from_url(Config.REDIS_URL)
-        
-        # Khởi tạo lại kết nối PostgreSQL
-        logging.info("Khởi tạo lại kết nối PostgreSQL...")
-        pool = await asyncpg.create_pool(dsn=Config.DB_URL)
-        
-        # Khởi tạo lại database
-        logging.info("Khởi tạo lại database...")
-        await init_db()
-        
-        # Thiết lập lại webhook
-        logging.info(f"Thiết lập lại webhook: {Config.WEBHOOK_URL}")
-        await bot.delete_webhook()
-        result = await bot.set_webhook(Config.WEBHOOK_URL)
-        logging.info(f"Kết quả thiết lập lại webhook: {result}")
-        
-        # Kiểm tra webhook đã set đúng chưa
-        webhook_info = await bot.get_webhook_info()
-        logging.info(f"WebhookInfo: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
-        
-        # Khởi động lại task xử lý tin tức
-        task = asyncio.create_task(news_job())
-        task.set_name("news_job")
-        
-        logging.info("Bot đã được khởi động lại thành công!")
-        
-        # Gửi thông báo thành công
-        await msg.answer(
-            "✅ Bot đã được khởi động lại thành công!\n\n"
-            "Chào mừng bạn đến với bot tin tức tài chính!\n"
-            "- Gõ /register để đăng ký nhận tin tức.\n"
-            "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
-            "- Tin nóng sẽ được đánh dấu đặc biệt 🔥 và gửi thông báo.\n"
-            "- Gõ /help để xem hướng dẫn."
-        )
-    except Exception as e:
-        logging.error(f"Lỗi khi thử khởi động lại bot từ lệnh /start: {e}")
-        await msg.answer(
-            f"❌ Không thể khởi động lại bot: {str(e)}\n\n"
-            "Chào mừng bạn đến với bot tin tức tài chính!\n"
-            "- Gõ /register để đăng ký nhận tin tức.\n"
-            "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
-            "- Tin nóng sẽ được đánh dấu đặc biệt 🔥 và gửi thông báo.\n"
-            "- Gõ /help để xem hướng dẫn."
-        )
-
-@dp.message(Command("help"))
-async def help_command(msg: types.Message):
-    # Xác định xem người dùng có phải admin không để hiển thị lệnh nâng cao
-    is_admin = msg.from_user.id == Config.ADMIN_ID
-    
-    help_text = (
-        "📚 *Hướng dẫn sử dụng Bot Tin Tức Tài Chính*\n\n"
-        "- Bot sẽ tự động gửi tin tức tài chính mới.\n"
-        "- Mỗi tin đều được phân tích bởi AI (Gemini).\n"
-        "- 🔥 *Tin nóng (Hot News)*: Những tin quan trọng, có ảnh hưởng lớn đến thị trường sẽ được đánh dấu đặc biệt.\n\n"
-        "*Các lệnh:*\n"
-        "/start - Khởi động bot\n"
-        "/register - Đăng ký nhận tin tức\n"
-        "/help - Xem hướng dẫn\n"
+    await context.bot.send_message(
+        chat_id=Config.ADMIN_ID,
+        text=(
+            f"🔔 Yêu cầu đăng ký mới:\n"
+            f"User ID: {user_id}\n"
+            f"Name: {user.first_name} {user.last_name or ''}\n"
+            f"Username: @{user.username or 'N/A'}"
+        ),
+        reply_markup=reply_markup
     )
     
-    # Thêm lệnh quản lý từ khóa chỉ cho admin
-    if is_admin:
-        help_text += (
-            "\n*Lệnh dành cho admin:*\n"
-            "/set_keywords - Thêm từ khóa lọc tin (vd: /set_keywords từ_khóa1, từ_khóa2)\n"
-            "/keywords - Xem danh sách từ khóa bổ sung hiện tại\n"
-            "/clear_keywords - Xóa tất cả từ khóa bổ sung\n"
+    await update.message.reply_text(
+        "📝 Yêu cầu đăng ký của bạn đã được gửi tới admin. "
+        "Bạn sẽ được thông báo khi yêu cầu được xử lý."
+    )
+
+# Callback handler for approve/deny requests
+async def approve_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    action, user_id = query.data.split("_")
+    user_id = int(user_id)
+    
+    if action == "approve":
+        # Add to approved users
+        global approved_users
+        approved_users.add(user_id)
+        
+        # Save to database
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO approved_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                str(user_id)
+            )
+        
+        await query.edit_message_text(f"✅ User {user_id} đã được phê duyệt.")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="✅ Bạn đã được phê duyệt để sử dụng Bot News! Gõ /help để xem hướng dẫn."
         )
+    else:
+        await query.edit_message_text(f"❌ Đã từ chối yêu cầu từ user {user_id}.")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Yêu cầu sử dụng bot của bạn đã bị từ chối."
+        )
+
+# Start command
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
     
-    help_text += "\nTin tức được cập nhật mỗi 10 phút."
-    
-    await msg.answer(help_text, parse_mode="Markdown")
-
-def normalize_title(title):
-    """Chuẩn hóa tiêu đề: viết thường, loại bỏ dấu, ký tự đặc biệt, khoảng trắng thừa"""
-    if not title:
-        return ""
-    # Loại bỏ dấu tiếng Việt
-    title = unicodedata.normalize('NFD', title)
-    title = ''.join([c for c in title if unicodedata.category(c) != 'Mn'])
-    # Viết thường, loại bỏ ký tự đặc biệt, khoảng trắng thừa
-    title = re.sub(r'[^a-zA-Z0-9 ]', '', title)
-    title = title.lower().strip()
-    return title
-
-async def is_title_sent(normalized_title):
-    """Kiểm tra tiêu đề đã chuẩn hóa đã gửi chưa (Redis set)"""
-    return await redis.sismember("sent_titles", normalized_title)
-
-async def mark_title_sent(normalized_title):
-    await redis.sadd("sent_titles", normalized_title)
-    await redis.expire("sent_titles", Config.REDIS_TTL)
-
-# --- Biến cho từ khóa bổ sung ---
-additional_keywords = set()
-
-# --- Lệnh thêm từ khóa lọc tin ---
-@dp.message(Command("set_keywords"))
-async def set_keywords_command(msg: types.Message):
-    """
-    Thêm từ khóa lọc tin tức. 
-    Cú pháp: /set_keywords từ_khóa1, từ_khóa2, từ_khóa3
-    """
-    # Chỉ admin mới có quyền thêm từ khóa
-    if msg.from_user.id != Config.ADMIN_ID:
-        await msg.answer("⛔️ Chỉ admin mới có quyền thêm từ khóa lọc tin!")
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "👋 Chào mừng bạn đến với Bot News Chứng Khoán!"
+            "\n\nĐể sử dụng bot, bạn cần đăng ký và được phê duyệt."
+            "\nGõ /register để gửi yêu cầu đăng ký."
+        )
         return
     
-    # Lấy text sau lệnh
-    command_parts = msg.text.split(' ', 1)
-    if len(command_parts) < 2:
-        await msg.answer("⚠️ Cú pháp: /set_keywords từ_khóa1, từ_khóa2, từ_khóa3")
+    welcome_message = (
+        f"👋 Chào mừng {user.first_name} đến với Bot News Chứng Khoán!\n\n"
+        f"Bot này giúp bạn nhận tin tức chứng khoán, kinh tế và tài chính quan trọng, "
+        f"kèm phân tích AI giúp đánh giá tác động.\n\n"
+        f"🔍 Tin tức sẽ được lọc theo từ khóa quan trọng và gửi tự động khi có tin mới.\n"
+        f"🔥 Tin nóng sẽ được gắn thẻ ưu tiên cao hơn.\n\n"
+        f"Gõ /help để xem toàn bộ lệnh và hướng dẫn sử dụng."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🔑 Xem từ khóa hiện tại", callback_data="view_keywords")],
+        [InlineKeyboardButton("❓ Hỗ trợ", callback_data="help")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
+
+# Help command
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Xác định xem người dùng có phải admin không để hiển thị lệnh nâng cao
+    is_admin = (user_id == Config.ADMIN_ID)
+    
+    if not await is_user_approved(user_id) and not is_admin:
+        await update.message.reply_text(
+            "👋 Chào mừng bạn đến với Bot News Chứng Khoán!"
+            "\n\nĐể sử dụng bot, bạn cần đăng ký và được phê duyệt."
+            "\nGõ /register để gửi yêu cầu đăng ký."
+        )
         return
     
-    # Xử lý các từ khóa
-    keywords_text = command_parts[1]
-    new_keywords = [k.strip().lower() for k in keywords_text.split(',') if k.strip()]
+    help_text = (
+        "📚 *HƯỚNG DẪN SỬ DỤNG BOT NEWS*\n\n"
+        "*Lệnh cơ bản:*\n"
+        "/start - Khởi động bot\n"
+        "/help - Hiển thị hướng dẫn này\n"
+        "/register - Đăng ký sử dụng bot\n\n"
+        
+        "*Quản lý từ khóa:*\n"
+        "/keywords - Xem danh sách từ khóa theo dõi\n"
+        "/set_keywords <từ khóa> - Thêm từ khóa (cách nhau bởi dấu phẩy)\n"
+        "/clear_keywords - Xóa tất cả từ khóa bổ sung\n\n"
+        
+        "*Lưu ý:*\n"
+        "• Bot sẽ tự động gửi tin tức quan trọng khi phát hiện\n"
+        "• Tin nóng sẽ được đánh dấu đặc biệt\n"
+        "• Mỗi tin được phân tích bởi AI để đánh giá tác động\n"
+    )
+    
+    # Thêm lệnh admin nếu là admin
+    if is_admin:
+        admin_help = (
+            "\n*Lệnh dành cho Admin:*\n"
+            "• Người dùng mới sẽ gửi request và admin nhận thông báo\n"
+            "• Admin có thể phê duyệt/từ chối qua nút bấm\n"
+        )
+        help_text += admin_help
+    
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+# Keyword management commands
+async def set_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+        )
+        return
+    
+    # Lấy từ khóa từ arguments
+    if not context.args or not context.args[0]:
+        await update.message.reply_text(
+            "❌ Vui lòng nhập các từ khóa, cách nhau bởi dấu phẩy.\n"
+            "Ví dụ: /set_keywords bitcoin, AI, tesla, vàng"
+        )
+        return
+    
+    # Xử lý từ khóa
+    text = ' '.join(context.args)
+    global additional_keywords
+    new_keywords = [kw.strip() for kw in text.split(',') if kw.strip()]
     
     if not new_keywords:
-        await msg.answer("⚠️ Không tìm thấy từ khóa hợp lệ. Cú pháp: /set_keywords từ_khóa1, từ_khóa2, từ_khóa3")
+        await update.message.reply_text("❌ Không tìm thấy từ khóa hợp lệ.")
         return
     
-    # Cập nhật từ khóa mới
-    global additional_keywords
-    additional_keywords = set(new_keywords)
+    # Cập nhật từ khóa
+    additional_keywords = new_keywords
     
-    await msg.answer(f"✅ Đã thêm {len(additional_keywords)} từ khóa lọc tin mới:\n" + 
-                    ", ".join(additional_keywords))
-    logging.info(f"Admin đã thêm {len(additional_keywords)} từ khóa lọc tin mới: {', '.join(additional_keywords)}")
+    # Lưu vào Redis để ghi nhớ
+    try:
+        await redis_client.set("additional_keywords", pickle.dumps(additional_keywords), ex=86400*30)  # 30 ngày
+    except Exception as e:
+        logger.error(f"Lỗi khi lưu từ khóa vào Redis: {e}")
+    
+    await update.message.reply_text(
+        f"✅ Đã cập nhật {len(new_keywords)} từ khóa bổ sung:\n"
+        f"{', '.join(new_keywords)}"
+    )
 
-# --- Lệnh xem từ khóa lọc tin ---
-@dp.message(Command("keywords"))
-async def view_keywords_command(msg: types.Message):
-    """Xem danh sách từ khóa lọc tin hiện tại"""
-    # Chỉ admin mới có quyền xem toàn bộ từ khóa
-    if msg.from_user.id != Config.ADMIN_ID:
-        await msg.answer("⛔️ Chỉ admin mới có quyền xem danh sách từ khóa lọc tin!")
+async def view_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+        )
         return
     
-    if not additional_keywords:
-        await msg.answer("Hiện tại không có từ khóa bổ sung nào ngoài danh sách mặc định.")
+    global additional_keywords
+    default_keywords = Config.RELEVANT_KEYWORDS
+    
+    message = (
+        f"📋 *Danh sách từ khóa hiện tại*\n\n"
+        f"*Từ khóa mặc định ({len(default_keywords)})*: Bao gồm các từ khóa về chứng khoán, kinh tế, tài chính...\n\n"
+    )
+    
+    if additional_keywords:
+        message += f"*Từ khóa bổ sung ({len(additional_keywords)})*:\n{', '.join(additional_keywords)}\n\n"
     else:
-        await msg.answer(f"Danh sách {len(additional_keywords)} từ khóa bổ sung:\n" + 
-                        ", ".join(sorted(additional_keywords)))
-        
-# --- Lệnh xóa tất cả từ khóa bổ sung ---
-@dp.message(Command("clear_keywords"))
-async def clear_keywords_command(msg: types.Message):
-    """Xóa tất cả từ khóa bổ sung"""
-    # Chỉ admin mới có quyền xóa từ khóa
-    if msg.from_user.id != Config.ADMIN_ID:
-        await msg.answer("⛔️ Chỉ admin mới có quyền xóa từ khóa lọc tin!")
+        message += "*Từ khóa bổ sung*: Chưa có\n\n"
+    
+    message += (
+        "Sử dụng /set_keywords để thêm từ khóa bổ sung.\n"
+        "Sử dụng /clear_keywords để xóa tất cả từ khóa bổ sung."
+    )
+    
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def clear_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+        )
         return
     
     global additional_keywords
-    count = len(additional_keywords)
-    additional_keywords = set()
+    additional_keywords = []
     
-    await msg.answer(f"✅ Đã xóa {count} từ khóa bổ sung. Chỉ còn lại danh sách từ khóa mặc định.")
-    logging.info(f"Admin đã xóa {count} từ khóa bổ sung")
+    # Xóa khỏi Redis
+    try:
+        await redis_client.delete("additional_keywords")
+    except Exception as e:
+        logger.error(f"Lỗi khi xóa từ khóa từ Redis: {e}")
+    
+    await update.message.reply_text("✅ Đã xóa tất cả từ khóa bổ sung.")
 
-app = web.Application()
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
-app.router.add_get("/", healthcheck)  # Thêm route / để kiểm tra bot sống
-app.router.add_get("/ping", ping_bot)  # Thêm route /ping để giữ bot hoạt động
-app.router.add_get("/restart", restart_bot)  # Thêm route /restart để khởi động lại bot
-SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-setup_application(app, dp, bot=bot)
+# --- Database Initialization and Webhook Setup ---
+
+async def init_db():
+    """Initialize the database with necessary tables"""
+    global pool
+    try:
+        # Connect to the database
+        pool = await asyncpg.create_pool(Config.DB_URL)
+        
+        # Create news_insights table if it doesn't exist
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS news_insights (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    link TEXT UNIQUE NOT NULL,
+                    summary TEXT,
+                    sentiment TEXT,
+                    ai_opinion TEXT,
+                    is_hot_news BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Create approved_users table if it doesn't exist
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS approved_users (
+                    id SERIAL PRIMARY KEY,
+                    user_id TEXT UNIQUE NOT NULL,
+                    approved_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # Load approved users from the database
+            global approved_users
+            rows = await conn.fetch("SELECT user_id FROM approved_users")
+            approved_users = set(int(row['user_id']) for row in rows)
+            
+        logger.info(f"Database initialized successfully. Loaded {len(approved_users)} approved users.")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        return False
+
+async def init_redis():
+    """Initialize Redis connection"""
+    global redis_client
+    try:
+        redis_client = aioredis.from_url(Config.REDIS_URL)
+        
+        # Load additional keywords from Redis if they exist
+        global additional_keywords
+        keywords_data = await redis_client.get("additional_keywords")
+        if keywords_data:
+            additional_keywords = pickle.loads(keywords_data)
+            logger.info(f"Loaded {len(additional_keywords)} additional keywords from Redis")
+        
+        logger.info("Redis initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error initializing Redis: {e}")
+        return False
+
+# Webhook handlers for health checking
+async def healthcheck(request):
+    """Simple health check endpoint"""
+    return web.Response(text="OK", status=200)
+
+async def ping_bot(request):
+    """Ping endpoint to keep the bot awake"""
+    return web.Response(text="PONG", status=200)
+
+# --- Main Function ---
+
+# Global application variable to store our bot instance
+application = None
+
+async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
+    """Send a news message to a user"""
+    try:
+        # Chuẩn bị nội dung tin nhắn
+        title = getattr(entry, 'title', 'Không có tiêu đề')
+        link = getattr(entry, 'link', '#')
+        date = getattr(entry, 'published', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        # Extract domain from link
+        domain = urlparse(link).netloc
+        
+        # Create message with emoji based on news type
+        prefix = "🔥 TIN NÓNG: " if is_hot_news else "📰 TIN MỚI: "
+        
+        # Format message
+        formatted_message = (
+            f"{prefix}<b>{title}</b>\n\n"
+            f"{message}\n\n"
+            f"<i>Nguồn: {domain}</i>\n"
+            f"<a href='{link}'>Đọc chi tiết</a>"
+        )
+        
+        # Add image if available
+        image_url = extract_image_url(entry)
+        
+        # Tạo nút đọc chi tiết
+        keyboard = [[InlineKeyboardButton("Đọc chi tiết", url=link)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Get the global application's bot
+        global application
+        if application and application.bot:
+            bot = application.bot
+        else:
+            # If application is not available, create a new bot instance
+            from telegram import Bot
+            bot = Bot(token=Config.BOT_TOKEN)
+            
+        # Gửi tin nhắn với ảnh nếu có
+        if image_url:
+            try:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=image_url,
+                    caption=formatted_message,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+                return
+            except Exception as img_err:
+                logger.warning(f"Không gửi được ảnh: {img_err}, trở lại gửi tin nhắn text")
+                
+        # Fallback to text message if image sending fails
+        await bot.send_message(
+            chat_id=user_id,
+            text=formatted_message,
+            reply_markup=reply_markup,
+            parse_mode='HTML',
+            disable_web_page_preview=False
+        )
+    except Exception as e:
+        logger.error(f"Lỗi khi gửi tin tức cho user {user_id}: {e}")
+
+# Function to handle callback queries
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # Handle different callback data
+    if query.data == "view_keywords":
+        # Reuse view_keywords_command logic
+        user_id = update.effective_user.id
+        
+        if not await is_user_approved(user_id):
+            await query.message.reply_text(
+                "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+            )
+            return
+        
+        global additional_keywords
+        default_keywords = Config.RELEVANT_KEYWORDS
+        
+        message = (
+            f"📋 *Danh sách từ khóa hiện tại*\n\n"
+            f"*Từ khóa mặc định ({len(default_keywords)})*: Bao gồm các từ khóa về chứng khoán, kinh tế, tài chính...\n\n"
+        )
+        
+        if additional_keywords:
+            message += f"*Từ khóa bổ sung ({len(additional_keywords)})*:\n{', '.join(additional_keywords)}\n\n"
+        else:
+            message += "*Từ khóa bổ sung*: Chưa có\n\n"
+        
+        message += (
+            "Sử dụng /set_keywords để thêm từ khóa bổ sung.\n"
+            "Sử dụng /clear_keywords để xóa tất cả từ khóa bổ sung."
+        )
+        
+        await query.message.reply_text(message, parse_mode='Markdown')
+    
+    elif query.data == "help":
+        # Show help message
+        await help_command(update, context)
+    
+    # Handle other callbacks
+    elif query.data.startswith("approve_") or query.data.startswith("deny_"):
+        await approve_user_callback(update, context)
+
+async def news_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Background task that polls RSS feeds và sends news updates.
+    """
+    try:
+        logger.info("Đang chạy news_job...")
+        
+        # Load approved users
+        approved_users_list = []
+        
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT user_id FROM approved_users")
+                approved_users_list = [int(row['user_id']) for row in rows]
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy danh sách approved users: {e}")
+            return
+        
+        if not approved_users_list:
+            logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
+            return
+            
+        # Xóa tin cũ khỏi DB
+        await delete_old_news()
+        
+        # Lưu trữ tin để theo dõi có bao nhiêu tin được xử lý
+        processed_count = 0
+        sent_count = 0
+        relevant_count = 0
+        
+        # Lấy tin từ các feed
+        feeds = Config.FEED_URLS
+        for feed_url in feeds:
+            if processed_count >= Config.MAX_NEWS_PER_CYCLE:
+                logger.info(f"Đã đạt giới hạn tin mỗi chu kỳ ({Config.MAX_NEWS_PER_CYCLE})")
+                break
+                
+            entries = await parse_feed(feed_url)
+            if not entries:
+                continue
+                
+            # Chỉ xem xét tin mới nhất
+            for entry in entries[:10]:  # Chỉ lấy 10 tin đầu mỗi feed
+                # Kiểm tra nếu đã xử lý đủ số lượng tin
+                if processed_count >= Config.MAX_NEWS_PER_CYCLE:
+                    break
+                
+                try:
+                    # Kiểm tra xem tin này đã được gửi chưa
+                    entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
+                    if await is_sent(entry_id):
+                        continue
+                        
+                    # Chuẩn hóa tiêu đề để kiểm tra trùng lặp
+                    normalized_title = await normalize_title(getattr(entry, 'title', ''))
+                    if normalized_title and await is_title_sent(normalized_title):
+                        continue
+                        
+                    # Kiểm tra tin đã có trong DB chưa (để tránh gửi lại)
+                    if await is_in_db(entry):
+                        await mark_sent(entry_id)
+                        if normalized_title:
+                            await mark_title_sent(normalized_title)
+                        continue
+                        
+                    # Kiểm tra tin có phù hợp với từ khóa không
+                    if not is_relevant_news(entry):
+                        continue
+                        
+                    # Đánh dấu là đã tìm thấy tin liên quan
+                    relevant_count += 1
+                    
+                    # Phân tích tin tức với AI
+                    prompt = f"""
+                    Phân tích bài báo kinh tế sau và cho ý kiến chuyên gia về tác động của nó đến thị trường chứng khoán và kinh tế Việt Nam:
+                    
+                    TIÊU ĐỀ: {getattr(entry, 'title', 'Không có tiêu đề')}
+                    
+                    TÓM TẮT: {getattr(entry, 'summary', 'Không có tóm tắt')}
+                    
+                    Hãy phân tích theo định dạng sau:
+                    
+                    1. TÓM TẮT NGẮN GỌN: (tóm tắt bài viết trong 1-2 câu)
+                    
+                    2. PHÂN TÍCH TÁC ĐỘNG: (phân tích tác động đến thị trường chứng khoán, kinh tế vĩ mô hoặc các doanh nghiệp)
+                    
+                    3. CẢM XÚC: (Tích cực/Tiêu cực/Trung lập)
+                    
+                    4. MỨC ĐỘ QUAN TRỌNG: (Thấp/Trung bình/Cao) - nói về mức độ quan trọng của tin tức này
+                    
+                    5. LỜI KHUYÊN CHO NHÀ ĐẦU TƯ: (1-2 câu lời khuyên ngắn gọn)
+                    """
+                    
+                    # Gọi model AI và lưu kết quả
+                    try:
+                        ai_summary = await analyze_news(prompt)
+                        sentiment = extract_sentiment(ai_summary)
+                        is_hot = is_hot_news(entry, ai_summary, sentiment)
+                        
+                        # Lưu vào database
+                        await save_news(entry, ai_summary, sentiment, is_hot)
+                        
+                        # Đánh dấu tin đã được gửi
+                        await mark_sent(entry_id)
+                        if normalized_title:
+                            await mark_title_sent(normalized_title)
+                            
+                        # Đếm số tin được xử lý
+                        processed_count += 1
+                        
+                        # Gửi tin đến tất cả user được phê duyệt
+                        for user_id in approved_users_list:
+                            # Pass the context.bot to send messages
+                            await send_message_to_user(user_id, ai_summary, entry, is_hot)
+                            sent_count += 1
+                            
+                    except Exception as e:
+                        logger.error(f"Lỗi khi phân tích tin (id={entry_id}): {e}")
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Lỗi xử lý entry: {e}")
+                    continue
+        
+        logger.info(f"Chu kỳ news_job hoàn tất: Xử lý {processed_count}/{relevant_count} tin, gửi {sent_count} tin")
+        
+    except Exception as e:
+        logger.error(f"Lỗi trong news_job: {e}")
+
+async def main() -> None:
+    """
+    Start the Bot News application
+    """
+    # Initialize bot and application
+    global application
+    application = Application.builder().token(Config.BOT_TOKEN).build()
+    
+    # Initialize database and Redis
+    db_ok = await init_db()
+    redis_ok = await init_redis()
+    
+    if not db_ok or not redis_ok:
+        logger.error("Failed to initialize database or Redis. Exiting.")
+        return
+    
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("register", register_user))
+    application.add_handler(CommandHandler("keywords", view_keywords_command))
+    application.add_handler(CommandHandler("set_keywords", set_keywords_command))
+    application.add_handler(CommandHandler("clear_keywords", clear_keywords_command))
+    
+    # Add callback query handler
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Set up the job queue
+    job_queue = application.job_queue
+    
+    # Schedule the news job to run every NEWS_JOB_INTERVAL seconds
+    job_queue.run_repeating(news_job, interval=Config.NEWS_JOB_INTERVAL, first=10)
+    
+    # Use webhook if WEBHOOK_URL is provided, otherwise use polling
+    if Config.WEBHOOK_URL:
+        # Get the webhook port
+        webhook_port = int(os.environ.get("PORT", 8443))
+        
+        # Setup webhook
+        logger.info(f"Starting webhook on port {webhook_port} with URL: {Config.WEBHOOK_URL}")
+        
+        # Start webhook server
+        await application.run_webhook(
+            listen="0.0.0.0",
+            port=webhook_port,
+            url_path=Config.BOT_TOKEN,
+            webhook_url=f"{Config.WEBHOOK_URL}/{Config.BOT_TOKEN}"
+        )
+    else:
+        # Start polling (good for development)
+        logger.info("Starting bot in polling mode")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    logging.info("Khởi động web server...")
-    web.run_app(app, host="0.0.0.0", port=8000)
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped.")
+    except Exception as e:
+        logger.error(f"Unhandled exception: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
