@@ -38,6 +38,7 @@ class Config:
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     FEED_URLS = [
+        # Google News theo từ khóa (giữ lại các nguồn cũ)
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=ch%E1%BB%A9ng+kho%C3%A1n&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=v%C4%A9+m%C3%B4&hl=vi&gl=VN&ceid=VN:vi",
@@ -47,6 +48,19 @@ class Config:
         "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",  # Tin nóng
         "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",  # Tin đầu tư
         "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",  # Tin doanh nghiệp
+        # Bổ sung thêm các nguồn mới
+        "https://vnexpress.net/rss/kinh-doanh.rss",
+        "https://vnexpress.net/rss/kinh-doanh/chung-khoan.rss",
+        "https://cafef.vn/rss/tin-moi-nhat.rss",
+        "https://cafef.vn/rss/chung-khoan.rss",
+        "https://tuoitre.vn/rss/kinh-doanh.rss",
+        "https://vneconomy.vn/rss/kinh-doanh.rss",
+        "https://vietstock.vn/rss/chung-khoan.rss",
+        "https://ndh.vn/rss/chung-khoan.rss",
+        "https://nhipcaudautu.vn/rss/chung-khoan.rss",
+        # Quốc tế (nếu cần)
+        "https://www.bloomberg.com/feed/podcast/etf-report.xml",
+        # ... bổ sung thêm các nguồn khác nếu muốn ...
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "720"))  # 12 phút (giây)
@@ -75,7 +89,7 @@ class Config:
         "trọng điểm", "quan trọng", "đáng chú ý", "đáng lo ngại", "cần lưu ý"
     ]
     
-    # Danh sách từ khóa lọc tin tức liên quan
+    # Danh sách từ khóa lọc tin tức liên quan (mở rộng)
     RELEVANT_KEYWORDS = [
         # Chính trị, vĩ mô, doanh nghiệp, chứng khoán, chiến tranh 
         "chính trị", "vĩ mô", "doanh nghiệp", "chứng khoán", "chiến tranh", "chính sách", "lãi suất", "fed",
@@ -93,7 +107,17 @@ class Config:
         "vnm", "cpi", "pmi", "m2", "đầu tư", "gdp", "xuất khẩu", "nhập khẩu", "dự trữ", "dự báo",
         # Từ khóa tài chính quốc tế
         "fed", "ecb", "boj", "pboc", "imf", "world bank", "nasdaq", "dow jones", "s&p", "nikkei",
-        "treasury", "usd", "eur", "jpy", "cny", "bitcoin", "crypto", "commodities", "wti", "brent"
+        "treasury", "usd", "eur", "jpy", "cny", "bitcoin", "crypto", "commodities", "wti", "brent",
+        # Mã cổ phiếu nổi bật
+        "vnd", "ssi", "hpg", "vic", "vhm", "vnm", "mwg", "ctg", "bid", "tcb", "acb", "vib", "stb", "mbb", "shb",
+        # Tên công ty lớn
+        "vinamilk", "vietcombank", "vietinbank", "masan", "fpt", "hoa phat", "vietjet", "petro vietnam",
+        # Sự kiện kinh tế
+        "lạm phát", "tăng trưởng", "giảm phát", "GDP", "CPI", "PMI", "xuất khẩu", "nhập khẩu", "tín dụng", "trái phiếu",
+        # Thuật ngữ thị trường
+        "bull", "bear", "breakout", "margin", "room ngoại", "ETF", "IPO", "niêm yết", "phát hành", "cổ tức", "chia thưởng",
+        # Sự kiện quốc tế
+        "fed", "ecb", "boj", "nasdaq", "dow jones", "s&p", "nikkei", "usd", "eur", "jpy", "bitcoin", "crypto",
     ]
 
 # Danh sách từ khóa bổ sung
@@ -867,6 +891,16 @@ async def init_redis():
         logger.error(f"Error initializing Redis: {e}")
         return False
 
+# --- Helper for rotating RSS feed index ---
+async def get_current_feed_index():
+    idx = await redis_client.get("current_feed_index")
+    if idx is not None:
+        return int(idx)
+    return 0
+
+async def set_current_feed_index(idx):
+    await redis_client.set("current_feed_index", str(idx))
+
 # --- Main Function ---
 
 # Global application variable to store our bot instance
@@ -1000,14 +1034,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def news_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Background task that polls RSS feeds và sends news updates.
+    Background task that polls ONE RSS feed per cycle and sends news updates.
     """
     try:
         logger.info("Đang chạy news_job...")
-        
         # Load approved users
         approved_users_list = []
-        
         try:
             async with pool.acquire() as conn:
                 rows = await conn.fetch("SELECT user_id FROM approved_users")
@@ -1015,134 +1047,91 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Lỗi khi lấy danh sách approved users: {e}")
             return
-        
         if not approved_users_list:
             logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
             return
-            
         # Xóa tin cũ khỏi DB
         await delete_old_news()
-        
         # Lưu trữ tin để theo dõi có bao nhiêu tin được xử lý
         processed_count = 0
         sent_count = 0
         relevant_count = 0
         duplicate_count = 0
-        
         # Lấy tin tức gần đây từ DB để so sánh trùng lặp
         recent_news_texts = await get_recent_news_texts()
         logger.info(f"Đã lấy {len(recent_news_texts)} tin gần đây để kiểm tra trùng lặp")
-        
-        # Lấy tin từ các feed
+        # --- Chỉ quét 1 RSS mỗi lần ---
         feeds = Config.FEED_URLS
-        for feed_url in feeds:
-            if processed_count >= Config.MAX_NEWS_PER_CYCLE:
-                logger.info(f"Đã đạt giới hạn tin mỗi chu kỳ ({Config.MAX_NEWS_PER_CYCLE})")
-                break
-                
-            entries = await parse_feed(feed_url)
-            if not entries:
-                continue
-                
-            # Chỉ xem xét tin mới nhất
+        feed_count = len(feeds)
+        current_idx = await get_current_feed_index()
+        feed_url = feeds[current_idx % feed_count]
+        logger.info(f"Đang quét RSS số {current_idx % feed_count + 1}/{feed_count}: {feed_url}")
+        entries = await parse_feed(feed_url)
+        if entries:
             for entry in entries[:10]:  # Chỉ lấy 10 tin đầu mỗi feed
-                # Kiểm tra nếu đã xử lý đủ số lượng tin
                 if processed_count >= Config.MAX_NEWS_PER_CYCLE:
                     break
-                
                 try:
-                    # Kiểm tra xem tin này đã được gửi chưa
                     entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
                     if await is_sent(entry_id):
                         continue
-                        
-                    # Chuẩn hóa tiêu đề để kiểm tra trùng lặp
                     normalized_title = await normalize_title(getattr(entry, 'title', ''))
                     if normalized_title and await is_title_sent(normalized_title):
                         continue
-                        
-                    # Kiểm tra tin đã có trong DB chưa (để tránh gửi lại)
                     if await is_in_db(entry):
                         await mark_sent(entry_id)
                         if normalized_title:
                             await mark_title_sent(normalized_title)
                         continue
-                    
-                    # Kiểm tra trùng lặp bằng so sánh nội dung (cosine similarity)
                     entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
                     if is_duplicate_by_content(entry_text, recent_news_texts):
-                        # Đánh dấu là đã gửi để không xử lý lại
                         await mark_sent(entry_id)
                         if normalized_title:
                             await mark_title_sent(normalized_title)
                         duplicate_count += 1
                         logger.info(f"Phát hiện tin trùng lặp nội dung: {getattr(entry, 'title', '')}")
                         continue
-                        
-                    # Kiểm tra tin có phù hợp với từ khóa không
                     if not is_relevant_news(entry):
                         continue
-                        
-                    # Đánh dấu là đã tìm thấy tin liên quan
                     relevant_count += 1
-                    
-                    # Lấy domain nguồn tin
                     link = getattr(entry, 'link', '')
                     domain = urlparse(link).netloc if link else 'N/A'
-                    # Prompt AI tối ưu, bổ sung nguồn
                     prompt = f"""
                     Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.
-                    
-                    Tiêu đề: {getattr(entry, 'title', 'Không có tiêu đề')}
+                    \nTiêu đề: {getattr(entry, 'title', 'Không có tiêu đề')}
                     Tóm tắt: {getattr(entry, 'summary', 'Không có tóm tắt')}
                     Nguồn: {domain}
-                    
-                    1. Tóm tắt ngắn gọn (1-2 câu)
+                    \n1. Tóm tắt ngắn gọn (1-2 câu)
                     2. Phân tích tác động đến thị trường chứng khoán ( 2-3 câu )
                     3. Cảm xúc (Tích cực/Tiêu cực/Trung lập)
                     4. Mức độ quan trọng (Thấp/Trung bình/Cao)
                     5. Lời khuyên cho nhà đầu tư (1 câu)
                     """
-                    
-                    # Gọi model AI và lưu kết quả
                     try:
                         ai_summary = await analyze_news(prompt)
-                        # Phát hiện tin hot trước khi phân tích cảm xúc
                         is_hot = is_hot_news(entry, ai_summary, 'Trung lập')
                         if is_hot:
                             sentiment = await extract_sentiment(ai_summary)
                         else:
                             sentiment = 'Trung lập'
-                        # Lưu vào database với timezone
                         await save_news(entry, ai_summary, sentiment, is_hot)
-                        
-                        # Đánh dấu tin đã được gửi
                         await mark_sent(entry_id)
                         if normalized_title:
                             await mark_title_sent(normalized_title)
-                            
-                        # Đếm số tin được xử lý
                         processed_count += 1
-                        
-                        # Cập nhật danh sách tin gần đây để so sánh tin tiếp theo
                         recent_news_texts.append(entry_text)
-                        
-                        # Gửi tin đến tất cả user được phê duyệt
                         for user_id in approved_users_list:
-                            # Pass the context.bot to send messages
                             await send_message_to_user(user_id, ai_summary, entry, is_hot)
                             sent_count += 1
-                            
                     except Exception as e:
                         logger.error(f"Lỗi khi phân tích tin (id={entry_id}): {e}")
                         continue
-                        
                 except Exception as e:
                     logger.error(f"Lỗi xử lý entry: {e}")
                     continue
-        
+        # Sau khi xong, tăng index lên và lưu lại
+        await set_current_feed_index((current_idx + 1) % feed_count)
         logger.info(f"Chu kỳ news_job hoàn tất: Xử lý {processed_count}/{relevant_count} tin, gửi {sent_count} tin, loại bỏ {duplicate_count} tin trùng lặp")
-        
     except Exception as e:
         logger.error(f"Lỗi trong news_job: {e}")
 
