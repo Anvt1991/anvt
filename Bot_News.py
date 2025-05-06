@@ -857,22 +857,19 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Lỗi trong news_job: {e}")
 
-async def main() -> None:
-    """
-    Start the Bot News application
-    """
-    # Initialize bot and application
+def main():
     global application
     application = Application.builder().token(Config.BOT_TOKEN).build()
-    
+
     # Initialize database and Redis
-    db_ok = await init_db()
-    redis_ok = await init_redis()
-    
+    loop = asyncio.get_event_loop()
+    db_ok = loop.run_until_complete(init_db())
+    redis_ok = loop.run_until_complete(init_redis())
+
     if not db_ok or not redis_ok:
         logger.error("Failed to initialize database or Redis. Exiting.")
         return
-    
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
@@ -880,42 +877,26 @@ async def main() -> None:
     application.add_handler(CommandHandler("keywords", view_keywords_command))
     application.add_handler(CommandHandler("set_keywords", set_keywords_command))
     application.add_handler(CommandHandler("clear_keywords", clear_keywords_command))
-    
+
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
-    
+
     # Set up the job queue
     job_queue = application.job_queue
-    
-    # Schedule the news job to run every NEWS_JOB_INTERVAL seconds
     job_queue.run_repeating(news_job, interval=Config.NEWS_JOB_INTERVAL, first=10)
-    
-    # Use webhook if WEBHOOK_URL is provided, otherwise use polling
+
     if Config.WEBHOOK_URL:
-        # Get the webhook port
         webhook_port = int(os.environ.get("PORT", 8443))
-        
-        # Setup webhook
         logger.info(f"Starting webhook on port {webhook_port} with URL: {Config.WEBHOOK_URL}")
-        
-        # Start webhook server
-        await application.run_webhook(
+        application.run_webhook(
             listen="0.0.0.0",
             port=webhook_port,
             url_path=Config.BOT_TOKEN,
             webhook_url=f"{Config.WEBHOOK_URL}/{Config.BOT_TOKEN}"
         )
     else:
-        # Start polling (good for development)
         logger.info("Starting bot in polling mode")
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped.")
-    except Exception as e:
-        logger.error(f"Unhandled exception: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    main()
