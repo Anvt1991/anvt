@@ -19,6 +19,11 @@ import pytz
 from typing import Dict, List, Any, Optional
 import pickle
 from functools import wraps
+# Import cho việc phát hiện tin trùng lặp
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+# Import cho sentiment analysis tiếng Việt
+import numpy as np
 
 # --- 1. Config & setup ---
 class Config:
@@ -48,6 +53,13 @@ class Config:
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
+    DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.85"))  # Ngưỡng để xác định tin trùng lặp
+    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "3"))  # Số ngày để lấy tin gần đây để so sánh
+    
+    # Cấu hình mô hình sentiment analysis
+    USE_ML_SENTIMENT = os.getenv("USE_ML_SENTIMENT", "true").lower() == "true"  # Bật/tắt mô hình ML
+    SENTIMENT_MODEL_NAME = os.getenv("SENTIMENT_MODEL_NAME", "NlpHUST/vibert4news-base-cased-sentiment")
+    MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "256"))  # Giới hạn độ dài text cho sentiment model
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
@@ -113,14 +125,18 @@ async def mark_sent(entry_id):
 
 async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
     try:
-        # Lấy thời gian hiện tại với timezone
+        # Lấy thời gian hiện tại với timezone, luôn đảm bảo timezone
         now = get_now_with_tz()
         now = ensure_timezone_aware(now)  # Đảm bảo có timezone
 
+        # Log debug để trợ giúp phát hiện lỗi timezone
+        logger.debug(f"Lưu tin vào DB: timezone={now.tzinfo}, value={now}")
+
         async with pool.acquire() as conn:
+            # Dùng AT TIME ZONE trong PostgreSQL để đảm bảo nhất quán
             await conn.execute("""
                 INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion, is_hot_news, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
                 ON CONFLICT (link) DO NOTHING
             """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news, now)
     except Exception as e:
@@ -136,9 +152,13 @@ async def is_in_db(entry):
 async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
     try:
         async with pool.acquire() as conn:
-            await conn.execute(
-                f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days';"
-            )
+            # Dùng trực tiếp NOW() của PostgreSQL với AT TIME ZONE để đảm bảo nhất quán
+            await conn.execute("""
+                DELETE FROM news_insights 
+                WHERE created_at < (NOW() AT TIME ZONE 'UTC' - INTERVAL '%s days')
+            """, days)
+            count = await conn.fetchval("SELECT count(*) FROM news_insights")
+            logger.info(f"Đã xóa tin cũ hơn {days} ngày. Còn lại {count} tin trong DB.")
     except Exception as e:
         logging.error(f"Lỗi khi xóa tin cũ: {e}")
 
@@ -178,22 +198,109 @@ async def analyze_news(prompt, model=None):
             raise e2
 
 # --- Extract sentiment from AI result ---
-def extract_sentiment(ai_summary):
-    """Extract sentiment from AI summary"""
+# Lazy loading cho mô hình sentiment analysis - chỉ tải khi cần dùng
+_sentiment_model = None
+_sentiment_tokenizer = None
+
+def load_sentiment_model():
+    """Lazy load mô hình sentiment analysis khi cần dùng"""
+    global _sentiment_model, _sentiment_tokenizer
+    if _sentiment_model is None or _sentiment_tokenizer is None:
+        try:
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            import torch
+
+            model_name = Config.SENTIMENT_MODEL_NAME
+            logging.info(f"Đang tải mô hình sentiment analysis: {model_name}")
+            
+            _sentiment_tokenizer = AutoTokenizer.from_pretrained(model_name)
+            _sentiment_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+            
+            logging.info(f"Đã tải xong mô hình sentiment analysis")
+        except Exception as e:
+            logging.error(f"Lỗi khi tải mô hình sentiment analysis: {e}")
+            _sentiment_model = None
+            _sentiment_tokenizer = None
+    return _sentiment_model, _sentiment_tokenizer
+
+async def predict_sentiment_ml(text):
+    """Dự đoán cảm xúc sử dụng mô hình ML"""
+    try:
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        import torch
+        
+        # Tải mô hình nếu chưa tải
+        model, tokenizer = load_sentiment_model()
+        if model is None or tokenizer is None:
+            logging.warning("Không thể tải mô hình sentiment analysis, sử dụng phương pháp rule-based")
+            return None
+        
+        # Giới hạn kích thước text để tránh quá tải RAM
+        if len(text) > Config.MAX_TEXT_LENGTH * 4:  # Ước lượng chars vs tokens
+            text = text[:Config.MAX_TEXT_LENGTH * 4]  # Cắt bớt
+        
+        # Tokenize và dự đoán
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=Config.MAX_TEXT_LENGTH)
+        
+        # Thêm phần tính điểm
+        with torch.no_grad():
+            logits = model(**inputs).logits
+        
+        # Lấy xác suất cho từng nhãn
+        probs = torch.softmax(logits, dim=1).numpy()[0]
+        pred_class = int(np.argmax(probs))
+        
+        # Mô hình này có 3 nhãn: 0=Negative, 1=Neutral, 2=Positive
+        labels = ["Tiêu cực", "Trung lập", "Tích cực"]
+        confidence = float(probs[pred_class])
+        
+        logging.info(f"Phân tích cảm xúc bằng ML: {labels[pred_class]} (confidence: {confidence:.2f})")
+        return labels[pred_class]
+        
+    except Exception as e:
+        logging.error(f"Lỗi khi dự đoán sentiment bằng ML: {e}")
+        return None
+
+def extract_sentiment_rule_based(ai_summary):
+    """Extract sentiment from AI summary using rule-based approach"""
     sentiment = "Trung lập"  # Default
     try:
+        # Tìm kiếm dòng có chứa 'cảm xúc'
         for line in ai_summary.splitlines():
-            if "Cảm xúc:" in line:
+            line_lower = line.lower()
+            if "cảm xúc:" in line_lower or "sentiment:" in line_lower:
                 sentiment_text = line.split(":")[-1].strip().lower()
-                if "tích cực" in sentiment_text:
+                if "tích cực" in sentiment_text or "positive" in sentiment_text:
                     return "Tích cực"
-                elif "tiêu cực" in sentiment_text:
+                elif "tiêu cực" in sentiment_text or "negative" in sentiment_text:
                     return "Tiêu cực"
                 else:
                     return "Trung lập"
+                    
+        # Nếu không tìm thấy dòng cảm xúc, dùng regex tìm toàn văn bản
+        text = ai_summary.lower()
+        if re.search(r"(tích cực|positive|lạc quan|upbeat|bullish)", text):
+            return "Tích cực"
+        elif re.search(r"(tiêu cực|negative|bi quan|bearish|lo ngại|lo lắng)", text):
+            return "Tiêu cực"
     except Exception as e:
-        logging.warning(f"Lỗi khi parse sentiment: {e}")
+        logging.warning(f"Lỗi khi parse sentiment rule-based: {e}")
     return sentiment
+
+async def extract_sentiment(ai_summary):
+    """Extract sentiment from AI summary, sử dụng mô hình ML nếu có thể, 
+    hoặc fallback sang rule-based"""
+    if Config.USE_ML_SENTIMENT:
+        try:
+            # Thử dùng mô hình ML trước
+            ml_sentiment = await predict_sentiment_ml(ai_summary)
+            if ml_sentiment:
+                return ml_sentiment  # Trả về kết quả ML nếu có
+        except Exception as e:
+            logging.warning(f"Lỗi khi phân tích sentiment ML, fallback sang rule-based: {e}")
+    
+    # Fallback sang rule-based nếu ML không thành công hoặc không được bật
+    return extract_sentiment_rule_based(ai_summary)
 
 def is_hot_news(entry, ai_summary, sentiment):
     """Phát hiện tin nóng dựa trên phân tích nội dung, từ khóa và cảm xúc"""
@@ -574,7 +681,17 @@ def ensure_timezone_aware(dt):
     if dt.tzinfo is not None and dt.tzinfo.utcoffset(dt) is not None:
         return dt
     # Nếu chưa có timezone, thêm vào
-    return Config.TIMEZONE.localize(dt)
+    try:
+        return Config.TIMEZONE.localize(dt)
+    except (ValueError, AttributeError):
+        # Xử lý các trường hợp ngoại lệ
+        logger.warning(f"Không thể thêm timezone cho datetime: {dt}")
+        # Tạo mới datetime với timezone
+        return datetime.datetime(
+            dt.year, dt.month, dt.day, 
+            dt.hour, dt.minute, dt.second, 
+            dt.microsecond, Config.TIMEZONE
+        )
 
 async def normalize_title(title):
     """Chuẩn hóa tiêu đề tin tức để so sánh"""
@@ -605,7 +722,91 @@ async def mark_title_sent(normalized_title):
     await redis_client.sadd("sent_titles", normalized_title)
     await redis_client.expire("sent_titles", Config.REDIS_TTL)
 
-# --- Database Initialization and Webhook Setup ---
+# --- News Duplication Detection ---
+async def get_recent_news_texts(days=Config.RECENT_NEWS_DAYS):
+    """Lấy danh sách tin gần đây từ DB để so sánh tìm trùng lặp"""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT title, summary FROM news_insights WHERE created_at > NOW() - INTERVAL '%s days'", days
+            )
+            # Ghép tiêu đề và tóm tắt để so sánh
+            return [f"{row['title']} {row['summary']}" for row in rows]
+    except Exception as e:
+        logger.error(f"Lỗi khi lấy tin gần đây từ DB: {e}")
+        return []
+
+def is_duplicate_by_content(new_text, recent_texts, threshold=Config.DUPLICATE_THRESHOLD):
+    """Phát hiện tin trùng lặp bằng TF-IDF và Cosine Similarity"""
+    if not recent_texts:
+        return False
+    
+    try:
+        # Thêm tin mới vào đầu danh sách để vector hóa
+        texts = [new_text] + recent_texts
+        
+        # Tính vector TF-IDF
+        vectorizer = TfidfVectorizer(
+            lowercase=True, 
+            stop_words="english",
+            ngram_range=(1, 2),
+            min_df=1
+        ).fit_transform(texts)
+        
+        # Chuyển sang mảng để so sánh
+        vectors = vectorizer.toarray()
+        
+        # Tính cosine similarity giữa tin mới và các tin cũ
+        sim_scores = cosine_similarity([vectors[0]], vectors[1:])[0]
+        
+        # Kiểm tra có trùng lặp không (similarity > threshold)
+        max_similarity = max(sim_scores) if len(sim_scores) > 0 else 0
+        is_duplicate = max_similarity > threshold
+        
+        if is_duplicate:
+            logger.info(f"Phát hiện tin trùng lặp! Similarity: {max_similarity:.2f}, Threshold: {threshold}")
+        
+        return is_duplicate
+    except Exception as e:
+        logger.error(f"Lỗi khi phát hiện tin trùng lặp: {e}")
+        return False  # Nếu lỗi, coi như không trùng để xử lý tin
+
+# --- Function to update database to ensure all timestamps use timezone ---
+async def ensure_db_timezone_columns():
+    """Đảm bảo tất cả các cột datetime trong DB đều lưu timezone"""
+    try:
+        async with pool.acquire() as conn:
+            # Kiểm tra các bảng hiện có
+            tables = await conn.fetch("""
+                SELECT table_name FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            """)
+            
+            for table in tables:
+                table_name = table['table_name']
+                # Kiểm tra các cột timestamp
+                columns = await conn.fetch("""
+                    SELECT column_name, data_type 
+                    FROM information_schema.columns 
+                    WHERE table_name = $1 AND data_type LIKE '%timestamp%'
+                """, table_name)
+                
+                for column in columns:
+                    col_name = column['column_name']
+                    data_type = column['data_type']
+                    
+                    # Nếu cột timestamp không có timezone, alter để thêm
+                    if data_type == 'timestamp without time zone':
+                        logger.info(f"Cập nhật cột {table_name}.{col_name} sang timestamptz")
+                        await conn.execute(f"""
+                            ALTER TABLE {table_name} 
+                            ALTER COLUMN {col_name} TYPE timestamp with time zone 
+                            USING {col_name} AT TIME ZONE 'Asia/Ho_Chi_Minh'
+                        """)
+            
+            logger.info("Đã kiểm tra và cập nhật các cột timestamp trong DB")
+    except Exception as e:
+        logger.error(f"Lỗi khi cập nhật DB timestamp columns: {e}")
 
 async def init_db():
     """Initialize the database with necessary tables"""
@@ -650,6 +851,10 @@ async def init_db():
             approved_users = set(int(row['user_id']) for row in rows)
             # Đảm bảo admin luôn trong set
             approved_users.add(Config.ADMIN_ID)
+            
+        # Đảm bảo tất cả các cột timestamp đều lưu timezone
+        await ensure_db_timezone_columns()
+            
         logger.info(f"Database initialized successfully. Loaded {len(approved_users)} approved users.")
         return True
     except Exception as e:
@@ -835,6 +1040,11 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
         processed_count = 0
         sent_count = 0
         relevant_count = 0
+        duplicate_count = 0
+        
+        # Lấy tin tức gần đây từ DB để so sánh trùng lặp
+        recent_news_texts = await get_recent_news_texts()
+        logger.info(f"Đã lấy {len(recent_news_texts)} tin gần đây để kiểm tra trùng lặp")
         
         # Lấy tin từ các feed
         feeds = Config.FEED_URLS
@@ -870,6 +1080,17 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                         if normalized_title:
                             await mark_title_sent(normalized_title)
                         continue
+                    
+                    # Kiểm tra trùng lặp bằng so sánh nội dung (cosine similarity)
+                    entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
+                    if is_duplicate_by_content(entry_text, recent_news_texts):
+                        # Đánh dấu là đã gửi để không xử lý lại
+                        await mark_sent(entry_id)
+                        if normalized_title:
+                            await mark_title_sent(normalized_title)
+                        duplicate_count += 1
+                        logger.info(f"Phát hiện tin trùng lặp nội dung: {getattr(entry, 'title', '')}")
+                        continue
                         
                     # Kiểm tra tin có phù hợp với từ khóa không
                     if not is_relevant_news(entry):
@@ -899,7 +1120,7 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                     # Gọi model AI và lưu kết quả
                     try:
                         ai_summary = await analyze_news(prompt)
-                        sentiment = extract_sentiment(ai_summary)
+                        sentiment = await extract_sentiment(ai_summary)
                         is_hot = is_hot_news(entry, ai_summary, sentiment)
                         
                         # Lưu vào database với timezone
@@ -912,6 +1133,9 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                             
                         # Đếm số tin được xử lý
                         processed_count += 1
+                        
+                        # Cập nhật danh sách tin gần đây để so sánh tin tiếp theo
+                        recent_news_texts.append(entry_text)
                         
                         # Gửi tin đến tất cả user được phê duyệt
                         for user_id in approved_users_list:
@@ -927,7 +1151,7 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Lỗi xử lý entry: {e}")
                     continue
         
-        logger.info(f"Chu kỳ news_job hoàn tất: Xử lý {processed_count}/{relevant_count} tin, gửi {sent_count} tin")
+        logger.info(f"Chu kỳ news_job hoàn tất: Xử lý {processed_count}/{relevant_count} tin, gửi {sent_count} tin, loại bỏ {duplicate_count} tin trùng lặp")
         
     except Exception as e:
         logger.error(f"Lỗi trong news_job: {e}")
