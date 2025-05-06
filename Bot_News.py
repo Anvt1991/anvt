@@ -36,13 +36,15 @@ class Config:
         "https://news.google.com/rss/search?q=chi%E1%BA%BFn+tranh&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=l%C3%A3i+su%E1%BA%A5t&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
-        "https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",  # Tin nóng
+        "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",  # Tin đầu tư
+        "https://news.google.com/rss/search?q=qu%E1%BB%91c+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",  # Tin quốc tế
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "600"))  # 10 phút (giây)
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "7"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
-    MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "3"))  # Tối đa 3 tin mỗi lần
+    MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
@@ -326,7 +328,7 @@ Trả về kết quả cho từng tin theo định dạng:
         await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
 
 async def send_message_to_user(user_id, message, entry=None):
-    """Send message to user with error handling, kèm ảnh nếu có"""
+    """Send message to user với error handling, kèm ảnh nếu có (chỉ gửi qua bot chính)"""
     try:
         image_url = extract_image_url(entry) if entry else None
         if image_url:
