@@ -575,11 +575,18 @@ async def init_db():
                 )
             """)
             
+            # Đảm bảo admin luôn có trong bảng approved_users
+            await conn.execute(
+                "INSERT INTO approved_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                str(Config.ADMIN_ID)
+            )
+            
             # Load approved users from the database
             global approved_users
             rows = await conn.fetch("SELECT user_id FROM approved_users")
             approved_users = set(int(row['user_id']) for row in rows)
-            
+            # Đảm bảo admin luôn trong set
+            approved_users.add(Config.ADMIN_ID)
         logger.info(f"Database initialized successfully. Loaded {len(approved_users)} approved users.")
         return True
     except Exception as e:
