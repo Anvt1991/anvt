@@ -15,6 +15,7 @@ import re
 from urllib.parse import urlparse
 import unicodedata
 import datetime
+import pytz
 from typing import Dict, List, Any, Optional
 import pickle
 from functools import wraps
@@ -46,6 +47,7 @@ class Config:
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "7"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
+    TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
@@ -111,12 +113,15 @@ async def mark_sent(entry_id):
 
 async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
     try:
+        # Lấy thời gian hiện tại với timezone
+        now = get_now_with_tz()
+        
         async with pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion, is_hot_news)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion, is_hot_news, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (link) DO NOTHING
-            """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news)
+            """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news, now)
     except Exception as e:
         logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
 
@@ -542,6 +547,52 @@ async def clear_keywords_command(update: Update, context: ContextTypes.DEFAULT_T
     
     await update.message.reply_text("✅ Đã xóa tất cả từ khóa bổ sung.")
 
+# --- Timezone Helper Functions ---
+def get_now_with_tz():
+    """Return current datetime with timezone"""
+    return datetime.datetime.now(Config.TIMEZONE)
+
+def format_datetime(dt, format='%Y-%m-%d %H:%M:%S'):
+    """Format datetime with timezone if needed"""
+    if dt is None:
+        return get_now_with_tz().strftime(format)
+    
+    # Check if datetime has timezone info
+    if not dt.tzinfo:
+        # Add timezone info if missing
+        dt = Config.TIMEZONE.localize(dt)
+    
+    return dt.strftime(format)
+
+async def normalize_title(title):
+    """Chuẩn hóa tiêu đề tin tức để so sánh"""
+    if not title:
+        return ""
+    
+    # Remove HTML tags if any
+    title = re.sub(r'<[^>]+>', '', title)
+    
+    # Normalize unicode
+    title = unicodedata.normalize('NFD', title)
+    title = ''.join([c for c in title if unicodedata.category(c) != 'Mn'])
+    
+    # Convert to lowercase and remove extra spaces
+    title = re.sub(r'\s+', ' ', title.lower().strip())
+    
+    # Remove special characters
+    title = re.sub(r'[^\w\s]', '', title)
+    
+    return title
+
+async def is_title_sent(normalized_title):
+    """Kiểm tra xem tiêu đề đã được gửi chưa (dựa trên tiêu đề chuẩn hóa)"""
+    return await redis_client.sismember("sent_titles", normalized_title)
+
+async def mark_title_sent(normalized_title):
+    """Đánh dấu tiêu đề đã được gửi"""
+    await redis_client.sadd("sent_titles", normalized_title)
+    await redis_client.expire("sent_titles", Config.REDIS_TTL)
+
 # --- Database Initialization and Webhook Setup ---
 
 async def init_db():
@@ -562,7 +613,7 @@ async def init_db():
                     sentiment TEXT,
                     ai_opinion TEXT,
                     is_hot_news BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT NOW()
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
             """)
             
@@ -571,7 +622,7 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS approved_users (
                     id SERIAL PRIMARY KEY,
                     user_id TEXT UNIQUE NOT NULL,
-                    approved_at TIMESTAMP DEFAULT NOW()
+                    approved_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
             """)
             
@@ -623,7 +674,20 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
         # Chuẩn bị nội dung tin nhắn
         title = getattr(entry, 'title', 'Không có tiêu đề')
         link = getattr(entry, 'link', '#')
-        date = getattr(entry, 'published', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        # Lấy published date với xử lý timezone
+        published = getattr(entry, 'published', None)
+        
+        # Nếu published là string, convert sang datetime
+        if isinstance(published, str):
+            try:
+                published = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %Z')
+            except ValueError:
+                # Fallback nếu parse thất bại
+                published = None
+        
+        # Format date
+        date = format_datetime(published) if published else format_datetime(None)
         
         # Extract domain from link
         domain = urlparse(link).netloc
@@ -635,7 +699,7 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
         formatted_message = (
             f"{prefix}<b>{title}</b>\n\n"
             f"{message}\n\n"
-            f"<i>Nguồn: {domain}</i>\n"
+            f"<i>Nguồn: {domain} • {date}</i>\n"
             f"<a href='{link}'>Đọc chi tiết</a>"
         )
         
@@ -823,7 +887,7 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                         sentiment = extract_sentiment(ai_summary)
                         is_hot = is_hot_news(entry, ai_summary, sentiment)
                         
-                        # Lưu vào database
+                        # Lưu vào database với timezone
                         await save_news(entry, ai_summary, sentiment, is_hot)
                         
                         # Đánh dấu tin đã được gửi
