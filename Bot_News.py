@@ -23,7 +23,7 @@ class Config:
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     REDIS_URL = os.getenv("REDIS_URL", "redis://localhost")
     DB_URL = os.getenv("DATABASE_URL")
-    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+    ADMIN_ID = int(os.getenv("ADMIN_ID", "1225226589"))
     GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
