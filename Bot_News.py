@@ -1033,11 +1033,9 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                     \nTiêu đề: {getattr(entry, 'title', 'Không có tiêu đề')}
                     Tóm tắt: {getattr(entry, 'summary', 'Không có tóm tắt')}
                     Nguồn: {domain}
-                    \n1. Tóm tắt ngắn gọn (1-2 câu)
-                    2. Phân tích tác động đến thị trường chứng khoán ( 2-3 câu )
-                    3. Cảm xúc (Tích cực/Tiêu cực/Trung lập)
-                    4. Mức độ quan trọng (Thấp/Trung bình/Cao)
-                    5. Lời khuyên cho nhà đầu tư (1 câu)
+                    \n1. Tóm tắt ngắn gọn nội dung (2-3 câu)
+                    2. Phân tích, đánh giá tác động ( 3-5 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
+                    3. Lời khuyên cho nhà đầu tư (1 câu)
                     """
                     try:
                         ai_summary = await analyze_news(prompt)
