@@ -48,7 +48,7 @@ class Config:
         "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",  # Tin doanh nghiệp
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "600"))  # 10 phút (giây)
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "720"))  # 12 phút (giây)
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
