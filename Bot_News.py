@@ -17,6 +17,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from aiohttp import web
 import re
 from urllib.parse import urlparse
+import unicodedata
+import datetime
 
 # --- 1. Config & setup ---
 class Config:
@@ -234,13 +236,29 @@ async def news_job():
         entries_to_analyze = []
 
         try:
+            now = datetime.datetime.utcnow()
             # Collect entries from feeds
             for url in Config.FEED_URLS:
                 feed = await parse_feed(url)
                 for entry in feed.entries:
-                    if await is_sent(entry.id) or await is_in_db(entry):
+                    # Kiểm tra ngày xuất bản
+                    pub_date = None
+                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                        pub_date = datetime.datetime(*entry.published_parsed[:6])
+                    elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                        pub_date = datetime.datetime(*entry.updated_parsed[:6])
+                    if pub_date and (now - pub_date).days > 2:
+                        continue  # Bỏ tin cũ hơn 2 ngày
+                    normalized_title = normalize_title(getattr(entry, 'title', ''))
+                    if (
+                        await is_sent(entry.id)
+                        or await is_in_db(entry)
+                        or not normalized_title
+                        or await is_title_sent(normalized_title)
+                    ):
                         continue
                     await mark_sent(entry.id)
+                    await mark_title_sent(normalized_title)
                     cache_key = f"ai_summary:{entry.id}"
                     cached = await redis.get(cache_key)
                     if cached:
@@ -414,6 +432,26 @@ async def start_command(msg: types.Message):
         "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
         "- Gõ /help để xem hướng dẫn."
     )
+
+def normalize_title(title):
+    """Chuẩn hóa tiêu đề: viết thường, loại bỏ dấu, ký tự đặc biệt, khoảng trắng thừa"""
+    if not title:
+        return ""
+    # Loại bỏ dấu tiếng Việt
+    title = unicodedata.normalize('NFD', title)
+    title = ''.join([c for c in title if unicodedata.category(c) != 'Mn'])
+    # Viết thường, loại bỏ ký tự đặc biệt, khoảng trắng thừa
+    title = re.sub(r'[^a-zA-Z0-9 ]', '', title)
+    title = title.lower().strip()
+    return title
+
+async def is_title_sent(normalized_title):
+    """Kiểm tra tiêu đề đã chuẩn hóa đã gửi chưa (Redis set)"""
+    return await redis.sismember("sent_titles", normalized_title)
+
+async def mark_title_sent(normalized_title):
+    await redis.sadd("sent_titles", normalized_title)
+    await redis.expire("sent_titles", Config.REDIS_TTL)
 
 app = web.Application()
 app.on_startup.append(on_startup)
