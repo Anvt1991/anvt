@@ -59,6 +59,27 @@ class Config:
         "tác động mạnh", "ảnh hưởng nghiêm trọng", "thay đổi lớn", "biến động mạnh",
         "trọng điểm", "quan trọng", "đáng chú ý", "đáng lo ngại", "cần lưu ý"
     ]
+    
+    # Danh sách từ khóa lọc tin tức liên quan
+    RELEVANT_KEYWORDS = [
+        # Chính trị, vĩ mô, doanh nghiệp, chứng khoán, chiến tranh 
+        "chính trị", "vĩ mô", "doanh nghiệp", "chứng khoán", "chiến tranh", "chính sách", "lãi suất", "fed",
+        "phe", "đảng", "chính phủ", "quốc hội", "nhà nước", "bộ trưởng", "thủ tướng", "chủ tịch",
+        # Nhóm ngành, bluechip, midcap, thị trường
+        "bluechip", "midcap", "ngân hàng", "bất động sản", "thép", "dầu khí", "công nghệ", "bán lẻ",
+        "xuất khẩu", "điện", "xây dựng", "thủy sản", "dược phẩm", "logistics", "vận tải", 
+        # Các mã chứng khoán, chỉ số
+        "vn30", "hnx", "upcom", "vnindex", "cổ phiếu", "thị trường", "tài chính", "kinh tế", 
+        "gdp", "lạm phát", "tín dụng", "trái phiếu", "phái sinh", "quỹ etf", 
+        # Các mã bluechip VN30
+        "fpt", "vnm", "vcb", "ssi", "msn", "mwg", "vic", "vhm", "hpg", "ctg", "bid", "mbb", "stb",
+        "hdb", "bvh", "vpb", "nvl", "pdr", "tcb", "tpb", "bcm", "pnj", "acb", "vib", "plx",
+        # Các mã midcap, các chỉ báo kinh tế
+        "vnm", "cpi", "pmi", "m2", "đầu tư", "gdp", "xuất khẩu", "nhập khẩu", "dự trữ", "dự báo",
+        # Từ khóa tài chính quốc tế
+        "fed", "ecb", "boj", "pboc", "imf", "world bank", "nasdaq", "dow jones", "s&p", "nikkei",
+        "treasury", "usd", "eur", "jpy", "cny", "bitcoin", "crypto", "commodities", "wti", "brent"
+    ]
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
@@ -200,6 +221,28 @@ def is_hot_news(entry, ai_summary, sentiment):
         return False
 
 # --- Parse RSS Feed & News Processing ---
+def is_relevant_news(entry):
+    """
+    Kiểm tra xem tin tức có liên quan đến các chủ đề quan tâm không dựa trên từ khóa
+    """
+    # Lấy nội dung từ tiêu đề và tóm tắt
+    title = getattr(entry, 'title', '').lower()
+    summary = getattr(entry, 'summary', '').lower()
+    content_text = f"{title} {summary}".lower()
+    
+    # Kiểm tra nếu có bất kỳ từ khóa nào trong danh sách RELEVANT_KEYWORDS
+    for keyword in Config.RELEVANT_KEYWORDS:
+        if keyword.lower() in content_text:
+            return True
+    
+    # Kiểm tra danh sách từ khóa bổ sung
+    for keyword in additional_keywords:
+        if keyword.lower() in content_text:
+            logging.info(f"Phát hiện tin liên quan theo từ khóa bổ sung '{keyword}': {title}")
+            return True
+    
+    return False
+
 async def parse_feed(url):
     """Parse RSS feed with error handling and retries"""
     for attempt in range(Config.MAX_RETRIES):
@@ -304,6 +347,7 @@ async def news_job():
                 feed_urls = Config.FEED_URLS
                 all_entries = []
                 all_normalized_titles = {}  # Lưu trữ tiêu đề đã chuẩn hóa
+                filtered_count = 0  # Biến đếm tin đã lọc
                 
                 # Lấy tin từ tất cả các nguồn
                 for url in feed_urls:
@@ -313,6 +357,12 @@ async def news_job():
                         if not hasattr(entry, 'id'):
                             entry.id = entry.link
                         
+                        # Kiểm tra xem tin có liên quan không trước khi xử lý
+                        if not is_relevant_news(entry):
+                            filtered_count += 1
+                            logging.info(f"Bỏ qua tin không liên quan: {entry.title}")
+                            continue
+                            
                         # Chuẩn hóa tiêu đề để tránh trùng lặp
                         normalized_title = normalize_title(entry.title)
                         # Lưu mapping giữa id và tiêu đề chuẩn hóa
@@ -324,6 +374,10 @@ async def news_job():
                         
                         if not sent and not in_db:
                             all_entries.append(entry)
+                
+                # Thống kê kết quả lọc tin
+                if filtered_count > 0:
+                    logging.info(f"Đã lọc bỏ {filtered_count} tin không liên quan trong chu kỳ này")
                 
                 # Sắp xếp tin mới theo thời gian nếu có thông tin published
                 all_entries.sort(
@@ -696,7 +750,10 @@ async def start_command(msg: types.Message):
 
 @dp.message(Command("help"))
 async def help_command(msg: types.Message):
-    await msg.answer(
+    # Xác định xem người dùng có phải admin không để hiển thị lệnh nâng cao
+    is_admin = msg.from_user.id == Config.ADMIN_ID
+    
+    help_text = (
         "📚 *Hướng dẫn sử dụng Bot Tin Tức Tài Chính*\n\n"
         "- Bot sẽ tự động gửi tin tức tài chính mới.\n"
         "- Mỗi tin đều được phân tích bởi AI (Gemini).\n"
@@ -704,9 +761,21 @@ async def help_command(msg: types.Message):
         "*Các lệnh:*\n"
         "/start - Khởi động bot\n"
         "/register - Đăng ký nhận tin tức\n"
-        "/help - Xem hướng dẫn\n\n"
-        "Tin tức được cập nhật mỗi 10 phút."
+        "/help - Xem hướng dẫn\n"
     )
+    
+    # Thêm lệnh quản lý từ khóa chỉ cho admin
+    if is_admin:
+        help_text += (
+            "\n*Lệnh dành cho admin:*\n"
+            "/set_keywords - Thêm từ khóa lọc tin (vd: /set_keywords từ_khóa1, từ_khóa2)\n"
+            "/keywords - Xem danh sách từ khóa bổ sung hiện tại\n"
+            "/clear_keywords - Xóa tất cả từ khóa bổ sung\n"
+        )
+    
+    help_text += "\nTin tức được cập nhật mỗi 10 phút."
+    
+    await msg.answer(help_text, parse_mode="Markdown")
 
 def normalize_title(title):
     """Chuẩn hóa tiêu đề: viết thường, loại bỏ dấu, ký tự đặc biệt, khoảng trắng thừa"""
@@ -727,6 +796,74 @@ async def is_title_sent(normalized_title):
 async def mark_title_sent(normalized_title):
     await redis.sadd("sent_titles", normalized_title)
     await redis.expire("sent_titles", Config.REDIS_TTL)
+
+# --- Biến cho từ khóa bổ sung ---
+additional_keywords = set()
+
+# --- Lệnh thêm từ khóa lọc tin ---
+@dp.message(Command("set_keywords"))
+async def set_keywords_command(msg: types.Message):
+    """
+    Thêm từ khóa lọc tin tức. 
+    Cú pháp: /set_keywords từ_khóa1, từ_khóa2, từ_khóa3
+    """
+    # Chỉ admin mới có quyền thêm từ khóa
+    if msg.from_user.id != Config.ADMIN_ID:
+        await msg.answer("⛔️ Chỉ admin mới có quyền thêm từ khóa lọc tin!")
+        return
+    
+    # Lấy text sau lệnh
+    command_parts = msg.text.split(' ', 1)
+    if len(command_parts) < 2:
+        await msg.answer("⚠️ Cú pháp: /set_keywords từ_khóa1, từ_khóa2, từ_khóa3")
+        return
+    
+    # Xử lý các từ khóa
+    keywords_text = command_parts[1]
+    new_keywords = [k.strip().lower() for k in keywords_text.split(',') if k.strip()]
+    
+    if not new_keywords:
+        await msg.answer("⚠️ Không tìm thấy từ khóa hợp lệ. Cú pháp: /set_keywords từ_khóa1, từ_khóa2, từ_khóa3")
+        return
+    
+    # Cập nhật từ khóa mới
+    global additional_keywords
+    additional_keywords = set(new_keywords)
+    
+    await msg.answer(f"✅ Đã thêm {len(additional_keywords)} từ khóa lọc tin mới:\n" + 
+                    ", ".join(additional_keywords))
+    logging.info(f"Admin đã thêm {len(additional_keywords)} từ khóa lọc tin mới: {', '.join(additional_keywords)}")
+
+# --- Lệnh xem từ khóa lọc tin ---
+@dp.message(Command("keywords"))
+async def view_keywords_command(msg: types.Message):
+    """Xem danh sách từ khóa lọc tin hiện tại"""
+    # Chỉ admin mới có quyền xem toàn bộ từ khóa
+    if msg.from_user.id != Config.ADMIN_ID:
+        await msg.answer("⛔️ Chỉ admin mới có quyền xem danh sách từ khóa lọc tin!")
+        return
+    
+    if not additional_keywords:
+        await msg.answer("Hiện tại không có từ khóa bổ sung nào ngoài danh sách mặc định.")
+    else:
+        await msg.answer(f"Danh sách {len(additional_keywords)} từ khóa bổ sung:\n" + 
+                        ", ".join(sorted(additional_keywords)))
+        
+# --- Lệnh xóa tất cả từ khóa bổ sung ---
+@dp.message(Command("clear_keywords"))
+async def clear_keywords_command(msg: types.Message):
+    """Xóa tất cả từ khóa bổ sung"""
+    # Chỉ admin mới có quyền xóa từ khóa
+    if msg.from_user.id != Config.ADMIN_ID:
+        await msg.answer("⛔️ Chỉ admin mới có quyền xóa từ khóa lọc tin!")
+        return
+    
+    global additional_keywords
+    count = len(additional_keywords)
+    additional_keywords = set()
+    
+    await msg.answer(f"✅ Đã xóa {count} từ khóa bổ sung. Chỉ còn lại danh sách từ khóa mặc định.")
+    logging.info(f"Admin đã xóa {count} từ khóa bổ sung")
 
 app = web.Application()
 app.on_startup.append(on_startup)
