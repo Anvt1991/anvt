@@ -40,13 +40,25 @@ class Config:
         "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",  # Tin nóng
         "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",  # Tin đầu tư
-        "https://news.google.com/rss/search?q=qu%E1%BB%91c+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",  # Tin quốc tế
+        "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",  # Tin doanh nghiệp
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "600"))  # 10 phút (giây)
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "7"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
+    
+    # Cấu hình phát hiện tin nóng
+    HOT_NEWS_KEYWORDS = [
+        "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", 
+        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", 
+        "rơi mạnh", "tăng mạnh", "giảm mạnh", "sụp đổ", "bất thường", "emergency", 
+        "urgent", "alert", "cảnh báo", "đột biến", "lịch sử", "kỷ lục", "cao nhất"
+    ]
+    HOT_NEWS_IMPACT_PHRASES = [
+        "tác động mạnh", "ảnh hưởng nghiêm trọng", "thay đổi lớn", "biến động mạnh",
+        "trọng điểm", "quan trọng", "đáng chú ý", "đáng lo ngại", "cần lưu ý"
+    ]
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
@@ -72,14 +84,14 @@ async def mark_sent(entry_id):
 # --- PostgreSQL ---
 pool = None
 
-async def save_news(entry, ai_summary, sentiment):
+async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
     try:
         async with pool.acquire() as conn:
             await conn.execute("""
-                INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion, is_hot_news)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (link) DO NOTHING
-            """, entry.title, entry.link, entry.summary, sentiment, ai_summary)
+            """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news)
     except Exception as e:
         logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
 
@@ -150,6 +162,42 @@ def extract_sentiment(ai_summary):
     except Exception as e:
         logging.warning(f"Lỗi khi parse sentiment: {e}")
     return sentiment
+
+def is_hot_news(entry, ai_summary, sentiment):
+    """Phát hiện tin nóng dựa trên phân tích nội dung, từ khóa và cảm xúc"""
+    try:
+        title = getattr(entry, 'title', '').lower()
+        summary = getattr(entry, 'summary', '').lower()
+        content_text = f"{title} {summary}".lower()
+        
+        # 1. Kiểm tra từ khóa tin nóng trong tiêu đề hoặc nội dung
+        for keyword in Config.HOT_NEWS_KEYWORDS:
+            if keyword.lower() in content_text:
+                logging.info(f"Hot news phát hiện bởi từ khóa '{keyword}': {title}")
+                return True
+                
+        # 2. Kiểm tra các cụm từ ảnh hưởng trong AI summary
+        ai_text = ai_summary.lower()
+        for phrase in Config.HOT_NEWS_IMPACT_PHRASES:
+            if phrase.lower() in ai_text:
+                logging.info(f"Hot news phát hiện bởi cụm từ ảnh hưởng '{phrase}': {title}")
+                return True
+        
+        # 3. Phân tích dựa trên cảm xúc và mức độ ảnh hưởng
+        if sentiment != "Trung lập":
+            # Nếu có cảm xúc và các từ chỉ mức độ cao trong phân tích AI
+            intensity_words = ["rất", "mạnh", "nghiêm trọng", "đáng kể", "lớn", "quan trọng"]
+            for word in intensity_words:
+                if word in ai_text and (
+                    "thị trường" in ai_text or "nhà đầu tư" in ai_text or "ảnh hưởng" in ai_text
+                ):
+                    logging.info(f"Hot news phát hiện bởi cảm xúc và mức độ ảnh hưởng: {title}")
+                    return True
+        
+        return False
+    except Exception as e:
+        logging.warning(f"Lỗi khi phát hiện tin nóng: {e}")
+        return False
 
 # --- Parse RSS Feed & News Processing ---
 async def parse_feed(url):
@@ -327,32 +375,66 @@ Trả về kết quả cho từng tin theo định dạng:
                     continue  # Không có kết quả AI
 
                 sentiment = extract_sentiment(ai_summary)
-                await save_news(entry, ai_summary, sentiment)
+                is_hot_news = is_hot_news(entry, ai_summary, sentiment)
+                await save_news(entry, ai_summary, sentiment, is_hot_news)
                 
                 # Lấy nguồn từ link (domain)
                 domain = urlparse(entry.link).netloc.replace('www.', '') if hasattr(entry, 'link') else ''
                 message = f"📰 *{entry.title}*\nNguồn: {domain}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
                 
-                # Send to all users (in parallel using gather)
-                sending_tasks = []
-                for user_id in users_to_notify:
-                    sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
-                if sending_tasks:
-                    await asyncio.gather(*sending_tasks, return_exceptions=True)
+                # Phát hiện và gửi thông báo đặc biệt cho tin nóng
+                is_important = is_hot_news
+                if is_important:
+                    hot_message = f"🔥🔥 *TIN NÓNG - QUAN TRỌNG!* 🔥🔥\n\n{message}\n\n⚠️ *Tin này có thể ảnh hưởng lớn đến thị trường*"
+                    
+                    # Gửi thông báo đặc biệt
+                    sending_tasks = []
+                    for user_id in users_to_notify:
+                        sending_tasks.append(send_message_to_user(user_id, hot_message, entry=entry, is_hot_news=True))
+                    if sending_tasks:
+                        await asyncio.gather(*sending_tasks, return_exceptions=True)
+                else:
+                    # Gửi thông báo thông thường nếu không phải tin nóng
+                    sending_tasks = []
+                    for user_id in users_to_notify:
+                        sending_tasks.append(send_message_to_user(user_id, message, entry=entry))
+                    if sending_tasks:
+                        await asyncio.gather(*sending_tasks, return_exceptions=True)
                 
         except Exception as e:
             logging.error(f"Lỗi trong chu kỳ news_job: {e}")
             
         await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
 
-async def send_message_to_user(user_id, message, entry=None):
+async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
     """Send message to user với error handling, kèm ảnh nếu có (chỉ gửi qua bot chính)"""
     try:
         image_url = extract_image_url(entry) if entry else None
-        if image_url:
-            await bot.send_photo(user_id, image_url, caption=message, parse_mode="Markdown")
+        
+        # Nếu là hot news, thêm các tùy chọn đặc biệt
+        if is_hot_news:
+            # Gửi với disable_notification=False để đảm bảo thông báo push được gửi
+            if image_url:
+                await bot.send_photo(
+                    user_id, 
+                    image_url, 
+                    caption=message, 
+                    parse_mode="Markdown",
+                    disable_notification=False
+                )
+            else:
+                await bot.send_message(
+                    user_id, 
+                    message, 
+                    parse_mode="Markdown",
+                    disable_notification=False
+                )
         else:
-            await bot.send_message(user_id, message, parse_mode="Markdown")
+            # Cho tin thông thường
+            if image_url:
+                await bot.send_photo(user_id, image_url, caption=message, parse_mode="Markdown")
+            else:
+                await bot.send_message(user_id, message, parse_mode="Markdown")
     except Exception as e:
         logging.warning(f"Không gửi được tin cho user {user_id}: {e}")
 
@@ -369,12 +451,17 @@ async def init_db():
             summary TEXT,
             sentiment TEXT,
             ai_opinion TEXT,
+            is_hot_news BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW()
         );
         ''')
         # Đảm bảo cột created_at tồn tại (nếu migrate từ bản cũ)
         await conn.execute('''
         ALTER TABLE news_insights ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+        ''')
+        # Đảm bảo cột is_hot_news tồn tại (nếu migrate từ bản cũ)
+        await conn.execute('''
+        ALTER TABLE news_insights ADD COLUMN IF NOT EXISTS is_hot_news BOOLEAN DEFAULT FALSE;
         ''')
         # Tạo bảng subscribed_users nếu chưa có
         await conn.execute('''
@@ -430,7 +517,22 @@ async def start_command(msg: types.Message):
         "Chào mừng bạn đến với bot tin tức tài chính!\n"
         "- Gõ /register để đăng ký nhận tin tức.\n"
         "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
+        "- Tin nóng sẽ được đánh dấu đặc biệt 🔥 và gửi thông báo.\n"
         "- Gõ /help để xem hướng dẫn."
+    )
+
+@dp.message(Command("help"))
+async def help_command(msg: types.Message):
+    await msg.answer(
+        "📚 *Hướng dẫn sử dụng Bot Tin Tức Tài Chính*\n\n"
+        "- Bot sẽ tự động gửi tin tức tài chính mới.\n"
+        "- Mỗi tin đều được phân tích bởi AI (Gemini).\n"
+        "- 🔥 *Tin nóng (Hot News)*: Những tin quan trọng, có ảnh hưởng lớn đến thị trường sẽ được đánh dấu đặc biệt.\n\n"
+        "*Các lệnh:*\n"
+        "/start - Khởi động bot\n"
+        "/register - Đăng ký nhận tin tức\n"
+        "/help - Xem hướng dẫn\n\n"
+        "Tin tức được cập nhật mỗi 10 phút."
     )
 
 def normalize_title(title):
