@@ -38,32 +38,27 @@ class Config:
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     FEED_URLS = [
-        # Google News theo từ khóa (giữ lại các nguồn cũ)
+        # Google News theo từ khóa
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=ch%E1%BB%A9ng+kho%C3%A1n&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=v%C4%A9+m%C3%B4&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=chi%E1%BA%BFn+tranh&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=l%C3%A3i+su%E1%BA%A5t&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
-        "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",  # Tin nóng
-        "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",  # Tin đầu tư
-        "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",  # Tin doanh nghiệp
-        # Bổ sung thêm các nguồn mới
-        "https://vnexpress.net/rss/kinh-doanh.rss",
-        "https://vnexpress.net/rss/kinh-doanh/chung-khoan.rss",
-        "https://cafef.vn/rss/tin-moi-nhat.rss",
-        "https://cafef.vn/rss/chung-khoan.rss",
-        "https://tuoitre.vn/rss/kinh-doanh.rss",
-        "https://vneconomy.vn/rss/kinh-doanh.rss",
-        "https://vietstock.vn/rss/chung-khoan.rss",
-        "https://ndh.vn/rss/chung-khoan.rss",
-        "https://nhipcaudautu.vn/rss/chung-khoan.rss",
-        # Quốc tế (nếu cần)
-        "https://www.bloomberg.com/feed/podcast/etf-report.xml",
-        # ... bổ sung thêm các nguồn khác nếu muốn ...
+        "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",
+        # Chính trị thế giới, quan hệ quốc tế
+        "https://news.google.com/rss/search?q=ch%C3%ADnh+tr%E1%BB%8B+th%E1%BA%BF+gi%E1%BB%9Bi&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=geopolitics&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=world+politics&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=international+relations&hl=vi&gl=VN&ceid=VN:vi",
+        # Quốc tế (Google News search các nguồn quốc tế)
+        "https://news.google.com/rss/search?q=site:bloomberg.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "720"))  # 12 phút (giây)
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
