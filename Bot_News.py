@@ -18,8 +18,6 @@ import datetime
 from typing import Dict, List, Any, Optional
 import pickle
 from functools import wraps
-import aiohttp
-import aiohttp.web
 
 # --- 1. Config & setup ---
 class Config:
@@ -606,15 +604,6 @@ async def init_redis():
     except Exception as e:
         logger.error(f"Error initializing Redis: {e}")
         return False
-
-# Webhook handlers for health checking
-async def healthcheck(request):
-    """Simple health check endpoint"""
-    return web.Response(text="OK", status=200)
-
-async def ping_bot(request):
-    """Ping endpoint to keep the bot awake"""
-    return web.Response(text="PONG", status=200)
 
 # --- Main Function ---
 
