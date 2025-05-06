@@ -17,7 +17,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from aiohttp import web
 import re
 
-# --- Config ---
+# --- 1. Config & setup ---
 class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -374,3 +374,12 @@ def extract_image_url(entry):
     if match:
         return match.group(1)
     return None
+
+@dp.message(Command("start"))
+async def start_command(msg: types.Message):
+    await msg.answer(
+        "Chào mừng bạn đến với bot tin tức tài chính!\n" \
+        "- Gõ /register để đăng ký nhận tin tức.\n" \
+        "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n" \
+        "- Gõ /help để xem hướng dẫn."
+    )
