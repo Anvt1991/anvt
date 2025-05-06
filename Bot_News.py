@@ -161,20 +161,28 @@ async def register_user(msg: types.Message):
             else:
                 await msg.answer("Bạn đã đăng ký, vui lòng chờ admin duyệt!")
             return
-        await conn.execute(
-            "INSERT INTO subscribed_users (user_id, username, is_approved) VALUES ($1, $2, FALSE) ON CONFLICT (user_id) DO NOTHING",
-            user_id, username
+            # Nếu là admin, tự động duyệt luôn
+            if user_id == Config.ADMIN_ID:
+                await conn.execute(
+                    "INSERT INTO subscribed_users (user_id, username, is_approved) VALUES ($1, $2, TRUE) ON CONFLICT (user_id) DO UPDATE SET is_approved=TRUE",
+                    user_id, username
+                )
+                await msg.answer("Bạn là admin, đã được duyệt và sẽ nhận tin tức!")
+                return
+            await conn.execute(
+                "INSERT INTO subscribed_users (user_id, username, is_approved) VALUES ($1, $2, FALSE) ON CONFLICT (user_id) DO NOTHING",
+                user_id, username
+            )
+        # Gửi thông báo cho admin
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Duyệt user này", callback_data=f"approve_{user_id}")]]
         )
-    # Gửi thông báo cho admin
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Duyệt user này", callback_data=f"approve_{user_id}")]]
-    )
-    await bot.send_message(
-        Config.ADMIN_ID,
-        f"Yêu cầu duyệt user mới: @{username} (ID: {user_id})",
-        reply_markup=kb
-    )
-    await msg.answer("Đã gửi yêu cầu đăng ký, vui lòng chờ admin duyệt!")
+        await bot.send_message(
+            Config.ADMIN_ID,
+            f"Yêu cầu duyệt user mới: @{username} (ID: {user_id})",
+            reply_markup=kb
+        )
+        await msg.answer("Đã gửi yêu cầu đăng ký, vui lòng chờ admin duyệt!")
 
 # --- Xử lý callback admin duyệt user ---
 @dp.callback_query(F.data.startswith("approve_"))
