@@ -1,5 +1,3 @@
-aiogram==3.4
-aiohttp
 feedparser
 asyncpg
 httpx
@@ -10,6 +8,4 @@ google-generativeai==0.3.2
 python-telegram-bot[job-queue,webhooks]==20.7
 pytz
 scikit-learn
-transformers
-torch
 requests
