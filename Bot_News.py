@@ -71,12 +71,6 @@ class Config:
     DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.85"))  # Ngưỡng để xác định tin trùng lặp
     RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "3"))  # Số ngày để lấy tin gần đây để so sánh
     
-    # Cấu hình mô hình sentiment analysis
-    USE_HF_API = os.getenv("USE_HF_API", "true").lower() == "true"  # Bật/tắt HF API
-    HF_API_TOKEN = os.getenv("HF_API_TOKEN")  # Token cho HuggingFace API
-    HF_API_MODEL = os.getenv("HF_API_MODEL", "NlpHUST/vibert4news-base-cased-sentiment")  # Model để sử dụng
-    HF_API_TIMEOUT = int(os.getenv("HF_API_TIMEOUT", "10"))  # Timeout cho API request (giây)
-    
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
         "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", 
@@ -222,56 +216,6 @@ async def analyze_news(prompt, model=None):
             raise e2
 
 # --- Extract sentiment from AI result ---
-async def predict_sentiment_hf_api(text):
-    """Dự đoán cảm xúc sử dụng Hugging Face Inference API"""
-    try:
-        if not Config.HF_API_TOKEN:
-            logging.warning("Chưa cấu hình HF_API_TOKEN, không thể gọi HuggingFace API")
-            return None
-            
-        # Giới hạn độ dài văn bản để tránh lỗi và tiết kiệm băng thông
-        if len(text) > 1000:
-            text = text[:1000]
-            
-        api_url = f"https://api-inference.huggingface.co/models/{Config.HF_API_MODEL}"
-        headers = {"Authorization": f"Bearer {Config.HF_API_TOKEN}"}
-        payload = {"inputs": text}
-        
-        async with httpx.AsyncClient(timeout=Config.HF_API_TIMEOUT) as client:
-            response = await client.post(api_url, headers=headers, json=payload)
-            
-        if response.status_code == 200:
-            result = response.json()
-            logging.info(f"HuggingFace API response: {result}")
-            
-            # Xử lý kết quả từ API
-            if isinstance(result, list) and len(result) > 0:
-                # Format 1: List của dict với label/score
-                if isinstance(result[0], dict) and 'label' in result[0]:
-                    # Sắp xếp kết quả theo score (cao nhất trước)
-                    sorted_results = sorted(result, key=lambda x: x.get('score', 0), reverse=True)
-                    label = sorted_results[0]['label'].lower()
-                    score = sorted_results[0].get('score', 0)
-                    logging.info(f"Sentiment từ HF API: {label} (score: {score:.2f})")
-                    
-                    # Chuyển đổi nhãn từ tiếng Anh sang tiếng Việt
-                    if 'positive' in label or 'tích cực' in label:
-                        return "Tích cực"
-                    elif 'negative' in label or 'tiêu cực' in label:
-                        return "Tiêu cực"
-                    else:
-                        return "Trung lập"
-                        
-            # Nếu không xử lý được kết quả
-            logging.warning(f"Không nhận dạng được định dạng kết quả từ HF: {result}")
-        else:
-            logging.error(f"Lỗi HuggingFace API: {response.status_code}, {response.text}")
-            
-    except Exception as e:
-        logging.error(f"Lỗi khi gọi HuggingFace API: {e}")
-        
-    return None
-
 def extract_sentiment_rule_based(ai_summary):
     """Extract sentiment from AI summary using rule-based approach"""
     sentiment = "Trung lập"  # Default
@@ -287,7 +231,6 @@ def extract_sentiment_rule_based(ai_summary):
                     return "Tiêu cực"
                 else:
                     return "Trung lập"
-                    
         # Nếu không tìm thấy dòng cảm xúc, dùng regex tìm toàn văn bản
         text = ai_summary.lower()
         if re.search(r"(tích cực|positive|lạc quan|upbeat|bullish)", text):
@@ -299,18 +242,7 @@ def extract_sentiment_rule_based(ai_summary):
     return sentiment
 
 async def extract_sentiment(ai_summary):
-    """Extract sentiment from AI summary, sử dụng HuggingFace API nếu có thể, 
-    hoặc fallback sang rule-based"""
-    if Config.USE_HF_API:
-        try:
-            # Thử dùng HuggingFace API trước
-            hf_sentiment = await predict_sentiment_hf_api(ai_summary)
-            if hf_sentiment:
-                return hf_sentiment  # Trả về kết quả API nếu có
-        except Exception as e:
-            logging.warning(f"Lỗi khi phân tích sentiment qua HF API, fallback sang rule-based: {e}")
-    
-    # Fallback sang rule-based nếu API không thành công hoặc không được bật
+    """Extract sentiment from AI summary, chỉ sử dụng rule-based"""
     return extract_sentiment_rule_based(ai_summary)
 
 def is_hot_news(entry, ai_summary, sentiment):
