@@ -78,6 +78,21 @@ async def save_news(entry, ai_summary, sentiment):
     except Exception as e:
         logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
 
+async def is_in_db(entry):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT 1 FROM news_insights WHERE link=$1", entry.link)
+        return row is not None
+
+# Hàm xóa tin cũ hơn n ngày
+async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days';"
+            )
+    except Exception as e:
+        logging.error(f"Lỗi khi xóa tin cũ: {e}")
+
 # --- AI Analysis (Gemini) ---
 GEMINI_MODEL = Config.GEMINI_MODEL
 OPENROUTER_FALLBACK_MODEL = Config.OPENROUTER_FALLBACK_MODEL
@@ -131,7 +146,7 @@ def extract_sentiment(ai_summary):
         logging.warning(f"Lỗi khi parse sentiment: {e}")
     return sentiment
 
-# --- Parse RSS Feed ---
+# --- Parse RSS Feed & News Processing ---
 async def parse_feed(url):
     """Parse RSS feed with error handling and retries"""
     for attempt in range(Config.MAX_RETRIES):
@@ -147,6 +162,16 @@ async def parse_feed(url):
             else:
                 logging.error(f"Failed to parse feed after {Config.MAX_RETRIES} attempts: {url}")
                 return feedparser.FeedParserDict(entries=[])  # Return empty feed
+
+def extract_image_url(entry):
+    if hasattr(entry, 'media_content') and entry.media_content:
+        return entry.media_content[0].get('url')
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get('url')
+    match = re.search(r'<img[^>]+src=["\"]([^"\"]+)["\"]', getattr(entry, 'summary', ''))
+    if match:
+        return match.group(1)
+    return None
     
 # --- Lệnh đăng ký user ---
 @dp.message(Command("register"))
@@ -198,11 +223,6 @@ async def approve_user_callback(cb: CallbackQuery):
     await cb.answer(f"Đã duyệt user @{user['username']} ({user_id})")
 
 # --- Tin tức theo chu kỳ ---
-async def is_in_db(entry):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM news_insights WHERE link=$1", entry.link)
-        return row is not None
-
 async def news_job():
     while True:
         await delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS)
@@ -342,16 +362,6 @@ async def init_db():
         );
         ''')
 
-# Hàm xóa tin cũ hơn n ngày
-async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days';"
-            )
-    except Exception as e:
-        logging.error(f"Lỗi khi xóa tin cũ: {e}")
-
 # --- 8. Webhook & main ---
 async def on_startup(app):
     try:
@@ -391,6 +401,15 @@ async def on_shutdown(app):
 async def healthcheck(request):
     return web.Response(text="Bot đang hoạt động!", status=200)
 
+@dp.message(Command("start"))
+async def start_command(msg: types.Message):
+    await msg.answer(
+        "Chào mừng bạn đến với bot tin tức tài chính!\n"
+        "- Gõ /register để đăng ký nhận tin tức.\n"
+        "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n"
+        "- Gõ /help để xem hướng dẫn."
+    )
+
 app = web.Application()
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
@@ -401,25 +420,3 @@ setup_application(app, dp, bot=bot)
 if __name__ == "__main__":
     logging.info("Khởi động web server...")
     web.run_app(app, host="0.0.0.0", port=8000)
-
-def extract_image_url(entry):
-    # 1. RSS chuẩn có thể có media_content
-    if hasattr(entry, 'media_content') and entry.media_content:
-        return entry.media_content[0].get('url')
-    # 2. RSS có thể có media_thumbnail
-    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
-        return entry.media_thumbnail[0].get('url')
-    # 3. Tìm ảnh trong summary (nếu có thẻ <img>)
-    match = re.search(r'<img[^>]+src=["\"]([^"\"]+)["\"]', getattr(entry, 'summary', ''))
-    if match:
-        return match.group(1)
-    return None
-
-@dp.message(Command("start"))
-async def start_command(msg: types.Message):
-    await msg.answer(
-        "Chào mừng bạn đến với bot tin tức tài chính!\n" \
-        "- Gõ /register để đăng ký nhận tin tức.\n" \
-        "- Sau khi được admin duyệt, bạn sẽ nhận tin tức tự động.\n" \
-        "- Gõ /help để xem hướng dẫn."
-    )
