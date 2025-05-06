@@ -115,7 +115,8 @@ async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
     try:
         # Lấy thời gian hiện tại với timezone
         now = get_now_with_tz()
-        
+        now = ensure_timezone_aware(now)  # Đảm bảo có timezone
+
         async with pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion, is_hot_news, created_at)
@@ -124,7 +125,6 @@ async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
             """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news, now)
     except Exception as e:
         logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
-        # Log thêm chi tiết về datetime để debug
         logging.debug(f"Debug datetime: type={type(now)}, tzinfo={now.tzinfo}, value={now}")
 
 async def is_in_db(entry):
@@ -566,16 +566,13 @@ def format_datetime(dt, format='%Y-%m-%d %H:%M:%S'):
     
     return dt.strftime(format)
 
-# Đảm bảo datetime là timezone aware trước khi đưa vào DB
 def ensure_timezone_aware(dt):
     """Đảm bảo datetime object có timezone trước khi đưa vào DB"""
     if dt is None:
         return get_now_with_tz()
-    
-    # Nếu datetime đã có timezone info, trả về nguyên bản
-    if dt.tzinfo is not None:
+    # Nếu đã có tzinfo và offset, trả về nguyên bản
+    if dt.tzinfo is not None and dt.tzinfo.utcoffset(dt) is not None:
         return dt
-        
     # Nếu chưa có timezone, thêm vào
     return Config.TIMEZONE.localize(dt)
 
@@ -719,7 +716,7 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
         # Format message
         formatted_message = (
             f"{prefix}<b>{title}</b>\n\n"
-            f"{message}\n\n"
+            f"<pre>{message}</pre>\n\n"
             f"<i>Nguồn: {domain} • {date}</i>\n"
             f"<a href='{link}'>Đọc chi tiết</a>"
         )
