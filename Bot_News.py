@@ -44,7 +44,7 @@ class Config:
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "600"))  # 10 phút (giây)
-    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "7"))
+    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
@@ -124,6 +124,8 @@ async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
             """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news, now)
     except Exception as e:
         logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
+        # Log thêm chi tiết về datetime để debug
+        logging.debug(f"Debug datetime: type={type(now)}, tzinfo={now.tzinfo}, value={now}")
 
 async def is_in_db(entry):
     async with pool.acquire() as conn:
@@ -564,6 +566,19 @@ def format_datetime(dt, format='%Y-%m-%d %H:%M:%S'):
     
     return dt.strftime(format)
 
+# Đảm bảo datetime là timezone aware trước khi đưa vào DB
+def ensure_timezone_aware(dt):
+    """Đảm bảo datetime object có timezone trước khi đưa vào DB"""
+    if dt is None:
+        return get_now_with_tz()
+    
+    # Nếu datetime đã có timezone info, trả về nguyên bản
+    if dt.tzinfo is not None:
+        return dt
+        
+    # Nếu chưa có timezone, thêm vào
+    return Config.TIMEZONE.localize(dt)
+
 async def normalize_title(title):
     """Chuẩn hóa tiêu đề tin tức để so sánh"""
     if not title:
@@ -682,9 +697,15 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
         if isinstance(published, str):
             try:
                 published = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %Z')
+                # Đảm bảo published có timezone
+                published = ensure_timezone_aware(published)
             except ValueError:
-                # Fallback nếu parse thất bại
-                published = None
+                try:
+                    # Thử với format khác (RSS feeds có thể khác nhau)
+                    published = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
+                except ValueError:
+                    # Fallback nếu parse thất bại
+                    published = None
         
         # Format date
         date = format_datetime(published) if published else format_datetime(None)
@@ -860,25 +881,22 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
                     # Đánh dấu là đã tìm thấy tin liên quan
                     relevant_count += 1
                     
-                    # Phân tích tin tức với AI
+                    # Lấy domain nguồn tin
+                    link = getattr(entry, 'link', '')
+                    domain = urlparse(link).netloc if link else 'N/A'
+                    # Prompt AI tối ưu, bổ sung nguồn
                     prompt = f"""
-                    Phân tích bài báo kinh tế sau và cho ý kiến chuyên gia về tác động của nó đến thị trường chứng khoán và kinh tế Việt Nam:
+                    Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.
                     
-                    TIÊU ĐỀ: {getattr(entry, 'title', 'Không có tiêu đề')}
+                    Tiêu đề: {getattr(entry, 'title', 'Không có tiêu đề')}
+                    Tóm tắt: {getattr(entry, 'summary', 'Không có tóm tắt')}
+                    Nguồn: {domain}
                     
-                    TÓM TẮT: {getattr(entry, 'summary', 'Không có tóm tắt')}
-                    
-                    Hãy phân tích theo định dạng sau:
-                    
-                    1. TÓM TẮT NGẮN GỌN: (tóm tắt bài viết trong 1-2 câu)
-                    
-                    2. PHÂN TÍCH TÁC ĐỘNG: (phân tích tác động đến thị trường chứng khoán, kinh tế vĩ mô hoặc các doanh nghiệp)
-                    
-                    3. CẢM XÚC: (Tích cực/Tiêu cực/Trung lập)
-                    
-                    4. MỨC ĐỘ QUAN TRỌNG: (Thấp/Trung bình/Cao) - nói về mức độ quan trọng của tin tức này
-                    
-                    5. LỜI KHUYÊN CHO NHÀ ĐẦU TƯ: (1-2 câu lời khuyên ngắn gọn)
+                    1. Tóm tắt ngắn gọn (1-2 câu)
+                    2. Phân tích tác động đến thị trường chứng khoán ( 2-3 câu )
+                    3. Cảm xúc (Tích cực/Tiêu cực/Trung lập)
+                    4. Mức độ quan trọng (Thấp/Trung bình/Cao)
+                    5. Lời khuyên cho nhà đầu tư (1 câu)
                     """
                     
                     # Gọi model AI và lưu kết quả
