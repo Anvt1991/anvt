@@ -1,17 +1,21 @@
 import logging
 import os
+import asyncio
+# Nhóm các import thư viện bên ngoài
 import feedparser
 import httpx
-import asyncio
 import asyncpg
 import redis.asyncio as aioredis
+import google.generativeai as genai
+# Nhóm các import aiogram 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-import google.generativeai as genai
+# Nhóm các import khác
+from aiohttp import web
+import re
 
 # --- Config ---
 class Config:
@@ -33,9 +37,13 @@ class Config:
         "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi",
     ]
+    REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "840"))  # 14 phút (giây)
+    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "7"))
+    MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
 
 # --- Kiểm tra biến môi trường bắt buộc ---
-REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]  # Không còn CHANNEL_ID
+REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
 for var in REQUIRED_ENV_VARS:
     if not os.getenv(var):
         raise RuntimeError(f"Missing required environment variable: {var}")
@@ -53,40 +61,28 @@ async def is_sent(entry_id):
 
 async def mark_sent(entry_id):
     await redis.sadd("sent_news", entry_id)
-    await redis.expire("sent_news", 21600)  # 6h
+    await redis.expire("sent_news", Config.REDIS_TTL)
 
 # --- PostgreSQL ---
 pool = None
 
 async def save_news(entry, ai_summary, sentiment):
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (link) DO NOTHING
-        """, entry.title, entry.link, entry.summary, sentiment, ai_summary)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (link) DO NOTHING
+            """, entry.title, entry.link, entry.summary, sentiment, ai_summary)
+    except Exception as e:
+        logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
 
 # --- AI Analysis (Gemini) ---
 GEMINI_MODEL = Config.GEMINI_MODEL
 OPENROUTER_FALLBACK_MODEL = Config.OPENROUTER_FALLBACK_MODEL
 GOOGLE_GEMINI_API_KEY = Config.GOOGLE_GEMINI_API_KEY
 
-async def analyze_news(title, summary, model=None):
-    prompt = f"""
-    Đây là một tin tức tài chính:
-    ---
-    {title}
-    {summary}
-    ---
-    Hãy:
-    1. Tóm tắt ngắn gọn (dưới 2 câu)
-    2. Đưa ra nhận định thị trường ngắn gọn (dưới 2 câu)
-    3. Phân tích cảm xúc: tích cực / tiêu cực / trung lập.
-    Trả về kết quả theo định dạng:
-    - Tóm tắt:
-    - Nhận định:
-    - Cảm xúc:
-    """
+async def analyze_news(prompt, model=None):
     try:
         # Gọi Google Gemini API chính thức
         genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
@@ -116,15 +112,41 @@ async def analyze_news(title, summary, model=None):
             logging.error(f"OpenRouter fallback cũng lỗi: {e2}")
             raise e2
 
-async def analyze_news_cached(entry_id, title, summary):
-    cache_key = f"ai_summary:{entry_id}"
-    cached = await redis.get(cache_key)
-    if cached:
-        return cached.decode()
-    result = await analyze_news(title, summary)
-    await redis.set(cache_key, result, ex=21600)  # TTL 6h
-    return result
+# --- Extract sentiment from AI result ---
+def extract_sentiment(ai_summary):
+    """Extract sentiment from AI summary"""
+    sentiment = "Trung lập"  # Default
+    try:
+        for line in ai_summary.splitlines():
+            if "Cảm xúc:" in line:
+                sentiment_text = line.split(":")[-1].strip().lower()
+                if "tích cực" in sentiment_text:
+                    return "Tích cực"
+                elif "tiêu cực" in sentiment_text:
+                    return "Tiêu cực"
+                else:
+                    return "Trung lập"
+    except Exception as e:
+        logging.warning(f"Lỗi khi parse sentiment: {e}")
+    return sentiment
 
+# --- Parse RSS Feed ---
+async def parse_feed(url):
+    """Parse RSS feed with error handling and retries"""
+    for attempt in range(Config.MAX_RETRIES):
+        try:
+            feed = feedparser.parse(url)
+            if not feed.entries and not hasattr(feed, 'status'):
+                raise Exception("Empty feed without status")
+            return feed
+        except Exception as e:
+            logging.warning(f"Error parsing feed {url}, attempt {attempt+1}/{Config.MAX_RETRIES}: {e}")
+            if attempt < Config.MAX_RETRIES - 1:
+                await asyncio.sleep(1)  # Short delay before retry
+            else:
+                logging.error(f"Failed to parse feed after {Config.MAX_RETRIES} attempts: {url}")
+                return feedparser.FeedParserDict(entries=[])  # Return empty feed
+    
 # --- Lệnh đăng ký user ---
 @dp.message(Command("register"))
 async def register_user(msg: types.Message):
@@ -167,38 +189,113 @@ async def approve_user_callback(cb: CallbackQuery):
     await cb.answer(f"Đã duyệt user @{user['username']} ({user_id})")
 
 # --- Tin tức theo chu kỳ ---
+async def is_in_db(entry):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT 1 FROM news_insights WHERE link=$1", entry.link)
+        return row is not None
+
 async def news_job():
     while True:
-        await delete_old_news(days=7)  # Xóa tin cũ hơn 7 ngày
-        for url in Config.FEED_URLS:
-            feed = feedparser.parse(url)
-            for entry in feed.entries:
-                if await is_sent(entry.id):
-                    continue
-                await mark_sent(entry.id)
+        await delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS)
+        new_entries = []
+        cached_results = {}
+        entries_to_analyze = []
 
-                title = entry.title
-                summary = entry.summary
+        try:
+            # Collect entries from feeds
+            for url in Config.FEED_URLS:
+                feed = await parse_feed(url)
+                for entry in feed.entries:
+                    if await is_sent(entry.id) or await is_in_db(entry):
+                        continue
+                    await mark_sent(entry.id)
+                    cache_key = f"ai_summary:{entry.id}"
+                    cached = await redis.get(cache_key)
+                    if cached:
+                        cached_results[entry.id] = cached.decode()
+                    else:
+                        entries_to_analyze.append(entry)
+                    new_entries.append(entry)
+                    break  # Chỉ lấy 1 tin mới đầu tiên mỗi nguồn
 
-                # Luôn phân tích AI, không dịch nữa
-                ai_summary = await analyze_news_cached(entry.id, title, summary)
+            # Gọi Gemini cho các entry chưa có cache
+            ai_results = {}
+            if entries_to_analyze:
+                prompt = "Đây là các tin tức tài chính:\n"
+                for idx, entry in enumerate(entries_to_analyze, 1):
+                    prompt += f"\n---\nTin số {idx}:\n{entry.title}\n{entry.summary}\n"
+                prompt += '''
+Hãy với mỗi tin:
+1. Tóm tắt ngắn gọn (dưới 2 câu)
+2. Đưa ra nhận định thị trường ngắn gọn (dưới 2 câu)
+3. Phân tích cảm xúc: tích cực / tiêu cực / trung lập.
+Trả về kết quả cho từng tin theo định dạng:
+- Tin số X:
+  - Tóm tắt:
+  - Nhận định:
+  - Cảm xúc:
+'''
+                ai_result = await analyze_news(prompt)
+                
+                try:
+                    # Parse kết quả từ Gemini
+                    results = re.split(r"- Tin số \d+:", ai_result)[1:]  # Sửa regex
+                    
+                    # Check if we have enough results for all entries
+                    if len(results) >= len(entries_to_analyze):
+                        for entry, idx, result in zip(entries_to_analyze, range(1, len(entries_to_analyze)+1), results):
+                            ai_summary = f"- Tin số {idx}:{result.strip()}"
+                            ai_results[entry.id] = ai_summary
+                            await redis.set(f"ai_summary:{entry.id}", ai_summary, ex=Config.REDIS_TTL)
+                    else:
+                        logging.warning(f"Gemini trả về không đủ kết quả: {len(results)} results for {len(entries_to_analyze)} entries")
+                        # Backup: tạo kết quả trống cho mọi entry chưa phân tích
+                        for entry in entries_to_analyze:
+                            if entry.id not in ai_results:
+                                ai_results[entry.id] = f"- Tin số 0:\n  - Tóm tắt: {entry.title}\n  - Nhận định: Không có đủ thông tin\n  - Cảm xúc: Trung lập"
+                except Exception as e:
+                    logging.error(f"Lỗi khi parse kết quả Gemini: {e}, kết quả: {ai_result}")
+                    # Tạo kết quả trống cho mọi entry chưa phân tích
+                    for entry in entries_to_analyze:
+                        ai_results[entry.id] = f"- Tin số 0:\n  - Tóm tắt: {entry.title}\n  - Nhận định: Lỗi phân tích\n  - Cảm xúc: Trung lập"
 
-                sentiment = "Trung lập"
-                for line in ai_summary.splitlines():
-                    if "Cảm xúc" in line:
-                        sentiment = line.split(":")[-1].strip()
-                        break
+            # Gửi và lưu DB cho tất cả entry
+            users_to_notify = []
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
+                users_to_notify = [row["user_id"] for row in rows]
+            
+            for entry in new_entries:
+                if entry.id in cached_results:
+                    ai_summary = cached_results[entry.id]
+                elif entry.id in ai_results:
+                    ai_summary = ai_results[entry.id]
+                else:
+                    continue  # Không có kết quả AI
 
+                sentiment = extract_sentiment(ai_summary)
                 await save_news(entry, ai_summary, sentiment)
+                
+                message = f"📰 *{entry.title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}"
+                
+                # Send to all users (in parallel using gather)
+                sending_tasks = []
+                for user_id in users_to_notify:
+                    sending_tasks.append(send_message_to_user(user_id, message))
+                if sending_tasks:
+                    await asyncio.gather(*sending_tasks, return_exceptions=True)
+                
+        except Exception as e:
+            logging.error(f"Lỗi trong chu kỳ news_job: {e}")
+            
+        await asyncio.sleep(Config.NEWS_JOB_INTERVAL)
 
-                # Lấy danh sách user đã duyệt từ DB và gửi tin
-                async with pool.acquire() as conn:
-                    rows = await conn.fetch("SELECT user_id FROM subscribed_users WHERE is_approved=TRUE")
-                for row in rows:
-                    await bot.send_message(row["user_id"], f"📰 *{title}*\n{entry.link}\n\n🤖 *Gemini AI phân tích:*\n{ai_summary}", parse_mode="Markdown")
-                break  # Chỉ gửi 1 tin mới đầu tiên mỗi nguồn
-
-        await asyncio.sleep(14 * 60)  # 14 phút
+async def send_message_to_user(user_id, message):
+    """Send message to user with error handling"""
+    try:
+        await bot.send_message(user_id, message, parse_mode="Markdown")
+    except Exception as e:
+        logging.warning(f"Không gửi được tin cho user {user_id}: {e}")
 
 # --- Webhook setup ---
 # (Không đăng ký bất kỳ handler nào cho lệnh từ user)
@@ -229,12 +326,15 @@ async def init_db():
         );
         ''')
 
-# Hàm xóa tin cũ hơn 7 ngày
-async def delete_old_news(days=7):
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days';"
-        )
+# Hàm xóa tin cũ hơn n ngày
+async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days';"
+            )
+    except Exception as e:
+        logging.error(f"Lỗi khi xóa tin cũ: {e}")
 
 async def on_startup(app):
     global redis, pool
