@@ -38,9 +38,10 @@ class Config:
         "https://news.google.com/rss?hl=vi&gl=VN&ceid=VN:vi",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "840"))  # 14 phút (giây)
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "600"))  # 10 phút (giây)
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "7"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
+    MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "3"))  # Tối đa 3 tin mỗi lần
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
@@ -216,7 +217,10 @@ async def news_job():
                     else:
                         entries_to_analyze.append(entry)
                     new_entries.append(entry)
-                    break  # Chỉ lấy 1 tin mới đầu tiên mỗi nguồn
+                    if len(new_entries) >= Config.MAX_NEWS_PER_CYCLE:
+                        break
+                if len(new_entries) >= Config.MAX_NEWS_PER_CYCLE:
+                    break
 
             # Gọi Gemini cho các entry chưa có cache
             ai_results = {}
@@ -340,26 +344,54 @@ async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
     except Exception as e:
         logging.error(f"Lỗi khi xóa tin cũ: {e}")
 
+# --- 8. Webhook & main ---
 async def on_startup(app):
-    global redis, pool
-    redis = await aioredis.from_url(Config.REDIS_URL)
-    pool = await asyncpg.create_pool(dsn=Config.DB_URL)
-    await init_db()  # Tự động tạo bảng nếu chưa có
-    await bot.set_webhook(Config.WEBHOOK_URL)
-    asyncio.create_task(news_job())
+    try:
+        global redis, pool
+        logging.info("Bot khởi động, thiết lập kết nối Redis...")
+        redis = await aioredis.from_url(Config.REDIS_URL)
+        logging.info("Thiết lập kết nối PostgreSQL...")
+        pool = await asyncpg.create_pool(dsn=Config.DB_URL)
+        logging.info("Khởi tạo database...")
+        await init_db()
+        logging.info(f"Thiết lập webhook: {Config.WEBHOOK_URL}")
+        await bot.delete_webhook() # Xóa webhook cũ nếu có
+        result = await bot.set_webhook(Config.WEBHOOK_URL)
+        logging.info(f"Kết quả thiết lập webhook: {result}")
+        
+        # Kiểm tra webhook đã set đúng chưa
+        webhook_info = await bot.get_webhook_info()
+        logging.info(f"WebhookInfo: URL={webhook_info.url}, pending_updates={webhook_info.pending_update_count}")
+        
+        logging.info("Khởi động task gửi tin...")
+        asyncio.create_task(news_job())
+        logging.info("Bot đã sẵn sàng hoạt động!")
+    except Exception as e:
+        logging.error(f"Lỗi trong on_startup: {e}")
+        raise e
 
 async def on_shutdown(app):
+    logging.info("Bot đang tắt...")
     await bot.delete_webhook()
-    await pool.close()
-    await redis.close()
+    if pool:
+        await pool.close()
+    if redis:
+        await redis.close()
+    logging.info("Bot đã tắt hoàn toàn.")
+
+# Route cho healthcheck
+async def healthcheck(request):
+    return web.Response(text="Bot đang hoạt động!", status=200)
 
 app = web.Application()
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
+app.router.add_get("/", healthcheck)  # Thêm route / để kiểm tra bot sống
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
 setup_application(app, dp, bot=bot)
 
 if __name__ == "__main__":
+    logging.info("Khởi động web server...")
     web.run_app(app, host="0.0.0.0", port=8000)
 
 def extract_image_url(entry):

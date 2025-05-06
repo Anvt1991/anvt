@@ -1,0 +1,8 @@
+Nhập trên trình duyệt:
+
+
+https://api.telegram.org/bot7780930655:AAEPJ77fbGwtDeCj-jCzVUuA-rZgGxPsuMM/getWebhookInfo
+
+
+  curl "https://api.telegram.org/bot7780930655:AAEPJ77fbGwtDeCj-jCzVUuA-rZgGxPsuMM/setWebhook?url=https://anvt-news.onrender.com"
+
