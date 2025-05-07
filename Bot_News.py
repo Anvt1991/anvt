@@ -923,10 +923,8 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
         # Chuẩn bị nội dung tin nhắn
         title = getattr(entry, 'title', 'Không có tiêu đề')
         link = getattr(entry, 'link', '#')
-        
         # Lấy published date với xử lý timezone
         published = getattr(entry, 'published', None)
-        
         # Nếu published là string, convert sang datetime
         if isinstance(published, str):
             try:
@@ -940,16 +938,12 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
                 except ValueError:
                     # Fallback nếu parse thất bại
                     published = None
-        
         # Format date
         date = format_datetime(published) if published else format_datetime(None)
-        
         # Extract domain from link
         domain = urlparse(link).netloc
-        
         # Create message with emoji based on news type
         prefix = "🔥 TIN NÓNG: " if is_hot_news else "📰 TIN MỚI: "
-        
         # Format message
         formatted_message = (
             f"{prefix}<b>{title}</b>\n\n"
@@ -957,38 +951,17 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
             f"<i>Nguồn: {domain} • {date}</i>\n"
             f"<a href='{link}'>Đọc chi tiết</a>"
         )
-        
-        # Add image if available
-        image_url = extract_image_url(entry)
-        
         # Tạo nút đọc chi tiết
         keyboard = [[InlineKeyboardButton("Đọc chi tiết", url=link)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
         # Get the global application's bot
         global application
         if application and application.bot:
             bot = application.bot
         else:
-            # If application is not available, create a new bot instance
             from telegram import Bot
             bot = Bot(token=Config.BOT_TOKEN)
-            
-        # Gửi tin nhắn với ảnh nếu có
-        if image_url:
-            try:
-                await bot.send_photo(
-                    chat_id=user_id,
-                    photo=image_url,
-                    caption=formatted_message,
-                    reply_markup=reply_markup,
-                    parse_mode='HTML'
-                )
-                return
-            except Exception as img_err:
-                logger.warning(f"Không gửi được ảnh: {img_err}, trở lại gửi tin nhắn text")
-                
-        # Fallback to text message if image sending fails
+        # Luôn gửi tin nhắn text, không gửi ảnh
         await bot.send_message(
             chat_id=user_id,
             text=formatted_message,
