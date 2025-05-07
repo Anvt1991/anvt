@@ -60,7 +60,7 @@ class Config:
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
-    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "3600"))  # 1h/lần
+    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "300"))  # 5 phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "2"))  # Chỉ lấy tin 2 ngày gần nhất 
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
@@ -1003,91 +1003,80 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
 
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
-    Job chạy mỗi giờ để quét toàn bộ RSS, lọc tin và đẩy vào queue.
+    Job chạy mỗi 5 phút để quét 1 RSS tiếp theo trong danh sách (theo thứ tự tuần tự, vòng tròn).
     """
     try:
-        logger.info("Đang quét toàn bộ RSS và cache tin mới...")
-        
+        logger.info("Đang quét 1 RSS tiếp theo và cache tin mới...")
         # Xóa tin cũ khỏi DB
         await delete_old_news()
-        
         # Lấy tin gần đây từ DB để kiểm tra trùng lặp nội dung
         recent_news_texts = await get_recent_news_texts()
-        
-        # Đảm bảo mỗi tin chỉ được lưu 1 lần
         queued_count = 0
         skipped_count = 0
         hot_news_count = 0
-        
-        # Quét qua tất cả feed
+        # --- Lấy 1 RSS tiếp theo theo thứ tự vòng tròn ---
         feeds = Config.FEED_URLS
-        for feed_url in feeds:
-            entries = await parse_feed(feed_url)
-            for entry in entries:
-                try:
-                    # Lọc theo thời gian, chỉ lấy tin trong vòng N ngày
-                    if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
-                        continue
-                        
-                    # Lọc thông minh theo từ khóa và loại trừ
-                    if not is_relevant_news_smart(entry):
-                        continue
-                        
-                    # Kiểm tra đã lưu trong queue chưa
-                    entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
-                    if await redis_client.sismember("news_queue_ids", entry_id):
-                        skipped_count += 1
-                        continue
-                    
-                    # Kiểm tra đã gửi hoặc đã có trong DB chưa
-                    if await is_sent(entry_id) or await is_in_db(entry):
-                        await redis_client.sadd("news_queue_ids", entry_id)
-                        skipped_count += 1
-                        continue
-                    
-                    # Kiểm tra trùng lặp nội dung với các tin gần đây
-                    entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
-                    if is_duplicate_by_content(entry_text, recent_news_texts):
-                        skipped_count += 1
-                        continue
-                    
-                    # Nếu không trùng, thêm vào recent_news_texts để các tin sau so sánh
-                    recent_news_texts.append(entry_text)
-                    
-                    # Tạo dữ liệu tin tức để lưu vào queue
-                    is_hot = is_hot_news_simple(entry)
-                    news_data = {
-                        "id": entry_id,
-                        "title": getattr(entry, "title", ""),
-                        "link": getattr(entry, "link", ""),
-                        "summary": getattr(entry, "summary", ""),
-                        "published": getattr(entry, "published", ""),
-                        "is_hot": is_hot,
-                    }
-                    
-                    # Đẩy vào queue phù hợp
-                    if is_hot:
-                        await redis_client.rpush("hot_news_queue", json.dumps(news_data))
-                        hot_news_count += 1
-                    else:
-                        await redis_client.rpush("news_queue", json.dumps(news_data))
-                    
-                    # Đánh dấu đã lưu vào queue
+        total_feeds = len(feeds)
+        current_idx = await get_current_feed_index()
+        # Lấy 1 feed tiếp theo
+        selected_feed = feeds[current_idx % total_feeds]
+        # Cập nhật index cho lần sau
+        await set_current_feed_index((current_idx + 1) % total_feeds)
+        feed_url = selected_feed
+        entries = await parse_feed(feed_url)
+        for entry in entries:
+            try:
+                # Lọc theo thời gian, chỉ lấy tin trong vòng N ngày
+                if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
+                    continue
+                # Lọc thông minh theo từ khóa và loại trừ
+                if not is_relevant_news_smart(entry):
+                    continue
+                # Kiểm tra đã lưu trong queue chưa
+                entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
+                if await redis_client.sismember("news_queue_ids", entry_id):
+                    skipped_count += 1
+                    continue
+                # Kiểm tra đã gửi hoặc đã có trong DB chưa
+                if await is_sent(entry_id) or await is_in_db(entry):
                     await redis_client.sadd("news_queue_ids", entry_id)
-                    await redis_client.expire("news_queue_ids", Config.REDIS_TTL)  # Đặt TTL để auto-clean
-                    queued_count += 1
-                    
-                except Exception as e:
-                    logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
-        
+                    skipped_count += 1
+                    continue
+                # Kiểm tra trùng lặp nội dung với các tin gần đây
+                entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
+                if is_duplicate_by_content(entry_text, recent_news_texts):
+                    skipped_count += 1
+                    continue
+                # Nếu không trùng, thêm vào recent_news_texts để các tin sau so sánh
+                recent_news_texts.append(entry_text)
+                # Tạo dữ liệu tin tức để lưu vào queue
+                is_hot = is_hot_news_simple(entry)
+                news_data = {
+                    "id": entry_id,
+                    "title": getattr(entry, "title", ""),
+                    "link": getattr(entry, "link", ""),
+                    "summary": getattr(entry, "summary", ""),
+                    "published": getattr(entry, "published", ""),
+                    "is_hot": is_hot,
+                }
+                # Đẩy vào queue phù hợp
+                if is_hot:
+                    await redis_client.rpush("hot_news_queue", json.dumps(news_data))
+                    hot_news_count += 1
+                else:
+                    await redis_client.rpush("news_queue", json.dumps(news_data))
+                # Đánh dấu đã lưu vào queue
+                await redis_client.sadd("news_queue_ids", entry_id)
+                await redis_client.expire("news_queue_ids", Config.REDIS_TTL)  # Đặt TTL để auto-clean
+                queued_count += 1
+            except Exception as e:
+                logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
         # Thống kê
         hot_queue_len = await redis_client.llen("hot_news_queue")
         normal_queue_len = await redis_client.llen("news_queue")
-        
         logger.info(f"Quét RSS hoàn tất: Đã cache {queued_count} tin mới ({hot_news_count} tin nóng), "
                    f"bỏ qua {skipped_count} tin trùng lặp. "
                    f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
-        
     except Exception as e:
         logger.error(f"Lỗi trong job fetch_and_cache_news: {e}")
 
@@ -1251,7 +1240,7 @@ def main():
     job_queue = application.job_queue
     
     # Cấu hình các job định kỳ mới:
-    # 1. Job quét RSS mỗi giờ và cache tin
+    # 1. Job quét RSS mỗi 5 phút và cache tin
     job_queue.run_repeating(fetch_and_cache_news, interval=Config.HOURLY_JOB_INTERVAL, first=10)
     
     # 2. Job gửi tin từ queue mỗi 800s
