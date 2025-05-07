@@ -36,8 +36,8 @@ class Config:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "1225226589"))
     GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL")
-    OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+    OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     FEED_URLS = [
         # Google News theo từ khóa
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
@@ -58,16 +58,16 @@ class Config:
         "https://news.google.com/rss/search?q=site:bloomberg.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
     ]
-    REDIS_TTL = int(os.getenv("REDIS_TTL", "40000"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "850"))
-    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "300"))  # 5 phút/lần
+    REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
+    HOURLY_JOB_INTERVAL = 600  # 10 phút
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "2"))  # Chỉ lấy tin 2 ngày gần nhất 
-    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
+    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
     DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.85"))  # Ngưỡng để xác định tin trùng lặp
-    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "2"))  # Số ngày để lấy tin gần đây để so sánh
+    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "3"))  # Số ngày để lấy tin gần đây để so sánh
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
@@ -84,7 +84,8 @@ class Config:
     # Danh sách từ khóa lọc tin tức liên quan (mở rộng)
     RELEVANT_KEYWORDS = [
         # Chính trị, vĩ mô, doanh nghiệp, chứng khoán, chiến tranh 
-        "chính trị", "vĩ mô", "doanh nghiệp", "chứng khoán", "chiến tranh", "chính sách", "lãi suất", "fed", "thuế", "Trump", "Mỹ", "Trung Quốc", "phe", "đảng", "chính phủ", "quốc hội", "nhà nước", "bộ trưởng", "thủ tướng", "chủ tịch",
+        "chính trị", "vĩ mô", "doanh nghiệp", "chứng khoán", "chiến tranh", "chính sách", "lãi suất", "fed",
+        "phe", "đảng", "chính phủ", "quốc hội", "nhà nước", "bộ trưởng", "thủ tướng", "chủ tịch",
         # Nhóm ngành, bluechip, midcap, thị trường
         "bluechip", "midcap", "ngân hàng", "bất động sản", "thép", "dầu khí", "công nghệ", "bán lẻ",
         "xuất khẩu", "điện", "xây dựng", "thủy sản", "dược phẩm", "logistics", "vận tải", 
@@ -393,22 +394,22 @@ async def parse_feed(url):
 def extract_image_url(entry):
     """Extract image URL from entry if available"""
     try:
-        if hasattr(entry, 'media_content') and entry.media_content:
+        if 'media_content' in entry and entry.media_content:
             for media in entry.media_content:
                 if 'url' in media:
                     return media['url']
         
         # Try finding image in content
-        if hasattr(entry, 'content') and entry.content:
+        if 'content' in entry and entry.content:
             for content in entry.content:
                 if 'value' in content:
-                    match = re.search(r'<img[^>]+src="([^"]+)">', content['value'])
+                    match = re.search(r'<img[^>]+src="([^">]+)"', content['value'])
                     if match:
                         return match.group(1)
         
         # Try finding image in summary
         if hasattr(entry, 'summary'):
-            match = re.search(r'<img[^>]+src="([^"]+)">', entry.summary)
+            match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
             if match:
                 return match.group(1)
     except Exception as e:
@@ -1002,10 +1003,10 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
 
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
-    Job chạy mỗi 5 phút để quét 1 RSS tiếp theo trong danh sách (theo thứ tự tuần tự, vòng tròn).
+    Job chạy mỗi 10 phút để quét 2 RSS feed theo thứ tự tuần tự (vòng tròn), lọc tin và đẩy vào queue.
     """
     try:
-        logger.info("Đang quét 1 RSS tiếp theo và cache tin mới...")
+        logger.info("Đang quét 2 RSS feed tiếp theo và cache tin mới...")
         # Xóa tin cũ khỏi DB
         await delete_old_news()
         # Lấy tin gần đây từ DB để kiểm tra trùng lặp nội dung
@@ -1013,63 +1014,63 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
         queued_count = 0
         skipped_count = 0
         hot_news_count = 0
-        # --- Lấy 1 RSS tiếp theo theo thứ tự vòng tròn ---
+        # --- Lấy 2 RSS tiếp theo theo thứ tự vòng tròn ---
         feeds = Config.FEED_URLS
         total_feeds = len(feeds)
         current_idx = await get_current_feed_index()
-        # Lấy 1 feed tiếp theo
-        selected_feed = feeds[current_idx % total_feeds]
+        # Lấy 2 feed tiếp theo
+        selected_feeds = [feeds[(current_idx + i) % total_feeds] for i in range(2)]
         # Cập nhật index cho lần sau
-        await set_current_feed_index((current_idx + 1) % total_feeds)
-        feed_url = selected_feed
-        entries = await parse_feed(feed_url)
-        for entry in entries:
-            try:
-                # Lọc theo thời gian, chỉ lấy tin trong vòng N ngày
-                if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
-                    continue
-                # Lọc thông minh theo từ khóa và loại trừ
-                if not is_relevant_news_smart(entry):
-                    continue
-                # Kiểm tra đã lưu trong queue chưa
-                entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
-                if await redis_client.sismember("news_queue_ids", entry_id):
-                    skipped_count += 1
-                    continue
-                # Kiểm tra đã gửi hoặc đã có trong DB chưa
-                if await is_sent(entry_id) or await is_in_db(entry):
+        await set_current_feed_index((current_idx + 2) % total_feeds)
+        for feed_url in selected_feeds:
+            entries = await parse_feed(feed_url)
+            for entry in entries:
+                try:
+                    # Lọc theo thời gian, chỉ lấy tin trong vòng N ngày
+                    if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
+                        continue
+                    # Lọc thông minh theo từ khóa và loại trừ
+                    if not is_relevant_news_smart(entry):
+                        continue
+                    # Kiểm tra đã lưu trong queue chưa
+                    entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
+                    if await redis_client.sismember("news_queue_ids", entry_id):
+                        skipped_count += 1
+                        continue
+                    # Kiểm tra đã gửi hoặc đã có trong DB chưa
+                    if await is_sent(entry_id) or await is_in_db(entry):
+                        await redis_client.sadd("news_queue_ids", entry_id)
+                        skipped_count += 1
+                        continue
+                    # Kiểm tra trùng lặp nội dung với các tin gần đây
+                    entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
+                    if is_duplicate_by_content(entry_text, recent_news_texts):
+                        skipped_count += 1
+                        continue
+                    # Nếu không trùng, thêm vào recent_news_texts để các tin sau so sánh
+                    recent_news_texts.append(entry_text)
+                    # Tạo dữ liệu tin tức để lưu vào queue
+                    is_hot = is_hot_news_simple(entry)
+                    news_data = {
+                        "id": entry_id,
+                        "title": getattr(entry, "title", ""),
+                        "link": getattr(entry, "link", ""),
+                        "summary": getattr(entry, "summary", ""),
+                        "published": getattr(entry, "published", ""),
+                        "is_hot": is_hot,
+                    }
+                    # Đẩy vào queue phù hợp
+                    if is_hot:
+                        await redis_client.rpush("hot_news_queue", json.dumps(news_data))
+                        hot_news_count += 1
+                    else:
+                        await redis_client.rpush("news_queue", json.dumps(news_data))
+                    # Đánh dấu đã lưu vào queue
                     await redis_client.sadd("news_queue_ids", entry_id)
-                    skipped_count += 1
-                    continue
-                # Kiểm tra trùng lặp nội dung với các tin gần đây
-                entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
-                if is_duplicate_by_content(entry_text, recent_news_texts):
-                    skipped_count += 1
-                    continue
-                # Nếu không trùng, thêm vào recent_news_texts để các tin sau so sánh
-                recent_news_texts.append(entry_text)
-                # Tạo dữ liệu tin tức để lưu vào queue
-                is_hot = is_hot_news_simple(entry)
-                news_data = {
-                    "id": entry_id,
-                    "title": getattr(entry, "title", ""),
-                    "link": getattr(entry, "link", ""),
-                    "summary": getattr(entry, "summary", ""),
-                    "published": getattr(entry, "published", ""),
-                    "is_hot": is_hot,
-                }
-                # Đẩy vào queue phù hợp
-                if is_hot:
-                    await redis_client.rpush("hot_news_queue", json.dumps(news_data))
-                    hot_news_count += 1
-                else:
-                    await redis_client.rpush("news_queue", json.dumps(news_data))
-                # Đánh dấu đã lưu vào queue
-                await redis_client.sadd("news_queue_ids", entry_id)
-                await redis_client.expire("news_queue_ids", Config.REDIS_TTL)  # Đặt TTL để auto-clean
-                queued_count += 1
-            except Exception as e:
-                logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
+                    await redis_client.expire("news_queue_ids", Config.REDIS_TTL)  # Đặt TTL để auto-clean
+                    queued_count += 1
+                except Exception as e:
+                    logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
         # Thống kê
         hot_queue_len = await redis_client.llen("hot_news_queue")
         normal_queue_len = await redis_client.llen("news_queue")
@@ -1239,7 +1240,7 @@ def main():
     job_queue = application.job_queue
     
     # Cấu hình các job định kỳ mới:
-    # 1. Job quét RSS mỗi 5 phút và cache tin
+    # 1. Job quét RSS mỗi giờ và cache tin
     job_queue.run_repeating(fetch_and_cache_news, interval=Config.HOURLY_JOB_INTERVAL, first=10)
     
     # 2. Job gửi tin từ queue mỗi 800s
@@ -1257,8 +1258,7 @@ def main():
             listen="0.0.0.0",
             port=webhook_port,
             url_path=Config.BOT_TOKEN,
-            webhook_url=f"{Config.WEBHOOK_URL}/{Config.BOT_TOKEN}",
-            allowed_updates=Update.ALL_TYPES
+            webhook_url=f"{Config.WEBHOOK_URL}/{Config.BOT_TOKEN}"
         )
     else:
         logger.info("Starting bot in polling mode")
