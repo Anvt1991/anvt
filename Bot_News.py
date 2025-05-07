@@ -61,10 +61,10 @@ class Config:
         "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "900"))
     HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "600"))  # 10 phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "2"))  # Chỉ lấy tin 2 ngày gần nhất 
-    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
+    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
