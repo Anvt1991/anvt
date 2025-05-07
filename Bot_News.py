@@ -25,6 +25,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 # Import cho sentiment analysis tiếng Việt
 import numpy as np
 import requests
+import json
 
 # --- 1. Config & setup ---
 class Config:
@@ -38,32 +39,29 @@ class Config:
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     FEED_URLS = [
-        # Google News theo từ khóa (giữ lại các nguồn cũ)
+        # Google News theo từ khóa
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=ch%E1%BB%A9ng+kho%C3%A1n&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=v%C4%A9+m%C3%B4&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=chi%E1%BA%BFn+tranh&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=l%C3%A3i+su%E1%BA%A5t&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=fed&hl=vi&gl=VN&ceid=VN:vi",
-        "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",  # Tin nóng
-        "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",  # Tin đầu tư
-        "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",  # Tin doanh nghiệp
-        # Bổ sung thêm các nguồn mới
-        "https://vnexpress.net/rss/kinh-doanh.rss",
-        "https://vnexpress.net/rss/kinh-doanh/chung-khoan.rss",
-        "https://cafef.vn/rss/tin-moi-nhat.rss",
-        "https://cafef.vn/rss/chung-khoan.rss",
-        "https://tuoitre.vn/rss/kinh-doanh.rss",
-        "https://vneconomy.vn/rss/kinh-doanh.rss",
-        "https://vietstock.vn/rss/chung-khoan.rss",
-        "https://ndh.vn/rss/chung-khoan.rss",
-        "https://nhipcaudautu.vn/rss/chung-khoan.rss",
-        # Quốc tế (nếu cần)
-        "https://www.bloomberg.com/feed/podcast/etf-report.xml",
-        # ... bổ sung thêm các nguồn khác nếu muốn ...
+        "https://news.google.com/rss/search?q=tin+n%C3%B3ng&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=%C4%91%E1%BA%A7u+t%C6%B0&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=doanh+nghi%E1%BB%87p&hl=vi&gl=VN&ceid=VN:vi",
+        # Chính trị thế giới, quan hệ quốc tế
+        "https://news.google.com/rss/search?q=ch%C3%ADnh+tr%E1%BB%8B+th%E1%BA%BF+gi%E1%BB%9Bi&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=geopolitics&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=world+politics&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=international+relations&hl=vi&gl=VN&ceid=VN:vi",
+        # Quốc tế (Google News search các nguồn quốc tế)
+        "https://news.google.com/rss/search?q=site:bloomberg.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "720"))  # 12 phút (giây)
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
+    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "600"))  # 10 phút/lần
+    FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "2"))  # Chỉ lấy tin 2 ngày gần nhất 
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
@@ -116,6 +114,12 @@ class Config:
 
 # Danh sách từ khóa bổ sung
 additional_keywords = []
+
+# Danh sách từ khóa để loại trừ tin không liên quan
+EXCLUDE_KEYWORDS = [
+    "khuyến mãi", "giảm giá", "mua ngay", "tuyển dụng", "sự kiện", "giải trí", "thể thao", "lifestyle", 
+    "du lịch", "ẩm thực", "hot deal", "sale off", "quảng cáo", "đặt hàng", "shoppe", "tiki", "lazada"
+]
 
 # --- Kiểm tra biến môi trường bắt buộc ---
 REQUIRED_ENV_VARS = ["BOT_TOKEN", "OPENROUTER_API_KEY"]
@@ -293,6 +297,70 @@ def normalize_text(text):
     # Viết thường, loại bỏ khoảng trắng thừa
     text = text.lower().strip()
     return text
+
+def is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
+    """
+    Kiểm tra tin có nằm trong khung thời gian days gần nhất không.
+    """
+    published = getattr(entry, 'published', None) or getattr(entry, 'updated', None)
+    if not published:
+        return False
+    try:
+        # Thử parse nhiều định dạng ngày tháng
+        try:
+            dt = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %Z')
+        except ValueError:
+            try:
+                dt = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
+            except ValueError:
+                # Fallback: nếu không parse được, coi như là tin mới
+                return True
+        
+        # Đảm bảo có timezone
+        if not dt.tzinfo:
+            dt = Config.TIMEZONE.localize(dt)
+        now = get_now_with_tz()
+        delta = now - dt
+        return delta.days < days
+    except Exception as e:
+        logger.warning(f"Lỗi khi kiểm tra thời gian tin: {e}")
+        # Nếu có lỗi, coi như là tin mới để an toàn
+        return True
+
+def is_relevant_news_smart(entry):
+    """
+    Lọc tin thông minh: nhiều từ khóa liên quan, loại trừ spam/PR.
+    """
+    title = normalize_text(getattr(entry, 'title', ''))
+    summary = normalize_text(getattr(entry, 'summary', ''))
+    content_text = f"{title} {summary}"
+
+    # Loại trừ tin spam/PR
+    for ex_kw in EXCLUDE_KEYWORDS:
+        if normalize_text(ex_kw) in content_text:
+            return False
+
+    # Đếm số từ khóa liên quan xuất hiện
+    all_keywords = [normalize_text(k) for k in Config.RELEVANT_KEYWORDS] + [normalize_text(k) for k in additional_keywords]
+    match_count = sum(1 for kw in all_keywords if kw and kw in content_text)
+    
+    # Phải có ít nhất 1 từ khóa
+    return match_count >= 1
+
+def is_hot_news_simple(entry):
+    """
+    Phát hiện tin nóng mà không dùng AI, chỉ dựa trên từ khóa.
+    """
+    title = getattr(entry, 'title', '').lower()
+    summary = getattr(entry, 'summary', '').lower()
+    content_text = f"{title} {summary}".lower()
+    
+    for keyword in Config.HOT_NEWS_KEYWORDS:
+        if keyword.lower() in content_text:
+            logger.info(f"Hot news đơn giản phát hiện bởi từ khóa '{keyword}': {title}")
+            return True
+    
+    return False
 
 def is_relevant_news(entry):
     """
@@ -823,6 +891,17 @@ async def init_redis():
         logger.error(f"Error initializing Redis: {e}")
         return False
 
+async def clear_news_queues():
+    """Xóa tất cả tin tức trong queue khi khởi động lại bot để tránh gửi lại tin cũ"""
+    try:
+        # Xóa các queue tin tức
+        await redis_client.delete("hot_news_queue")
+        await redis_client.delete("news_queue")
+        # Giữ lại ids đã gửi để tránh trùng lặp
+        logger.info("Đã xóa tất cả tin trong queue để chuẩn bị cho quét mới")
+    except Exception as e:
+        logger.error(f"Lỗi khi xóa queue tin tức: {e}")
+
 # --- Helper for rotating RSS feed index ---
 async def get_current_feed_index():
     idx = await redis_client.get("current_feed_index")
@@ -920,6 +999,160 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
     except Exception as e:
         logger.error(f"Lỗi khi gửi tin tức cho user {user_id}: {e}")
 
+# --- Các job định kỳ mới ---
+
+async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Job chạy mỗi 10 phút để quét 1 RSS, lọc tin và đẩy vào queue (luân phiên từng nguồn).
+    """
+    try:
+        logger.info("Đang quét 1 RSS và cache tin mới...")
+        # Xóa tin cũ khỏi DB
+        await delete_old_news()
+        # Lấy tin gần đây từ DB để kiểm tra trùng lặp nội dung
+        recent_news_texts = await get_recent_news_texts()
+        queued_count = 0
+        skipped_count = 0
+        hot_news_count = 0
+        feeds = Config.FEED_URLS
+        # Lấy index nguồn hiện tại từ Redis
+        feed_idx = await get_current_feed_index()
+        feed_url = feeds[feed_idx % len(feeds)]
+        logger.info(f"Quét RSS: {feed_url}")
+        entries = await parse_feed(feed_url)
+        for entry in entries:
+            try:
+                if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
+                    continue
+                if not is_relevant_news_smart(entry):
+                    continue
+                entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
+                if await redis_client.sismember("news_queue_ids", entry_id):
+                    skipped_count += 1
+                    continue
+                if await is_sent(entry_id) or await is_in_db(entry):
+                    await redis_client.sadd("news_queue_ids", entry_id)
+                    skipped_count += 1
+                    continue
+                entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
+                if is_duplicate_by_content(entry_text, recent_news_texts):
+                    skipped_count += 1
+                    continue
+                recent_news_texts.append(entry_text)
+                is_hot = is_hot_news_simple(entry)
+                news_data = {
+                    "id": entry_id,
+                    "title": getattr(entry, "title", ""),
+                    "link": getattr(entry, "link", ""),
+                    "summary": getattr(entry, "summary", ""),
+                    "published": getattr(entry, "published", ""),
+                    "is_hot": is_hot,
+                }
+                if is_hot:
+                    await redis_client.rpush("hot_news_queue", json.dumps(news_data))
+                    hot_news_count += 1
+                else:
+                    await redis_client.rpush("news_queue", json.dumps(news_data))
+                await redis_client.sadd("news_queue_ids", entry_id)
+                await redis_client.expire("news_queue_ids", Config.REDIS_TTL)
+                queued_count += 1
+            except Exception as e:
+                logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
+        hot_queue_len = await redis_client.llen("hot_news_queue")
+        normal_queue_len = await redis_client.llen("news_queue")
+        logger.info(f"Quét RSS hoàn tất: Đã cache {queued_count} tin mới ({hot_news_count} tin nóng), "
+                   f"bỏ qua {skipped_count} tin trùng lặp. "
+                   f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
+        # Tăng index lên 1 cho lần sau
+        await set_current_feed_index((feed_idx + 1) % len(feeds))
+    except Exception as e:
+        logger.error(f"Lỗi trong job fetch_and_cache_news: {e}")
+
+async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Job chạy mỗi 800s để lấy 1 tin từ queue và gửi cho user.
+    Ưu tiên tin nóng trước.
+    """
+    try:
+        # Lấy danh sách người dùng đã được phê duyệt
+        approved_users_list = []
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT user_id FROM approved_users")
+                approved_users_list = [int(row['user_id']) for row in rows]
+        except Exception as e:
+            logger.error(f"Lỗi khi lấy danh sách approved users: {e}")
+            return
+            
+        if not approved_users_list:
+            logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
+            return
+            
+        # Ưu tiên lấy tin nóng trước
+        news_json = await redis_client.lpop("hot_news_queue")
+        if not news_json:
+            # Nếu không có tin nóng, lấy tin thường
+            news_json = await redis_client.lpop("news_queue")
+            
+        if not news_json:
+            logger.info("Không còn tin trong cả hai queue. Đợi chu kỳ fetch tiếp theo.")
+            return
+            
+        # Parse JSON thành dict
+        news_data = json.loads(news_json)
+        
+        # Phân tích tin tức bằng AI
+        domain = urlparse(news_data['link']).netloc if 'link' in news_data else 'N/A'
+        prompt = f"""
+        Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.
+        \nTiêu đề: {news_data.get('title', 'Không có tiêu đề')}
+        Tóm tắt: {news_data.get('summary', 'Không có tóm tắt')}
+        Nguồn: {domain}
+        \n1. Tóm tắt ngắn gọn nội dung (2-3 câu)
+        2. Phân tích, đánh giá tác động ( 3-5 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
+        3. Lời khuyên cho nhà đầu tư (1 câu)
+        """
+        
+        try:
+            ai_summary = await analyze_news(prompt)
+        except Exception as e:
+            logger.error(f"Lỗi khi phân tích tin bằng AI: {e}")
+            # Nếu không phân tích được, dùng summary gốc
+            ai_summary = news_data.get('summary', 'Không có phân tích nào.')
+            
+        # Tạo đối tượng entry từ news_data để truyền vào hàm gửi
+        class EntryObject:
+            pass
+            
+        entry = EntryObject()
+        for key, value in news_data.items():
+            setattr(entry, key, value)
+            
+        # Lưu tin vào DB
+        try:
+            is_hot = news_data.get('is_hot', False)
+            sentiment = await extract_sentiment(ai_summary) if is_hot else 'Trung lập'
+            await save_news(entry, ai_summary, sentiment, is_hot)
+            
+            # Đánh dấu tin đã được gửi
+            await mark_sent(news_data.get('id', '') or news_data.get('link', ''))
+        except Exception as e:
+            logger.error(f"Lỗi khi lưu tin vào DB: {e}")
+            
+        # Gửi tin cho tất cả người dùng
+        sent_count = 0
+        for user_id in approved_users_list:
+            try:
+                await send_message_to_user(user_id, ai_summary, entry, news_data.get('is_hot', False))
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"Lỗi khi gửi tin cho user {user_id}: {e}")
+                
+        logger.info(f"Đã gửi tin '{news_data.get('title', '')[:30]}...' cho {sent_count}/{len(approved_users_list)} người dùng.")
+        
+    except Exception as e:
+        logger.error(f"Lỗi trong job send_news_from_queue: {e}")
+
 # Function to handle callback queries
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -964,107 +1197,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("approve_") or query.data.startswith("deny_"):
         await approve_user_callback(update, context)
 
-async def news_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Background task that polls ONE RSS feed per cycle and sends news updates.
-    """
-    try:
-        logger.info("Đang chạy news_job...")
-        # Load approved users
-        approved_users_list = []
-        try:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT user_id FROM approved_users")
-                approved_users_list = [int(row['user_id']) for row in rows]
-        except Exception as e:
-            logger.error(f"Lỗi khi lấy danh sách approved users: {e}")
-            return
-        if not approved_users_list:
-            logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
-            return
-        # Xóa tin cũ khỏi DB
-        await delete_old_news()
-        # Lưu trữ tin để theo dõi có bao nhiêu tin được xử lý
-        processed_count = 0
-        sent_count = 0
-        relevant_count = 0
-        duplicate_count = 0
-        # Lấy tin tức gần đây từ DB để so sánh trùng lặp
-        recent_news_texts = await get_recent_news_texts()
-        logger.info(f"Đã lấy {len(recent_news_texts)} tin gần đây để kiểm tra trùng lặp")
-        # --- Chỉ quét 1 RSS mỗi lần ---
-        feeds = Config.FEED_URLS
-        feed_count = len(feeds)
-        current_idx = await get_current_feed_index()
-        feed_url = feeds[current_idx % feed_count]
-        logger.info(f"Đang quét RSS số {current_idx % feed_count + 1}/{feed_count}: {feed_url}")
-        entries = await parse_feed(feed_url)
-        if entries:
-            for entry in entries[:10]:  # Chỉ lấy 10 tin đầu mỗi feed
-                if processed_count >= Config.MAX_NEWS_PER_CYCLE:
-                    break
-                try:
-                    entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
-                    if await is_sent(entry_id):
-                        continue
-                    normalized_title = await normalize_title(getattr(entry, 'title', ''))
-                    if normalized_title and await is_title_sent(normalized_title):
-                        continue
-                    if await is_in_db(entry):
-                        await mark_sent(entry_id)
-                        if normalized_title:
-                            await mark_title_sent(normalized_title)
-                        continue
-                    entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
-                    if is_duplicate_by_content(entry_text, recent_news_texts):
-                        await mark_sent(entry_id)
-                        if normalized_title:
-                            await mark_title_sent(normalized_title)
-                        duplicate_count += 1
-                        logger.info(f"Phát hiện tin trùng lặp nội dung: {getattr(entry, 'title', '')}")
-                        continue
-                    if not is_relevant_news(entry):
-                        continue
-                    relevant_count += 1
-                    link = getattr(entry, 'link', '')
-                    domain = urlparse(link).netloc if link else 'N/A'
-                    prompt = f"""
-                    Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.
-                    \nTiêu đề: {getattr(entry, 'title', 'Không có tiêu đề')}
-                    Tóm tắt: {getattr(entry, 'summary', 'Không có tóm tắt')}
-                    Nguồn: {domain}
-                    \n1. Tóm tắt ngắn gọn nội dung (2-3 câu)
-                    2. Phân tích, đánh giá tác động ( 3-5 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
-                    3. Lời khuyên cho nhà đầu tư (1 câu)
-                    """
-                    try:
-                        ai_summary = await analyze_news(prompt)
-                        is_hot = is_hot_news(entry, ai_summary, 'Trung lập')
-                        if is_hot:
-                            sentiment = await extract_sentiment(ai_summary)
-                        else:
-                            sentiment = 'Trung lập'
-                        await save_news(entry, ai_summary, sentiment, is_hot)
-                        await mark_sent(entry_id)
-                        if normalized_title:
-                            await mark_title_sent(normalized_title)
-                        processed_count += 1
-                        recent_news_texts.append(entry_text)
-                        for user_id in approved_users_list:
-                            await send_message_to_user(user_id, ai_summary, entry, is_hot)
-                            sent_count += 1
-                    except Exception as e:
-                        logger.error(f"Lỗi khi phân tích tin (id={entry_id}): {e}")
-                        continue
-                except Exception as e:
-                    logger.error(f"Lỗi xử lý entry: {e}")
-                    continue
-        # Sau khi xong, tăng index lên và lưu lại
-        await set_current_feed_index((current_idx + 1) % feed_count)
-        logger.info(f"Chu kỳ news_job hoàn tất: Xử lý {processed_count}/{relevant_count} tin, gửi {sent_count} tin, loại bỏ {duplicate_count} tin trùng lặp")
-    except Exception as e:
-        logger.error(f"Lỗi trong news_job: {e}")
-
 def main():
     global application
     application = Application.builder().token(Config.BOT_TOKEN).build()
@@ -1077,6 +1209,9 @@ def main():
     if not db_ok or not redis_ok:
         logger.error("Failed to initialize database or Redis. Exiting.")
         return
+
+    # Xóa queue cũ khi khởi động lại
+    loop.run_until_complete(clear_news_queues())
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -1091,7 +1226,18 @@ def main():
 
     # Set up the job queue
     job_queue = application.job_queue
-    job_queue.run_repeating(news_job, interval=Config.NEWS_JOB_INTERVAL, first=10)
+    
+    # Cấu hình các job định kỳ mới:
+    # 1. Job quét RSS mỗi giờ và cache tin
+    job_queue.run_repeating(fetch_and_cache_news, interval=Config.HOURLY_JOB_INTERVAL, first=10)
+    
+    # 2. Job gửi tin từ queue mỗi 800s
+    job_queue.run_repeating(send_news_from_queue, interval=Config.NEWS_JOB_INTERVAL, first=30)
+    
+    # In thông tin job
+    logger.info(f"Đã thiết lập 2 job định kỳ:\n"
+                f"- Quét RSS & cache: {Config.HOURLY_JOB_INTERVAL}s/lần\n"
+                f"- Gửi tin từ queue: {Config.NEWS_JOB_INTERVAL}s/lần")
 
     if Config.WEBHOOK_URL:
         webhook_port = int(os.environ.get("PORT", 8443))
