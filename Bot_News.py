@@ -58,16 +58,16 @@ class Config:
         "https://news.google.com/rss/search?q=site:bloomberg.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
     ]
-    REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
+    REDIS_TTL = int(os.getenv("REDIS_TTL", "40000"))  # 6h
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "850"))
     HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "300"))  # 5 phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "2"))  # Chỉ lấy tin 2 ngày gần nhất 
-    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "3"))
+    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
     DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.85"))  # Ngưỡng để xác định tin trùng lặp
-    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "3"))  # Số ngày để lấy tin gần đây để so sánh
+    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "2"))  # Số ngày để lấy tin gần đây để so sánh
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
@@ -84,8 +84,7 @@ class Config:
     # Danh sách từ khóa lọc tin tức liên quan (mở rộng)
     RELEVANT_KEYWORDS = [
         # Chính trị, vĩ mô, doanh nghiệp, chứng khoán, chiến tranh 
-        "chính trị", "vĩ mô", "doanh nghiệp", "chứng khoán", "chiến tranh", "chính sách", "lãi suất", "fed",
-        "phe", "đảng", "chính phủ", "quốc hội", "nhà nước", "bộ trưởng", "thủ tướng", "chủ tịch",
+        "chính trị", "vĩ mô", "doanh nghiệp", "chứng khoán", "chiến tranh", "chính sách", "lãi suất", "fed", "thuế", "Trump", "Mỹ", "Trung Quốc", "phe", "đảng", "chính phủ", "quốc hội", "nhà nước", "bộ trưởng", "thủ tướng", "chủ tịch",
         # Nhóm ngành, bluechip, midcap, thị trường
         "bluechip", "midcap", "ngân hàng", "bất động sản", "thép", "dầu khí", "công nghệ", "bán lẻ",
         "xuất khẩu", "điện", "xây dựng", "thủy sản", "dược phẩm", "logistics", "vận tải", 
