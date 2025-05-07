@@ -38,6 +38,8 @@ class Config:
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
     FEED_URLS = [
         # Google News theo từ khóa
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
@@ -189,6 +191,35 @@ GEMINI_MODEL = Config.GEMINI_MODEL
 OPENROUTER_FALLBACK_MODEL = Config.OPENROUTER_FALLBACK_MODEL
 GOOGLE_GEMINI_API_KEY = Config.GOOGLE_GEMINI_API_KEY
 
+async def call_groq_api(prompt, model=None):
+    """Gọi Groq API để lấy kết quả AI phân tích"""
+    api_key = Config.GROQ_API_KEY
+    model = model or Config.GROQ_MODEL
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not set")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7
+                }
+            )
+            result = response.json()
+            if "choices" not in result:
+                logging.error(f"Groq API error (model={model}): {result}")
+                raise RuntimeError(f"Groq API error: {result}")
+            return result["choices"][0]["message"]["content"]
+    except Exception as e:
+        logging.error(f"Groq API lỗi: {e}")
+        raise e
+
 async def analyze_news(prompt, model=None):
     try:
         # Gọi Google Gemini API chính thức
@@ -216,8 +247,13 @@ async def analyze_news(prompt, model=None):
                     raise RuntimeError(f"OpenRouter API error: {result}")
                 return result["choices"][0]["message"]["content"]
         except Exception as e2:
-            logging.error(f"OpenRouter fallback cũng lỗi: {e2}")
-            raise e2
+            logging.error(f"OpenRouter fallback cũng lỗi: {e2}, thử tiếp Groq...")
+            # Fallback sang Groq
+            try:
+                return await call_groq_api(prompt)
+            except Exception as e3:
+                logging.error(f"Groq fallback cũng lỗi: {e3}")
+                raise e3
 
 # --- Extract sentiment from AI result ---
 def extract_sentiment_rule_based(ai_summary):
