@@ -394,22 +394,22 @@ async def parse_feed(url):
 def extract_image_url(entry):
     """Extract image URL from entry if available"""
     try:
-        if 'media_content' in entry and entry.media_content:
+        if hasattr(entry, 'media_content') and entry.media_content:
             for media in entry.media_content:
                 if 'url' in media:
                     return media['url']
         
         # Try finding image in content
-        if 'content' in entry and entry.content:
+        if hasattr(entry, 'content') and entry.content:
             for content in entry.content:
                 if 'value' in content:
-                    match = re.search(r'<img[^>]+src="([^">]+)"', content['value'])
+                    match = re.search(r'<img[^>]+src="([^"]+)">', content['value'])
                     if match:
                         return match.group(1)
         
         # Try finding image in summary
         if hasattr(entry, 'summary'):
-            match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
+            match = re.search(r'<img[^>]+src="([^"]+)">', entry.summary)
             if match:
                 return match.group(1)
     except Exception as e:
