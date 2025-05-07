@@ -25,6 +25,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 # Import cho sentiment analysis tiếng Việt
 import numpy as np
 import requests
+from telegram.error import TelegramError
 
 # --- 1. Config & setup ---
 class Config:
@@ -1065,6 +1066,15 @@ async def news_job(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Lỗi trong news_job: {e}")
 
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    # (Tùy chọn) Gửi thông báo cho admin nếu muốn
+    # try:
+    #     await context.bot.send_message(chat_id=Config.ADMIN_ID, text=f"Bot error: {context.error}")
+    # except Exception as notify_err:
+    #     logger.error(f"Lỗi khi gửi thông báo lỗi cho admin: {notify_err}")
+
 def main():
     global application
     application = Application.builder().token(Config.BOT_TOKEN).build()
@@ -1088,6 +1098,9 @@ def main():
 
     # Add callback query handler
     application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Thêm error handler
+    application.add_error_handler(error_handler)
 
     # Set up the job queue
     job_queue = application.job_queue
