@@ -26,6 +26,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import requests
 import json
+# Import thêm signal để xử lý tín hiệu đóng/khởi động lại
+import signal
+import sys
 
 # --- 1. Config & setup ---
 class Config:
@@ -141,6 +144,77 @@ pool = None
 
 # Lưu trữ danh sách user đã được duyệt
 approved_users = set()
+
+# --- Flag để kiểm soát việc tắt bot ---
+shutdown_flag = False
+
+# --- Cleanup function ---
+async def cleanup_resources():
+    """Dọn dẹp tài nguyên khi bot tắt"""
+    global redis_client, pool, application
+    
+    logger.info("Đang dọn dẹp tài nguyên trước khi tắt...")
+    
+    # Dừng job queue nếu đang chạy
+    if application and application.job_queue:
+        logger.info("Dừng job queue...")
+        application.job_queue.stop()
+    
+    # Đóng kết nối Redis
+    if redis_client:
+        logger.info("Đóng kết nối Redis...")
+        await redis_client.close()
+        redis_client = None
+    
+    # Đóng kết nối PostgreSQL
+    if pool:
+        logger.info("Đóng kết nối PostgreSQL...")
+        await pool.close()
+        pool = None
+    
+    logger.info("Đã dọn dẹp tất cả tài nguyên.")
+
+# --- Signal handlers ---
+def signal_handler(sig, frame):
+    """Xử lý tín hiệu tắt từ hệ thống"""
+    global shutdown_flag
+    
+    if shutdown_flag:
+        logger.warning("Nhận tín hiệu tắt lần hai, tắt ngay lập tức!")
+        sys.exit(1)
+    
+    logger.info(f"Nhận tín hiệu {sig}, chuẩn bị tắt bot...")
+    shutdown_flag = True
+    
+    # Chạy cleanup trong asyncio event loop
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(shutdown())
+        else:
+            loop.run_until_complete(shutdown())
+    except Exception as e:
+        logger.error(f"Lỗi khi dọn dẹp tài nguyên: {e}")
+        sys.exit(1)
+
+async def shutdown():
+    """Xử lý shutdown một cách đồng bộ"""
+    global application
+    
+    logger.info("Bắt đầu quy trình shutdown...")
+    
+    # Dọn dẹp tài nguyên
+    await cleanup_resources()
+    
+    # Dừng bot nếu đang chạy
+    if application:
+        logger.info("Dừng bot...")
+        if hasattr(application, 'stop'):
+            await application.stop()
+        application = None
+    
+    logger.info("Bot đã tắt hoàn toàn.")
+    sys.exit(0)
 
 async def is_sent(entry_id):
     return await redis_client.sismember("sent_news", entry_id)
@@ -1207,59 +1281,78 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await approve_user_callback(update, context)
 
 def main():
-    global application
-    application = Application.builder().token(Config.BOT_TOKEN).build()
-
-    # Initialize database and Redis
-    loop = asyncio.get_event_loop()
-    db_ok = loop.run_until_complete(init_db())
-    redis_ok = loop.run_until_complete(init_redis())
-
-    if not db_ok or not redis_ok:
-        logger.error("Failed to initialize database or Redis. Exiting.")
-        return
-
-    # Xóa queue cũ khi khởi động lại
-    loop.run_until_complete(clear_news_queues())
-
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("register", register_user))
-    application.add_handler(CommandHandler("keywords", view_keywords_command))
-    application.add_handler(CommandHandler("set_keywords", set_keywords_command))
-    application.add_handler(CommandHandler("clear_keywords", clear_keywords_command))
-
-    # Add callback query handler
-    application.add_handler(CallbackQueryHandler(button_callback))
-
-    # Set up the job queue
-    job_queue = application.job_queue
+    global application, shutdown_flag
     
-    # Cấu hình các job định kỳ mới:
-    # 1. Job quét RSS mỗi giờ và cache tin
-    job_queue.run_repeating(fetch_and_cache_news, interval=Config.HOURLY_JOB_INTERVAL, first=10)
+    # Reset shutdown flag
+    shutdown_flag = False
     
-    # 2. Job gửi tin từ queue mỗi 800s
-    job_queue.run_repeating(send_news_from_queue, interval=Config.NEWS_JOB_INTERVAL, first=30)
+    # Thiết lập signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
-    # In thông tin job
-    logger.info(f"Đã thiết lập 2 job định kỳ:\n"
-                f"- Quét RSS & cache: {Config.HOURLY_JOB_INTERVAL}s/lần\n"
-                f"- Gửi tin từ queue: {Config.NEWS_JOB_INTERVAL}s/lần")
+    try:
+        application = Application.builder().token(Config.BOT_TOKEN).build()
 
-    if Config.WEBHOOK_URL:
-        webhook_port = int(os.environ.get("PORT", 8443))
-        logger.info(f"Starting webhook on port {webhook_port} with URL: {Config.WEBHOOK_URL}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=webhook_port,
-            url_path=Config.BOT_TOKEN,
-            webhook_url=f"{Config.WEBHOOK_URL}/{Config.BOT_TOKEN}"
-        )
-    else:
-        logger.info("Starting bot in polling mode")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Initialize database and Redis
+        loop = asyncio.get_event_loop()
+        db_ok = loop.run_until_complete(init_db())
+        redis_ok = loop.run_until_complete(init_redis())
+
+        if not db_ok or not redis_ok:
+            logger.error("Failed to initialize database or Redis. Exiting.")
+            return
+
+        # Xóa queue cũ khi khởi động lại
+        loop.run_until_complete(clear_news_queues())
+
+        # Add command handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("register", register_user))
+        application.add_handler(CommandHandler("keywords", view_keywords_command))
+        application.add_handler(CommandHandler("set_keywords", set_keywords_command))
+        application.add_handler(CommandHandler("clear_keywords", clear_keywords_command))
+
+        # Add callback query handler
+        application.add_handler(CallbackQueryHandler(button_callback))
+
+        # Set up the job queue
+        job_queue = application.job_queue
+        
+        # Cấu hình các job định kỳ mới:
+        # 1. Job quét RSS mỗi giờ và cache tin
+        job_queue.run_repeating(fetch_and_cache_news, interval=Config.HOURLY_JOB_INTERVAL, first=10)
+        
+        # 2. Job gửi tin từ queue mỗi 800s
+        job_queue.run_repeating(send_news_from_queue, interval=Config.NEWS_JOB_INTERVAL, first=30)
+        
+        # In thông tin job
+        logger.info(f"Đã thiết lập 2 job định kỳ:\n"
+                    f"- Quét RSS & cache: {Config.HOURLY_JOB_INTERVAL}s/lần\n"
+                    f"- Gửi tin từ queue: {Config.NEWS_JOB_INTERVAL}s/lần")
+
+        if Config.WEBHOOK_URL:
+            webhook_port = int(os.environ.get("PORT", 8443))
+            logger.info(f"Starting webhook on port {webhook_port} with URL: {Config.WEBHOOK_URL}")
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=webhook_port,
+                url_path=Config.BOT_TOKEN,
+                webhook_url=f"{Config.WEBHOOK_URL}/{Config.BOT_TOKEN}"
+            )
+        else:
+            logger.info("Starting bot in polling mode")
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+            
+    except Exception as e:
+        logger.error(f"Lỗi không xử lý được trong hàm main: {e}")
+        # Dọn dẹp tài nguyên khi có lỗi không xử lý được
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(cleanup_resources())
+        else:
+            loop.run_until_complete(cleanup_resources())
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
