@@ -42,7 +42,7 @@ class Config:
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-    GROQ_MODEL = os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+    GROQ_MODEL = os.getenv("GROQ_MODEL", "deepseek-r1-distill-llama-70b")
     FEED_URLS = [
         # Google News theo từ khóa
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
@@ -64,7 +64,7 @@ class Config:
         "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
-    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "820"))
+    NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
     HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "600"))  # 10 phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "2"))  # Chỉ lấy tin 2 ngày gần nhất 
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
@@ -72,7 +72,7 @@ class Config:
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
     DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.85"))  # Ngưỡng để xác định tin trùng lặp
-    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "3"))  # Số ngày để lấy tin gần đây để so sánh
+    RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "2"))  # Số ngày để lấy tin gần đây để so sánh
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
