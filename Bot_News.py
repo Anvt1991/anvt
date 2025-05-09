@@ -39,7 +39,7 @@ class Config:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "1225226589"))
     GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "deepseek-r1-distill-llama-70b")
@@ -62,6 +62,17 @@ class Config:
         # Quốc tế (Google News search các nguồn quốc tế)
         "https://news.google.com/rss/search?q=site:bloomberg.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
+        # Bổ sung các nguồn Google News RSS tối ưu
+        # Chứng khoán Việt Nam từ các báo lớn
+        "https://news.google.com/rss/search?q=chứng+khoán+site:cafef.vn&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=chứng+khoán+site:vnexpress.net&hl=vi&gl=VN&ceid=VN:vi",
+        # Chính sách vĩ mô
+        "https://news.google.com/rss/search?q=chính+sách+vĩ+mô&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=lãi+suất+site:sbv.gov.vn&hl=vi&gl=VN&ceid=VN:vi",
+        # Biến động thế giới, tài chính quốc tế
+        "https://news.google.com/rss/search?q=market+crash&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=site:reuters.com+economy+OR+policy&hl=vi&gl=VN&ceid=VN:vi",
+        "https://news.google.com/rss/search?q=site:theguardian.com+world+OR+politics&hl=vi&gl=VN&ceid=VN:vi",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
