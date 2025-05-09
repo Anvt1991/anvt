@@ -410,7 +410,8 @@ def normalize_text(text):
 
 def is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
     """
-    Kiểm tra tin có nằm trong khung thời gian days gần nhất không.
+    Chỉ lấy tin có ngày đăng là hôm nay (theo timezone Việt Nam).
+    Nếu không parse được ngày thì bỏ qua (không lấy).
     """
     published = getattr(entry, 'published', None) or getattr(entry, 'updated', None)
     if not published:
@@ -423,19 +424,18 @@ def is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
             try:
                 dt = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
             except ValueError:
-                # Fallback: nếu không parse được, coi như là tin mới
-                return True
-        
+                # Nếu không parse được, bỏ qua tin này
+                return False
         # Đảm bảo có timezone
         if not dt.tzinfo:
             dt = Config.TIMEZONE.localize(dt)
         now = get_now_with_tz()
-        delta = now - dt
-        return delta.days < days
+        # So sánh ngày (không so sánh giờ)
+        return dt.date() == now.date()
     except Exception as e:
         logger.warning(f"Lỗi khi kiểm tra thời gian tin: {e}")
-        # Nếu có lỗi, coi như là tin mới để an toàn
-        return True
+        # Nếu có lỗi, bỏ qua tin này
+        return False
 
 def is_relevant_news_smart(entry):
     """
@@ -1087,13 +1087,15 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
     Job chạy mỗi 10 phút để quét 1 RSS, lọc tin và đẩy vào queue (luân phiên từng nguồn).
+    Nâng cấp: chỉ lấy tin trong ngày, lọc trùng tiêu đề đã gửi, chuẩn hóa nội dung khi so sánh trùng lặp.
     """
     try:
         logger.info("Đang quét 1 RSS và cache tin mới...")
         # Xóa tin cũ khỏi DB
         await delete_old_news()
-        # Lấy tin gần đây từ DB để kiểm tra trùng lặp nội dung
-        recent_news_texts = await get_recent_news_texts()
+        # Lấy tin gần đây từ DB để kiểm tra trùng lặp nội dung (chuẩn hóa)
+        recent_news_texts_raw = await get_recent_news_texts()
+        recent_news_texts = [normalize_text(txt) for txt in recent_news_texts_raw]
         queued_count = 0
         skipped_count = 0
         hot_news_count = 0
@@ -1110,6 +1112,11 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if not is_relevant_news_smart(entry):
                     continue
                 entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
+                # Chuẩn hóa tiêu đề để kiểm tra trùng tiêu đề đã gửi
+                normalized_title = await normalize_title(getattr(entry, 'title', ''))
+                if await is_title_sent(normalized_title):
+                    skipped_count += 1
+                    continue
                 if await redis_client.sismember("news_queue_ids", entry_id):
                     skipped_count += 1
                     continue
@@ -1117,11 +1124,13 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                     await redis_client.sadd("news_queue_ids", entry_id)
                     skipped_count += 1
                     continue
+                # Chuẩn hóa nội dung để so sánh trùng lặp
                 entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
-                if is_duplicate_by_content(entry_text, recent_news_texts):
+                entry_text_norm = normalize_text(entry_text)
+                if is_duplicate_by_content(entry_text_norm, recent_news_texts):
                     skipped_count += 1
                     continue
-                recent_news_texts.append(entry_text)
+                recent_news_texts.append(entry_text_norm)
                 is_hot = is_hot_news_simple(entry)
                 news_data = {
                     "id": entry_id,
@@ -1138,6 +1147,8 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                     await redis_client.rpush("news_queue", json.dumps(news_data))
                 await redis_client.sadd("news_queue_ids", entry_id)
                 await redis_client.expire("news_queue_ids", Config.REDIS_TTL)
+                # Đánh dấu tiêu đề đã gửi vào Redis (để tránh gửi lại)
+                await mark_title_sent(normalized_title)
                 queued_count += 1
             except Exception as e:
                 logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
