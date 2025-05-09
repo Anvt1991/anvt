@@ -29,6 +29,7 @@ import json
 # Import thêm signal để xử lý tín hiệu đóng/khởi động lại
 import signal
 import sys
+import hashlib
 
 # --- 1. Config & setup ---
 class Config:
@@ -82,13 +83,13 @@ class Config:
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
-    DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.85"))  # Ngưỡng để xác định tin trùng lặp
+    DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.82"))  # Ngưỡng để xác định tin trùng lặp
     RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "2"))  # Số ngày để lấy tin gần đây để so sánh
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
-        "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", 
-        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", 
+        "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", "AI", "tin nhanh chứng khoán", "trước giờ giao dịch", 
+        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", "VNI", "vnindex", "Trump",  
         "rơi mạnh", "tăng mạnh", "giảm mạnh", "sụp đổ", "bất thường", "emergency", 
         "urgent", "alert", "cảnh báo", "đột biến", "lịch sử", "kỷ lục", "cao nhất"
     ]
@@ -854,6 +855,41 @@ async def mark_title_sent(normalized_title):
     await redis_client.sadd("sent_titles", normalized_title)
     await redis_client.expire("sent_titles", Config.REDIS_TTL)
 
+# --- News Deduplication by Hash ---
+async def is_hash_sent(content_hash):
+    return await redis_client.sismember("sent_hashes", content_hash)
+
+async def mark_hash_sent(content_hash):
+    await redis_client.sadd("sent_hashes", content_hash)
+    await redis_client.expire("sent_hashes", Config.REDIS_TTL)
+
+async def get_recent_titles(limit=200, days=Config.RECENT_NEWS_DAYS):
+    """Lấy danh sách tiêu đề chuẩn hóa gần đây từ DB, giới hạn số lượng"""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT title FROM news_insights WHERE created_at > NOW() - INTERVAL '{days} days' ORDER BY created_at DESC LIMIT {limit}"
+            )
+            return [await normalize_title(row['title']) for row in rows]
+    except Exception as e:
+        logger.error(f"Lỗi khi lấy tiêu đề gần đây từ DB: {e}")
+        return []
+
+def is_similar_title(new_title, recent_titles, threshold=0.92):
+    """So sánh tiêu đề mới với các tiêu đề cũ, nếu similarity > threshold thì coi là trùng"""
+    if not recent_titles:
+        return False
+    try:
+        titles = [new_title] + recent_titles
+        vectorizer = TfidfVectorizer().fit_transform(titles)
+        vectors = vectorizer.toarray()
+        sim_scores = cosine_similarity([vectors[0]], vectors[1:])[0]
+        max_sim = max(sim_scores) if len(sim_scores) > 0 else 0
+        return max_sim > threshold
+    except Exception as e:
+        logger.error(f"Lỗi khi so sánh tiêu đề tương tự: {e}")
+        return False
+
 # --- News Duplication Detection ---
 async def get_recent_news_texts(days=Config.RECENT_NEWS_DAYS):
     """Lấy danh sách tin gần đây từ DB để so sánh tìm trùng lặp"""
@@ -1098,20 +1134,19 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
     Job chạy mỗi 10 phút để quét 1 RSS, lọc tin và đẩy vào queue (luân phiên từng nguồn).
-    Nâng cấp: chỉ lấy tin trong ngày, lọc trùng tiêu đề đã gửi, chuẩn hóa nội dung khi so sánh trùng lặp.
+    Nâng cấp: chỉ lấy tin trong ngày, lọc trùng tiêu đề đã gửi, chuẩn hóa nội dung khi so sánh trùng lặp, lọc hash nội dung, lọc tiêu đề tương tự.
     """
     try:
         logger.info("Đang quét 1 RSS và cache tin mới...")
-        # Xóa tin cũ khỏi DB
         await delete_old_news()
-        # Lấy tin gần đây từ DB để kiểm tra trùng lặp nội dung (chuẩn hóa)
         recent_news_texts_raw = await get_recent_news_texts()
         recent_news_texts = [normalize_text(txt) for txt in recent_news_texts_raw]
+        # Lấy danh sách tiêu đề chuẩn hóa gần đây (giới hạn 200)
+        recent_titles = await get_recent_titles(limit=200)
         queued_count = 0
         skipped_count = 0
         hot_news_count = 0
         feeds = Config.FEED_URLS
-        # Lấy index nguồn hiện tại từ Redis
         feed_idx = await get_current_feed_index()
         feed_url = feeds[feed_idx % len(feeds)]
         logger.info(f"Quét RSS: {feed_url}")
@@ -1123,8 +1158,20 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if not is_relevant_news_smart(entry):
                     continue
                 entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
-                # Chuẩn hóa tiêu đề để kiểm tra trùng tiêu đề đã gửi
                 normalized_title = await normalize_title(getattr(entry, 'title', ''))
+                # 1. Lọc hash nội dung
+                entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
+                entry_text_norm = normalize_text(entry_text)
+                content_hash = hashlib.sha256(entry_text_norm.encode('utf-8')).hexdigest()
+                if await is_hash_sent(content_hash):
+                    skipped_count += 1
+                    continue
+                # 2. Lọc tiêu đề tương tự
+                if is_similar_title(normalized_title, recent_titles, threshold=0.92):
+                    skipped_count += 1
+                    continue
+                recent_titles.append(normalized_title)
+                # 3. Lọc tiêu đề đã gửi tuyệt đối
                 if await is_title_sent(normalized_title):
                     skipped_count += 1
                     continue
@@ -1135,9 +1182,7 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                     await redis_client.sadd("news_queue_ids", entry_id)
                     skipped_count += 1
                     continue
-                # Chuẩn hóa nội dung để so sánh trùng lặp
-                entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
-                entry_text_norm = normalize_text(entry_text)
+                # 4. Lọc trùng nội dung bằng TF-IDF
                 if is_duplicate_by_content(entry_text_norm, recent_news_texts):
                     skipped_count += 1
                     continue
@@ -1158,8 +1203,8 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                     await redis_client.rpush("news_queue", json.dumps(news_data))
                 await redis_client.sadd("news_queue_ids", entry_id)
                 await redis_client.expire("news_queue_ids", Config.REDIS_TTL)
-                # Đánh dấu tiêu đề đã gửi vào Redis (để tránh gửi lại)
                 await mark_title_sent(normalized_title)
+                await mark_hash_sent(content_hash)
                 queued_count += 1
             except Exception as e:
                 logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
@@ -1168,7 +1213,6 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Quét RSS hoàn tất: Đã cache {queued_count} tin mới ({hot_news_count} tin nóng), "
                    f"bỏ qua {skipped_count} tin trùng lặp. "
                    f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
-        # Tăng index lên 1 cho lần sau
         await set_current_feed_index((feed_idx + 1) % len(feeds))
     except Exception as e:
         logger.error(f"Lỗi trong job fetch_and_cache_news: {e}")
@@ -1213,9 +1257,8 @@ async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
         \nTiêu đề: {news_data.get('title', 'Không có tiêu đề')}
         Tóm tắt: {news_data.get('summary', 'Không có tóm tắt')}
         Nguồn: {domain}
-        \n1. Tóm tắt ngắn gọn nội dung (2-3 câu)
+        \n1. Tóm tắt ngắn gọn nội dung (3-5 câu)
         2. Phân tích, đánh giá tác động ( 3-5 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
-        3. Lời khuyên cho nhà đầu tư (1 câu)
         """
         
         try:
