@@ -40,7 +40,7 @@ class Config:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "1225226589"))
     GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "deepseek-r1-distill-llama-70b")
@@ -77,7 +77,7 @@ class Config:
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
-    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "300"))  # 5 phút/lần
+    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "500"))  # ... phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "1"))  # Chỉ lấy tin 1 ngày gần nhất 
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
@@ -310,7 +310,7 @@ async def analyze_news(prompt, model=None):
     try:
         # Gọi Google Gemini API chính thức
         genai.configure(api_key=GOOGLE_GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
         response = await asyncio.to_thread(model.generate_content, prompt)
         return response.text
     except Exception as e:
