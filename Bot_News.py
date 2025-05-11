@@ -77,7 +77,7 @@ class Config:
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
-    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "600"))  # 10 phút/lần
+    HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "300"))  # 5 phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "1"))  # Chỉ lấy tin 1 ngày gần nhất 
     DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
