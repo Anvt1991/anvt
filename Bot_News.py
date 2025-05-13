@@ -1213,7 +1213,12 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Quét RSS hoàn tất: Đã cache {queued_count} tin mới ({hot_news_count} tin nóng), "
                    f"bỏ qua {skipped_count} tin trùng lặp. "
                    f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
-        await set_current_feed_index((feed_idx + 1) % len(feeds))
+        if queued_count == 0:
+            logger.info("Không có tin mới, sẽ thử lại feed này sau 1 phút.")
+            context.job_queue.run_once(fetch_and_cache_news, 60)
+            # Không tăng feed_idx, giữ nguyên để thử lại feed này
+        else:
+            await set_current_feed_index((feed_idx + 1) % len(feeds))
     except Exception as e:
         logger.error(f"Lỗi trong job fetch_and_cache_news: {e}")
 
