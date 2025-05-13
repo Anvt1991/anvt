@@ -1350,6 +1350,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("approve_") or query.data.startswith("deny_"):
         await approve_user_callback(update, context)
 
+async def job_ping(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        url = "https://anvt.onrender.com/health"  # Nếu endpoint này không có, đổi thành "/"
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.get(url)
+        logger.info(f"Ping giữ bot awake tới {url}")
+    except Exception as e:
+        logger.error(f"Lỗi khi ping giữ awake: {e}")
+
 def main():
     global application, shutdown_flag
     
@@ -1396,10 +1405,14 @@ def main():
         # 2. Job gửi tin từ queue mỗi 800s
         job_queue.run_repeating(send_news_from_queue, interval=Config.NEWS_JOB_INTERVAL, first=30)
         
+        # 3. Job ping giữ awake mỗi 5 phút
+        job_queue.run_repeating(job_ping, interval=300, first=60)
+        
         # In thông tin job
-        logger.info(f"Đã thiết lập 2 job định kỳ:\n"
+        logger.info(f"Đã thiết lập 3 job định kỳ:\n"
                     f"- Quét RSS & cache: {Config.HOURLY_JOB_INTERVAL}s/lần\n"
-                    f"- Gửi tin từ queue: {Config.NEWS_JOB_INTERVAL}s/lần")
+                    f"- Gửi tin từ queue: {Config.NEWS_JOB_INTERVAL}s/lần\n"
+                    f"- Ping giữ awake: 300s/lần")
 
         if Config.WEBHOOK_URL:
             webhook_port = int(os.environ.get("PORT", 8443))
