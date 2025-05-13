@@ -1214,9 +1214,9 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                    f"bỏ qua {skipped_count} tin trùng lặp. "
                    f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
         if queued_count == 0:
-            logger.info("Không có tin mới, sẽ thử lại feed này sau 1 phút.")
+            logger.info("Không có tin mới, chuyển sang feed tiếp theo và sẽ thử sau 1 phút.")
+            await set_current_feed_index((feed_idx + 1) % len(feeds))
             context.job_queue.run_once(fetch_and_cache_news, 60)
-            # Không tăng feed_idx, giữ nguyên để thử lại feed này
         else:
             await set_current_feed_index((feed_idx + 1) % len(feeds))
     except Exception as e:
