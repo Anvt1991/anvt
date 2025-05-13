@@ -88,8 +88,8 @@ class Config:
     
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
-        "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", "AI", "tin nhanh chứng khoán", "trước giờ giao dịch", 
-        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", "VNI", "vnindex", "Trump",  
+        "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", "tin nhanh chứng khoán", "trước giờ giao dịch", 
+        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", "VNI", "vnindex", "Trump", "fed", "FED",
         "rơi mạnh", "tăng mạnh", "giảm mạnh", "sụp đổ", "bất thường", "emergency", 
         "urgent", "alert", "cảnh báo", "đột biến", "lịch sử", "kỷ lục", "cao nhất"
     ]
