@@ -4,7 +4,6 @@ import asyncio
 # Nhóm các import thư viện bên ngoài
 import feedparser
 import httpx
-import asyncpg
 import redis.asyncio as aioredis
 import google.generativeai as genai
 # Nhóm import telegram
@@ -151,9 +150,6 @@ logger = logging.getLogger(__name__)
 # --- Redis ---
 redis_client = None
 
-# --- PostgreSQL ---
-pool = None
-
 # Lưu trữ danh sách user đã được duyệt
 approved_users = set()
 
@@ -163,7 +159,7 @@ shutdown_flag = False
 # --- Cleanup function ---
 async def cleanup_resources():
     """Dọn dẹp tài nguyên khi bot tắt"""
-    global redis_client, pool, application
+    global redis_client, application
     
     logger.info("Đang dọn dẹp tài nguyên trước khi tắt...")
     
@@ -177,12 +173,6 @@ async def cleanup_resources():
         logger.info("Đóng kết nối Redis...")
         await redis_client.close()
         redis_client = None
-    
-    # Đóng kết nối PostgreSQL
-    if pool:
-        logger.info("Đóng kết nối PostgreSQL...")
-        await pool.close()
-        pool = None
     
     logger.info("Đã dọn dẹp tất cả tài nguyên.")
 
@@ -234,43 +224,6 @@ async def is_sent(entry_id):
 async def mark_sent(entry_id):
     await redis_client.sadd("sent_news", entry_id)
     await redis_client.expire("sent_news", Config.REDIS_TTL)
-
-async def save_news(entry, ai_summary, sentiment, is_hot_news=False):
-    try:
-        # Lấy thời gian hiện tại với timezone, luôn đảm bảo timezone
-        now = get_now_with_tz()
-        now = ensure_timezone_aware(now)  # Đảm bảo có timezone
-
-        # Log debug để trợ giúp phát hiện lỗi timezone
-        logger.debug(f"Lưu tin vào DB: timezone={now.tzinfo}, value={now}")
-
-        async with pool.acquire() as conn:
-            # Dùng AT TIME ZONE trong PostgreSQL để đảm bảo nhất quán
-            await conn.execute("""
-                INSERT INTO news_insights (title, link, summary, sentiment, ai_opinion, is_hot_news, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
-                ON CONFLICT (link) DO NOTHING
-            """, entry.title, entry.link, entry.summary, sentiment, ai_summary, is_hot_news, now)
-    except Exception as e:
-        logging.warning(f"Lỗi khi lưu tin tức vào DB (link={entry.link}): {e}")
-        logging.debug(f"Debug datetime: type={type(now)}, tzinfo={now.tzinfo}, value={now}")
-
-async def is_in_db(entry):
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM news_insights WHERE link=$1", entry.link)
-        return row is not None
-
-# Hàm xóa tin cũ hơn n ngày
-async def delete_old_news(days=Config.DELETE_OLD_NEWS_DAYS):
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                f"DELETE FROM news_insights WHERE created_at < NOW() - INTERVAL '{days} days'"
-            )
-            count = await conn.fetchval("SELECT count(*) FROM news_insights")
-            logger.info(f"Đã xóa tin cũ hơn {days} ngày. Còn lại {count} tin trong DB.")
-    except Exception as e:
-        logging.error(f"Lỗi khi xóa tin cũ: {e}")
 
 # --- AI Analysis (Gemini) ---
 GEMINI_MODEL = Config.GEMINI_MODEL
@@ -696,18 +649,6 @@ async def mark_hash_sent(content_hash):
     await redis_client.sadd("sent_hashes", content_hash)
     await redis_client.expire("sent_hashes", Config.REDIS_TTL)
 
-async def get_recent_titles(limit=200, days=Config.RECENT_NEWS_DAYS):
-    """Lấy danh sách tiêu đề chuẩn hóa gần đây từ DB, giới hạn số lượng"""
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT title FROM news_insights WHERE created_at > NOW() - INTERVAL '{days} days' ORDER BY created_at DESC LIMIT {limit}"
-            )
-            return [await normalize_title(row['title']) for row in rows]
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy tiêu đề gần đây từ DB: {e}")
-        return []
-
 def is_similar_title(new_title, recent_titles, threshold=0.92):
     """So sánh tiêu đề mới với các tiêu đề cũ, nếu similarity > threshold thì coi là trùng"""
     if not recent_titles:
@@ -724,19 +665,6 @@ def is_similar_title(new_title, recent_titles, threshold=0.92):
         return False
 
 # --- News Duplication Detection ---
-async def get_recent_news_texts(days=Config.RECENT_NEWS_DAYS):
-    """Lấy danh sách tin gần đây từ DB để so sánh tìm trùng lặp"""
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT title, summary FROM news_insights WHERE created_at > NOW() - INTERVAL '{days} days'"
-            )
-            # Ghép tiêu đề và tóm tắt để so sánh
-            return [f"{row['title']} {row['summary']}" for row in rows]
-    except Exception as e:
-        logger.error(f"Lỗi khi lấy tin gần đây từ DB: {e}")
-        return []
-
 def is_duplicate_by_content(new_text, recent_texts, threshold=Config.DUPLICATE_THRESHOLD):
     """Phát hiện tin trùng lặp bằng TF-IDF và Cosine Similarity"""
     if not recent_texts:
@@ -771,43 +699,6 @@ def is_duplicate_by_content(new_text, recent_texts, threshold=Config.DUPLICATE_T
     except Exception as e:
         logger.error(f"Lỗi khi phát hiện tin trùng lặp: {e}")
         return False  # Nếu lỗi, coi như không trùng để xử lý tin
-
-# --- Function to update database to ensure all timestamps use timezone ---
-async def ensure_db_timezone_columns():
-    """Đảm bảo tất cả các cột datetime trong DB đều lưu timezone"""
-    try:
-        async with pool.acquire() as conn:
-            # Kiểm tra các bảng hiện có
-            tables = await conn.fetch("""
-                SELECT table_name FROM information_schema.tables 
-                WHERE table_schema = 'public'
-            """)
-            
-            for table in tables:
-                table_name = table['table_name']
-                # Kiểm tra các cột timestamp
-                columns = await conn.fetch("""
-                    SELECT column_name, data_type 
-                    FROM information_schema.columns 
-                    WHERE table_name = $1 AND data_type LIKE '%timestamp%'
-                """, table_name)
-                
-                for column in columns:
-                    col_name = column['column_name']
-                    data_type = column['data_type']
-                    
-                    # Nếu cột timestamp không có timezone, alter để thêm
-                    if data_type == 'timestamp without time zone':
-                        logger.info(f"Cập nhật cột {table_name}.{col_name} sang timestamptz")
-                        await conn.execute(f"""
-                            ALTER TABLE {table_name} 
-                            ALTER COLUMN {col_name} TYPE timestamp with time zone 
-                            USING {col_name} AT TIME ZONE 'Asia/Ho_Chi_Minh'
-                        """)
-            
-            logger.info("Đã kiểm tra và cập nhật các cột timestamp trong DB")
-    except Exception as e:
-        logger.error(f"Lỗi khi cập nhật DB timestamp columns: {e}")
 
 async def init_redis():
     """Initialize Redis connection"""
@@ -958,12 +849,7 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if await redis_client.sismember("news_queue_ids", entry_id):
                     skipped_count += 1
                     continue
-                if await is_sent(entry_id) or await is_in_db(entry):
-                    await redis_client.sadd("news_queue_ids", entry_id)
-                    skipped_count += 1
-                    continue
-                # 4. Lọc trùng nội dung bằng TF-IDF
-                if is_duplicate_by_content(entry_text_norm, recent_news_texts):
+                if await is_sent(entry_id):
                     skipped_count += 1
                     continue
                 recent_news_texts.append(entry_text_norm)
@@ -1150,6 +1036,34 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/set_keywords - Thêm từ khóa lọc tin\n"
         "/clear_keywords - Xóa từ khóa bổ sung"
     )
+
+async def view_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+        )
+        return
+
+    global additional_keywords
+    default_keywords = Config.RELEVANT_KEYWORDS
+
+    message = (
+        f"📋 *Danh sách từ khóa hiện tại*\n\n"
+        f"*Từ khóa mặc định ({len(default_keywords)})*: Bao gồm các từ khóa về chứng khoán, kinh tế, tài chính...\n\n"
+    )
+
+    if additional_keywords:
+        message += f"*Từ khóa bổ sung ({len(additional_keywords)})*:\n{', '.join(additional_keywords)}\n\n"
+    else:
+        message += "*Từ khóa bổ sung*: Chưa có\n\n"
+
+    message += (
+        "Sử dụng /set_keywords để thêm từ khóa bổ sung.\n"
+        "Sử dụng /clear_keywords để xóa tất cả từ khóa bổ sung."
+    )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 def main():
     global application, shutdown_flag
