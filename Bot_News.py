@@ -39,7 +39,7 @@ class Config:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "1225226589"))
     GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-04-17")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-preview-05-20")
     OPENROUTER_FALLBACK_MODEL = os.getenv("OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-chat-v3-0324:free")
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "deepseek-r1-distill-llama-70b")
@@ -87,7 +87,7 @@ class Config:
     # Cấu hình phát hiện tin nóng
     HOT_NEWS_KEYWORDS = [
         "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", "tin nhanh chứng khoán", "trước giờ giao dịch", 
-        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", "VNI", "vnindex", "Trump", "fed", "FED",
+        "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", "VNINDEX", "vnindex", "Trump", "fed", "FED",
         "rơi mạnh", "tăng mạnh", "giảm mạnh", "sụp đổ", "bất thường", "emergency", 
         "urgent", "alert", "cảnh báo", "đột biến", "lịch sử", "kỷ lục", "cao nhất"
     ]
@@ -896,6 +896,8 @@ async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
     try:
         # Lấy danh sách người dùng đã được phê duyệt
         approved_users_list = [int(uid) for uid in await redis_client.smembers("approved_users")]
+        if Config.ADMIN_ID not in approved_users_list:
+            approved_users_list.append(Config.ADMIN_ID)
         if not approved_users_list:
             logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
             return
@@ -920,8 +922,9 @@ async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
         \nTiêu đề: {news_data.get('title', 'Không có tiêu đề')}
         Tóm tắt: {news_data.get('summary', 'Không có tóm tắt')}
         Nguồn: {domain}
-        \n1. Tóm tắt ngắn gọn nội dung (3-5 câu)
-        2. Phân tích, đánh giá tác động ( 3-5 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
+        \n1. Tóm tắt ngắn gọn nội dung 
+        2. Đánh giá tác động ( 2-3 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
+	3. Mã/ngành liên quan
         """
         
         try:
