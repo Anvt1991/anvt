@@ -552,13 +552,42 @@ def admin_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapped
 
-# Registration system - Only approved users can use the bot
+# --- Redis-only user approval ---
 async def is_user_approved(user_id):
-    """Kiểm tra xem user đã được duyệt chưa"""
-    global approved_users
-    return user_id == Config.ADMIN_ID or user_id in approved_users
+    # Luôn coi ADMIN_ID là approved, không cần lưu vào Redis
+    return user_id == Config.ADMIN_ID or await redis_client.sismember("approved_users", user_id)
 
-# Registration commands
+# --- User approval logic using Redis set ---
+async def approve_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action, user_id = query.data.split("_")
+    user_id = int(user_id)
+    if action == "approve":
+        if user_id != Config.ADMIN_ID:
+            await redis_client.sadd("approved_users", user_id)
+        await query.edit_message_text(f"✅ User {user_id} đã được phê duyệt.")
+        await context.bot.send_message(chat_id=user_id, text="✅ Bạn đã được phê duyệt để sử dụng Bot News! Gõ /help để xem hướng dẫn.")
+    else:
+        await query.edit_message_text(f"❌ Đã từ chối yêu cầu từ user {user_id}.")
+        await context.bot.send_message(chat_id=user_id, text="❌ Yêu cầu sử dụng bot của bạn đã bị từ chối.")
+
+# --- Lưu và lấy tiêu đề/tin gần đây bằng Redis list (giới hạn 200) ---
+async def add_recent_title(normalized_title, limit=200):
+    await redis_client.lpush("recent_titles", normalized_title)
+    await redis_client.ltrim("recent_titles", 0, limit-1)
+
+async def get_recent_titles(limit=200):
+    return [title.decode() if isinstance(title, bytes) else title for title in await redis_client.lrange("recent_titles", 0, limit-1)]
+
+async def add_recent_news_text(news_text, limit=200):
+    await redis_client.lpush("recent_news_texts", news_text)
+    await redis_client.ltrim("recent_news_texts", 0, limit-1)
+
+async def get_recent_news_texts(limit=200):
+    return [txt.decode() if isinstance(txt, bytes) else txt for txt in await redis_client.lrange("recent_news_texts", 0, limit-1)]
+
+# --- Registration commands
 async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
@@ -592,202 +621,6 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 Yêu cầu đăng ký của bạn đã được gửi tới admin. "
         "Bạn sẽ được thông báo khi yêu cầu được xử lý."
     )
-
-# Callback handler for approve/deny requests
-async def approve_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    action, user_id = query.data.split("_")
-    user_id = int(user_id)
-    
-    if action == "approve":
-        # Add to approved users
-        global approved_users
-        approved_users.add(user_id)
-        
-        # Save to database
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO approved_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
-                str(user_id)
-            )
-        
-        await query.edit_message_text(f"✅ User {user_id} đã được phê duyệt.")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="✅ Bạn đã được phê duyệt để sử dụng Bot News! Gõ /help để xem hướng dẫn."
-        )
-    else:
-        await query.edit_message_text(f"❌ Đã từ chối yêu cầu từ user {user_id}.")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="❌ Yêu cầu sử dụng bot của bạn đã bị từ chối."
-        )
-
-# Start command
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    
-    if not await is_user_approved(user_id):
-        await update.message.reply_text(
-            "👋 Chào mừng bạn đến với Bot News Chứng Khoán!"
-            "\n\nĐể sử dụng bot, bạn cần đăng ký và được phê duyệt."
-            "\nGõ /register để gửi yêu cầu đăng ký."
-        )
-        return
-    
-    welcome_message = (
-        f"👋 Chào mừng {user.first_name} đến với Bot News Chứng Khoán!\n\n"
-        f"Bot này giúp bạn nhận tin tức chứng khoán, kinh tế và tài chính quan trọng, "
-        f"kèm phân tích AI giúp đánh giá tác động.\n\n"
-        f"🔍 Tin tức sẽ được lọc theo từ khóa quan trọng và gửi tự động khi có tin mới.\n"
-        f"🔥 Tin nóng sẽ được gắn thẻ ưu tiên cao hơn.\n\n"
-        f"Gõ /help để xem toàn bộ lệnh và hướng dẫn sử dụng."
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🔑 Xem từ khóa hiện tại", callback_data="view_keywords")],
-        [InlineKeyboardButton("❓ Hỗ trợ", callback_data="help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-
-# Help command
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # Xác định xem người dùng có phải admin không để hiển thị lệnh nâng cao
-    is_admin = (user_id == Config.ADMIN_ID)
-    
-    if not await is_user_approved(user_id) and not is_admin:
-        await update.message.reply_text(
-            "👋 Chào mừng bạn đến với Bot News Chứng Khoán!"
-            "\n\nĐể sử dụng bot, bạn cần đăng ký và được phê duyệt."
-            "\nGõ /register để gửi yêu cầu đăng ký."
-        )
-        return
-    
-    help_text = (
-        "📚 *HƯỚNG DẪN SỬ DỤNG BOT NEWS*\n\n"
-        "*Lệnh cơ bản:*\n"
-        "/start - Khởi động bot\n"
-        "/help - Hiển thị hướng dẫn này\n"
-        "/register - Đăng ký sử dụng bot\n\n"
-        
-        "*Quản lý từ khóa:*\n"
-        "/keywords - Xem danh sách từ khóa theo dõi\n"
-        "/set_keywords <từ khóa> - Thêm từ khóa (cách nhau bởi dấu phẩy)\n"
-        "/clear_keywords - Xóa tất cả từ khóa bổ sung\n\n"
-        
-        "*Lưu ý:*\n"
-        "• Bot sẽ tự động gửi tin tức quan trọng khi phát hiện\n"
-        "• Tin nóng sẽ được đánh dấu đặc biệt\n"
-        "• Mỗi tin được phân tích bởi AI để đánh giá tác động\n"
-    )
-    
-    # Thêm lệnh admin nếu là admin
-    if is_admin:
-        admin_help = (
-            "\n*Lệnh dành cho Admin:*\n"
-            "• Người dùng mới sẽ gửi request và admin nhận thông báo\n"
-            "• Admin có thể phê duyệt/từ chối qua nút bấm\n"
-        )
-        help_text += admin_help
-    
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-# Keyword management commands
-async def set_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not await is_user_approved(user_id):
-        await update.message.reply_text(
-            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
-        )
-        return
-    
-    # Lấy từ khóa từ arguments
-    if not context.args or not context.args[0]:
-        await update.message.reply_text(
-            "❌ Vui lòng nhập các từ khóa, cách nhau bởi dấu phẩy.\n"
-            "Ví dụ: /set_keywords bitcoin, AI, tesla, vàng"
-        )
-        return
-    
-    # Xử lý từ khóa
-    text = ' '.join(context.args)
-    global additional_keywords
-    new_keywords = [kw.strip() for kw in text.split(',') if kw.strip()]
-    
-    if not new_keywords:
-        await update.message.reply_text("❌ Không tìm thấy từ khóa hợp lệ.")
-        return
-    
-    # Cập nhật từ khóa
-    additional_keywords = new_keywords
-    
-    # Lưu vào Redis để ghi nhớ
-    try:
-        await redis_client.set("additional_keywords", pickle.dumps(additional_keywords), ex=86400*30)  # 30 ngày
-    except Exception as e:
-        logger.error(f"Lỗi khi lưu từ khóa vào Redis: {e}")
-    
-    await update.message.reply_text(
-        f"✅ Đã cập nhật {len(new_keywords)} từ khóa bổ sung:\n"
-        f"{', '.join(new_keywords)}"
-    )
-
-async def view_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not await is_user_approved(user_id):
-        await update.message.reply_text(
-            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
-        )
-        return
-    
-    global additional_keywords
-    default_keywords = Config.RELEVANT_KEYWORDS
-    
-    message = (
-        f"📋 *Danh sách từ khóa hiện tại*\n\n"
-        f"*Từ khóa mặc định ({len(default_keywords)})*: Bao gồm các từ khóa về chứng khoán, kinh tế, tài chính...\n\n"
-    )
-    
-    if additional_keywords:
-        message += f"*Từ khóa bổ sung ({len(additional_keywords)})*:\n{', '.join(additional_keywords)}\n\n"
-    else:
-        message += "*Từ khóa bổ sung*: Chưa có\n\n"
-    
-    message += (
-        "Sử dụng /set_keywords để thêm từ khóa bổ sung.\n"
-        "Sử dụng /clear_keywords để xóa tất cả từ khóa bổ sung."
-    )
-    
-    await update.message.reply_text(message, parse_mode='Markdown')
-
-async def clear_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not await is_user_approved(user_id):
-        await update.message.reply_text(
-            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
-        )
-        return
-    
-    global additional_keywords
-    additional_keywords = []
-    
-    # Xóa khỏi Redis
-    try:
-        await redis_client.delete("additional_keywords")
-    except Exception as e:
-        logger.error(f"Lỗi khi xóa từ khóa từ Redis: {e}")
-    
-    await update.message.reply_text("✅ Đã xóa tất cả từ khóa bổ sung.")
 
 # --- Timezone Helper Functions ---
 def get_now_with_tz():
@@ -976,59 +809,6 @@ async def ensure_db_timezone_columns():
     except Exception as e:
         logger.error(f"Lỗi khi cập nhật DB timestamp columns: {e}")
 
-async def init_db():
-    """Initialize the database with necessary tables"""
-    global pool
-    try:
-        # Connect to the database
-        pool = await asyncpg.create_pool(Config.DB_URL)
-        
-        # Create news_insights table if it doesn't exist
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS news_insights (
-                    id SERIAL PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    link TEXT UNIQUE NOT NULL,
-                    summary TEXT,
-                    sentiment TEXT,
-                    ai_opinion TEXT,
-                    is_hot_news BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )
-            """)
-            
-            # Create approved_users table if it doesn't exist
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS approved_users (
-                    id SERIAL PRIMARY KEY,
-                    user_id TEXT UNIQUE NOT NULL,
-                    approved_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )
-            """)
-            
-            # Đảm bảo admin luôn có trong bảng approved_users
-            await conn.execute(
-                "INSERT INTO approved_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
-                str(Config.ADMIN_ID)
-            )
-            
-            # Load approved users from the database
-            global approved_users
-            rows = await conn.fetch("SELECT user_id FROM approved_users")
-            approved_users = set(int(row['user_id']) for row in rows)
-            # Đảm bảo admin luôn trong set
-            approved_users.add(Config.ADMIN_ID)
-            
-        # Đảm bảo tất cả các cột timestamp đều lưu timezone
-        await ensure_db_timezone_columns()
-            
-        logger.info(f"Database initialized successfully. Loaded {len(approved_users)} approved users.")
-        return True
-    except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        return False
-
 async def init_redis():
     """Initialize Redis connection"""
     global redis_client
@@ -1206,6 +986,8 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 await mark_title_sent(normalized_title)
                 await mark_hash_sent(content_hash)
                 queued_count += 1
+                await add_recent_title(normalized_title)
+                await add_recent_news_text(entry_text_norm)
             except Exception as e:
                 logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
         hot_queue_len = await redis_client.llen("hot_news_queue")
@@ -1229,15 +1011,7 @@ async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
     """
     try:
         # Lấy danh sách người dùng đã được phê duyệt
-        approved_users_list = []
-        try:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT user_id FROM approved_users")
-                approved_users_list = [int(row['user_id']) for row in rows]
-        except Exception as e:
-            logger.error(f"Lỗi khi lấy danh sách approved users: {e}")
-            return
-            
+        approved_users_list = [int(uid) for uid in await redis_client.smembers("approved_users")]
         if not approved_users_list:
             logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
             return
@@ -1374,11 +1148,10 @@ def main():
 
         # Initialize database and Redis
         loop = asyncio.get_event_loop()
-        db_ok = loop.run_until_complete(init_db())
         redis_ok = loop.run_until_complete(init_redis())
 
-        if not db_ok or not redis_ok:
-            logger.error("Failed to initialize database or Redis. Exiting.")
+        if not redis_ok:
+            logger.error("Failed to initialize Redis. Exiting.")
             return
 
         # Xóa queue cũ khi khởi động lại
