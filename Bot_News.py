@@ -1133,6 +1133,24 @@ async def job_ping(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Lỗi khi ping giữ awake: {e}")
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"👋 Xin chào {user.first_name or 'bạn'}! Đây là bot tổng hợp tin tức chứng khoán, kinh tế, tài chính.\n"
+        "Gõ /help để xem hướng dẫn sử dụng."
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Các lệnh hỗ trợ:\n"
+        "/start - Bắt đầu\n"
+        "/help - Hướng dẫn\n"
+        "/register - Đăng ký sử dụng bot\n"
+        "/keywords - Xem từ khóa lọc tin\n"
+        "/set_keywords - Thêm từ khóa lọc tin\n"
+        "/clear_keywords - Xóa từ khóa bổ sung"
+    )
+
 def main():
     global application, shutdown_flag
     
