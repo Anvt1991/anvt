@@ -78,7 +78,6 @@ class Config:
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
     HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "500"))  # ... phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "1"))  # Chỉ lấy tin 1 ngày gần nhất 
-    DELETE_OLD_NEWS_DAYS = int(os.getenv("DELETE_OLD_NEWS_DAYS", "2"))
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
@@ -166,7 +165,7 @@ async def cleanup_resources():
     # Dừng job queue nếu đang chạy
     if application and application.job_queue:
         logger.info("Dừng job queue...")
-        application.job_queue.stop()
+        await application.job_queue.stop()
     
     # Đóng kết nối Redis
     if redis_client:
@@ -809,7 +808,6 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
     try:
         logger.info("Đang quét 1 RSS và cache tin mới...")
-        await delete_old_news()
         recent_news_texts_raw = await get_recent_news_texts()
         recent_news_texts = [normalize_text(txt) for txt in recent_news_texts_raw]
         # Lấy danh sách tiêu đề chuẩn hóa gần đây (giới hạn 200)
@@ -941,16 +939,12 @@ async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
         for key, value in news_data.items():
             setattr(entry, key, value)
             
-        # Lưu tin vào DB
-        try:
-            is_hot = news_data.get('is_hot', False)
-            sentiment = await extract_sentiment(ai_summary) if is_hot else 'Trung lập'
-            await save_news(entry, ai_summary, sentiment, is_hot)
+        # Xử lý sentiment nếu cần
+        is_hot = news_data.get('is_hot', False)
+        sentiment = await extract_sentiment(ai_summary) if is_hot else 'Trung lập'
             
-            # Đánh dấu tin đã được gửi
-            await mark_sent(news_data.get('id', '') or news_data.get('link', ''))
-        except Exception as e:
-            logger.error(f"Lỗi khi lưu tin vào DB: {e}")
+        # Đánh dấu tin đã được gửi
+        await mark_sent(news_data.get('id', '') or news_data.get('link', ''))
             
         # Gửi tin cho tất cả người dùng
         sent_count = 0
@@ -1064,6 +1058,66 @@ async def view_keywords_command(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     await update.message.reply_text(message, parse_mode='Markdown')
+
+async def set_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+        )
+        return
+
+    global additional_keywords
+    if not context.args:
+        await update.message.reply_text(
+            "✏️ Vui lòng nhập từ khóa bạn muốn thêm. Ví dụ: `/set_keywords bitcoin, eth`"
+        )
+        return
+
+    new_keywords = [normalize_text(kw.strip()) for kw in ' '.join(context.args).split(',') if kw.strip()]
+    
+    if not new_keywords:
+        await update.message.reply_text("⚠️ Không có từ khóa hợp lệ nào được cung cấp.")
+        return
+
+    added_count = 0
+    for kw in new_keywords:
+        if kw not in additional_keywords:
+            additional_keywords.append(kw)
+            added_count += 1
+    
+    if added_count > 0:
+        # Save to Redis
+        await redis_client.set("additional_keywords", pickle.dumps(additional_keywords))
+        await update.message.reply_text(
+            f"✅ Đã thêm {added_count} từ khóa mới. Hiện có {len(additional_keywords)} từ khóa bổ sung.\n"
+            "Gõ /keywords để xem danh sách đầy đủ."
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ Các từ khóa bạn nhập đã có sẵn hoặc không hợp lệ."
+        )
+
+async def clear_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await is_user_approved(user_id):
+        await update.message.reply_text(
+            "❌ Bạn chưa được phê duyệt để sử dụng bot. Gõ /register để đăng ký."
+        )
+        return
+
+    global additional_keywords
+    if not additional_keywords:
+        await update.message.reply_text("ℹ️ Hiện không có từ khóa bổ sung nào để xóa.")
+        return
+        
+    additional_keywords.clear()
+    # Save to Redis
+    await redis_client.delete("additional_keywords")
+    await update.message.reply_text(
+        "🗑️ Đã xóa tất cả từ khóa bổ sung. Bot sẽ chỉ sử dụng danh sách từ khóa mặc định.\n"
+        "Gõ /keywords để xem lại."
+    )
 
 def main():
     global application, shutdown_flag
