@@ -74,14 +74,19 @@ class Config:
         "https://news.google.com/rss/search?q=site:reuters.com+economy+OR+policy&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:theguardian.com+world+OR+politics&hl=vi&gl=VN&ceid=VN:vi",
     ]
-    REDIS_TTL = int(os.getenv("REDIS_TTL", "21600"))  # 6h
+    REDIS_TTL = int(os.getenv("REDIS_TTL", "60000"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
     HOURLY_JOB_INTERVAL = int(os.getenv("HOURLY_JOB_INTERVAL", "500"))  # ... phút/lần
     FETCH_LIMIT_DAYS = int(os.getenv("FETCH_LIMIT_DAYS", "1"))  # Chỉ lấy tin 1 ngày gần nhất 
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))  # Số lần thử lại khi feed lỗi
     MAX_NEWS_PER_CYCLE = int(os.getenv("MAX_NEWS_PER_CYCLE", "1"))  # Tối đa 1 tin mỗi lần
     TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')  # Timezone chuẩn cho Việt Nam
-    DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.82"))  # Ngưỡng để xác định tin trùng lặp
+    
+    # Cấu hình phát hiện tin trùng lặp - nâng cấp
+    DUPLICATE_THRESHOLD = float(os.getenv("DUPLICATE_THRESHOLD", "0.65"))  # Điều chỉnh ngưỡng phát hiện trùng lặp nội dung
+    TITLE_SIMILARITY_THRESHOLD = float(os.getenv("TITLE_SIMILARITY_THRESHOLD", "0.92"))  # Ngưỡng phát hiện tiêu đề tương tự
+    LOG_SIMILARITY_DETAILS = os.getenv("LOG_SIMILARITY_DETAILS", "False").lower() == "true"  # Bật/tắt log chi tiết về similarity
+    
     RECENT_NEWS_DAYS = int(os.getenv("RECENT_NEWS_DAYS", "2"))  # Số ngày để lấy tin gần đây để so sánh
     
     # Cấu hình phát hiện tin nóng
@@ -648,16 +653,29 @@ async def mark_hash_sent(content_hash):
     await redis_client.sadd("sent_hashes", content_hash)
     await redis_client.expire("sent_hashes", Config.REDIS_TTL)
 
-def is_similar_title(new_title, recent_titles, threshold=0.92):
+def is_similar_title(new_title, recent_titles, threshold=None):
     """So sánh tiêu đề mới với các tiêu đề cũ, nếu similarity > threshold thì coi là trùng"""
     if not recent_titles:
         return False
+        
+    # Sử dụng ngưỡng từ Config nếu không được chỉ định
+    if threshold is None:
+        threshold = Config.TITLE_SIMILARITY_THRESHOLD
+        
     try:
         titles = [new_title] + recent_titles
         vectorizer = TfidfVectorizer().fit_transform(titles)
         vectors = vectorizer.toarray()
         sim_scores = cosine_similarity([vectors[0]], vectors[1:])[0]
         max_sim = max(sim_scores) if len(sim_scores) > 0 else 0
+        
+        # Ghi log chi tiết nếu được cấu hình
+        if Config.LOG_SIMILARITY_DETAILS and max_sim > 0.6:
+            max_idx = sim_scores.argmax() if len(sim_scores) > 0 else -1
+            similar_title = recent_titles[max_idx] if max_idx >= 0 else "N/A"
+            logger.info(f"Similarity tiêu đề: {max_sim:.2f} (ngưỡng: {threshold:.2f})")
+            logger.debug(f"Tiêu đề mới: {new_title[:30]}... | Tiêu đề tương tự: {similar_title[:30]}...")
+            
         return max_sim > threshold
     except Exception as e:
         logger.error(f"Lỗi khi so sánh tiêu đề tương tự: {e}")
@@ -665,21 +683,46 @@ def is_similar_title(new_title, recent_titles, threshold=0.92):
 
 # --- News Duplication Detection ---
 def is_duplicate_by_content(new_text, recent_texts, threshold=Config.DUPLICATE_THRESHOLD):
-    """Phát hiện tin trùng lặp bằng TF-IDF và Cosine Similarity"""
+    """
+    Phát hiện tin trùng lặp bằng TF-IDF và Cosine Similarity
+    Nâng cấp:
+    - Sử dụng ngram từ 1-3 để bắt cụm từ dài hơn
+    - Loại bỏ stopwords tiếng Việt
+    - Tối ưu vector hóa
+    - Phát hiện chính xác hơn các tin có cùng nội dung nhưng khác nguồn
+    """
     if not recent_texts:
         return False
     
     try:
+        # Danh sách stopwords tiếng Việt cơ bản
+        vn_stopwords = {
+            "và", "là", "của", "có", "được", "trong", "cho", "không", "đã", "với", "được", "này",
+            "đến", "từ", "khi", "như", "người", "những", "sẽ", "vào", "về", "còn", "bị", "theo",
+            "để", "tại", "nhưng", "ra", "nên", "một", "các", "cũng", "đang", "tới", "trên", "tôi",
+            "bạn", "chúng", "rằng", "thì", "đó", "làm", "nếu", "nói", "bởi", "lên", "khác", "họ"
+        }
+        
         # Thêm tin mới vào đầu danh sách để vector hóa
         texts = [new_text] + recent_texts
         
-        # Tính vector TF-IDF
+        # Tiền xử lý để loại bỏ nhiễu và giữ lại nội dung quan trọng
+        # Đây là bước quan trọng để phát hiện tin cùng nội dung từ các nguồn khác nhau
+        processed_texts = []
+        for text in texts:
+            # Chuẩn hóa tin, chỉ giữ từ khóa chính
+            words = text.lower().split()
+            words = [w for w in words if w not in vn_stopwords and len(w) > 1]
+            processed_texts.append(' '.join(words))
+        
+        # Tính vector TF-IDF, dùng ngram từ 1-3 để bắt được cụm từ có ý nghĩa
         vectorizer = TfidfVectorizer(
-            lowercase=True, 
-            stop_words="english",
-            ngram_range=(1, 2),
-            min_df=1
-        ).fit_transform(texts)
+            lowercase=True,
+            stop_words="english", # Vẫn giữ cho các từ tiếng Anh
+            ngram_range=(1, 3),   # Nâng lên (1, 3) để bắt cụm từ dài hơn
+            min_df=1,
+            max_features=10000    # Giới hạn số lượng đặc trưng để tăng hiệu suất
+        ).fit_transform(processed_texts)
         
         # Chuyển sang mảng để so sánh
         vectors = vectorizer.toarray()
@@ -692,7 +735,10 @@ def is_duplicate_by_content(new_text, recent_texts, threshold=Config.DUPLICATE_T
         is_duplicate = max_similarity > threshold
         
         if is_duplicate:
+            max_idx = sim_scores.argmax() if len(sim_scores) > 0 else -1
+            similar_text = recent_texts[max_idx] if max_idx >= 0 else "N/A"
             logger.info(f"Phát hiện tin trùng lặp! Similarity: {max_similarity:.2f}, Threshold: {threshold}")
+            logger.debug(f"Tin mới: {new_text[:50]}... | Tin trùng: {similar_text[:50]}...")
         
         return is_duplicate
     except Exception as e:
@@ -711,6 +757,31 @@ async def init_redis():
         if keywords_data:
             additional_keywords = pickle.loads(keywords_data)
             logger.info(f"Loaded {len(additional_keywords)} additional keywords from Redis")
+        
+        # Load duplicate detection settings
+        dup_threshold = await redis_client.get("duplicate_threshold")
+        if dup_threshold:
+            try:
+                Config.DUPLICATE_THRESHOLD = float(dup_threshold.decode())
+                logger.info(f"Loaded duplicate threshold: {Config.DUPLICATE_THRESHOLD}")
+            except (ValueError, AttributeError) as e:
+                logger.warning(f"Failed to load duplicate threshold: {e}")
+                
+        title_threshold = await redis_client.get("title_threshold")
+        if title_threshold:
+            try:
+                Config.TITLE_SIMILARITY_THRESHOLD = float(title_threshold.decode())
+                logger.info(f"Loaded title similarity threshold: {Config.TITLE_SIMILARITY_THRESHOLD}")
+            except (ValueError, AttributeError) as e:
+                logger.warning(f"Failed to load title threshold: {e}")
+                
+        log_similarity = await redis_client.get("log_similarity_details")
+        if log_similarity:
+            try:
+                Config.LOG_SIMILARITY_DETAILS = log_similarity.decode().lower() == "true"
+                logger.info(f"Loaded similarity logging setting: {Config.LOG_SIMILARITY_DETAILS}")
+            except AttributeError as e:
+                logger.warning(f"Failed to load similarity logging setting: {e}")
         
         logger.info("Redis initialized successfully")
         return True
@@ -804,7 +875,8 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
     Job chạy mỗi 10 phút để quét 1 RSS, lọc tin và đẩy vào queue (luân phiên từng nguồn).
-    Nâng cấp: chỉ lấy tin trong ngày, lọc trùng tiêu đề đã gửi, chuẩn hóa nội dung khi so sánh trùng lặp, lọc hash nội dung, lọc tiêu đề tương tự.
+    Nâng cấp: chỉ lấy tin trong ngày, lọc trùng tiêu đề đã gửi, chuẩn hóa nội dung khi so sánh trùng lặp, 
+    lọc hash nội dung, lọc tiêu đề tương tự, lọc nội dung tương tự từ các nguồn khác nhau.
     """
     try:
         logger.info("Đang quét 1 RSS và cache tin mới...")
@@ -814,6 +886,7 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
         recent_titles = await get_recent_titles(limit=200)
         queued_count = 0
         skipped_count = 0
+        duplicate_content_count = 0
         hot_news_count = 0
         feeds = Config.FEED_URLS
         feed_idx = await get_current_feed_index()
@@ -828,6 +901,7 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                     continue
                 entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
                 normalized_title = await normalize_title(getattr(entry, 'title', ''))
+                
                 # 1. Lọc hash nội dung
                 entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
                 entry_text_norm = normalize_text(entry_text)
@@ -835,12 +909,23 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if await is_hash_sent(content_hash):
                     skipped_count += 1
                     continue
+                    
                 # 2. Lọc tiêu đề tương tự
-                if is_similar_title(normalized_title, recent_titles, threshold=0.92):
+                if is_similar_title(normalized_title, recent_titles, threshold=Config.TITLE_SIMILARITY_THRESHOLD):
                     skipped_count += 1
                     continue
+                
+                # 3. Nâng cấp: Lọc tin có nội dung tương tự từ các nguồn khác nhau
+                # Chuẩn bị nội dung để so sánh
+                prepared_content = normalize_text(f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}")
+                if is_duplicate_by_content(prepared_content, recent_news_texts, threshold=Config.DUPLICATE_THRESHOLD):
+                    logger.info(f"Phát hiện tin trùng lặp nội dung từ nguồn khác nhau: {getattr(entry, 'title', '')[:50]}...")
+                    duplicate_content_count += 1
+                    continue
+                
                 recent_titles.append(normalized_title)
-                # 3. Lọc tiêu đề đã gửi tuyệt đối
+                
+                # 4. Lọc tiêu đề đã gửi tuyệt đối
                 if await is_title_sent(normalized_title):
                     skipped_count += 1
                     continue
@@ -850,7 +935,11 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if await is_sent(entry_id):
                     skipped_count += 1
                     continue
+                
+                # Thêm vào danh sách các nội dung tin gần đây để so sánh cho tin sau
                 recent_news_texts.append(entry_text_norm)
+                
+                # Xác định loại tin & lưu vào queue
                 is_hot = is_hot_news_simple(entry)
                 news_data = {
                     "id": entry_id,
@@ -877,7 +966,7 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
         hot_queue_len = await redis_client.llen("hot_news_queue")
         normal_queue_len = await redis_client.llen("news_queue")
         logger.info(f"Quét RSS hoàn tất: Đã cache {queued_count} tin mới ({hot_news_count} tin nóng), "
-                   f"bỏ qua {skipped_count} tin trùng lặp. "
+                   f"bỏ qua {skipped_count} tin trùng lặp thông thường, {duplicate_content_count} tin trùng nội dung. "
                    f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
         if queued_count == 0:
             logger.info("Không có tin mới, chuyển sang feed tiếp theo và sẽ thử sau 1 phút.")
@@ -1024,7 +1113,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    user_id = update.effective_user.id
+    is_admin = user_id == Config.ADMIN_ID
+    
+    basic_commands = (
         "Các lệnh hỗ trợ:\n"
         "/start - Bắt đầu\n"
         "/help - Hướng dẫn\n"
@@ -1033,6 +1125,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/set_keywords - Thêm từ khóa lọc tin\n"
         "/clear_keywords - Xóa từ khóa bổ sung"
     )
+    
+    if is_admin:
+        admin_commands = (
+            "\n\nLệnh dành riêng cho admin:\n"
+            "/check_dup_settings - Kiểm tra cài đặt lọc tin trùng\n"
+            "/set_dup_threshold - Điều chỉnh ngưỡng phát hiện nội dung trùng\n"
+            "/set_title_threshold - Điều chỉnh ngưỡng phát hiện tiêu đề tương tự\n"
+            "/toggle_sim_log - Bật/tắt log chi tiết về similarity"
+        )
+        await update.message.reply_text(basic_commands + admin_commands)
+    else:
+        await update.message.reply_text(basic_commands)
 
 async def view_keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1122,6 +1226,106 @@ async def clear_keywords_command(update: Update, context: ContextTypes.DEFAULT_T
         "Gõ /keywords để xem lại."
     )
 
+@admin_only
+async def set_duplicate_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin command to set the duplicate detection threshold without restarting the bot
+    Usage: /set_dup_threshold 0.65
+    """
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "❌ Cú pháp sai. Sử dụng: `/set_dup_threshold 0.65`\n"
+            "Giá trị từ 0.0 đến 1.0, càng thấp càng nhạy với việc phát hiện trùng lặp."
+        )
+        return
+        
+    try:
+        threshold = float(context.args[0])
+        if threshold < 0.0 or threshold > 1.0:
+            await update.message.reply_text("❌ Giá trị phải từ 0.0 đến 1.0")
+            return
+            
+        # Cập nhật giá trị trong Config
+        Config.DUPLICATE_THRESHOLD = threshold
+        
+        # Lưu vào Redis để giữ giá trị khi khởi động lại
+        await redis_client.set("duplicate_threshold", str(threshold))
+        
+        await update.message.reply_text(
+            f"✅ Đã cập nhật ngưỡng phát hiện tin trùng lặp nội dung: {threshold}\n"
+            f"Áp dụng ngay cho các lần quét RSS tiếp theo."
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Giá trị không hợp lệ. Vui lòng nhập số từ 0.0 đến 1.0")
+
+@admin_only
+async def toggle_similarity_logging(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin command to toggle detailed similarity logging
+    Usage: /toggle_sim_log
+    """
+    # Toggle giá trị
+    Config.LOG_SIMILARITY_DETAILS = not Config.LOG_SIMILARITY_DETAILS
+    
+    # Lưu vào Redis
+    await redis_client.set("log_similarity_details", str(Config.LOG_SIMILARITY_DETAILS).lower())
+    
+    status = "bật" if Config.LOG_SIMILARITY_DETAILS else "tắt"
+    await update.message.reply_text(
+        f"✅ Đã {status} ghi log chi tiết về phát hiện tin trùng lặp.\n"
+        "Xem log hệ thống để theo dõi thông tin chi tiết về similarity."
+    )
+
+@admin_only
+async def check_dup_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin command to check current duplicate detection settings
+    Usage: /check_dup_settings
+    """
+    settings = (
+        f"📊 *Cài đặt phát hiện tin trùng lặp*\n\n"
+        f"• Ngưỡng tin trùng nội dung (DUPLICATE_THRESHOLD): {Config.DUPLICATE_THRESHOLD}\n"
+        f"• Ngưỡng tiêu đề tương tự (TITLE_SIMILARITY_THRESHOLD): {Config.TITLE_SIMILARITY_THRESHOLD}\n"
+        f"• Ghi log chi tiết: {'Bật' if Config.LOG_SIMILARITY_DETAILS else 'Tắt'}\n\n"
+        f"Lệnh điều chỉnh:\n"
+        f"• /set_dup_threshold [0.0-1.0] - Đặt ngưỡng phát hiện nội dung trùng lặp\n"
+        f"• /set_title_threshold [0.0-1.0] - Đặt ngưỡng phát hiện tiêu đề tương tự\n"
+        f"• /toggle_sim_log - Bật/tắt log chi tiết về similarity"
+    )
+    await update.message.reply_text(settings, parse_mode='Markdown')
+
+@admin_only
+async def set_title_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin command to set the title similarity threshold
+    Usage: /set_title_threshold 0.92
+    """
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "❌ Cú pháp sai. Sử dụng: `/set_title_threshold 0.92`\n"
+            "Giá trị từ 0.0 đến 1.0, càng cao càng yêu cầu tiêu đề giống nhau mới coi là trùng."
+        )
+        return
+        
+    try:
+        threshold = float(context.args[0])
+        if threshold < 0.0 or threshold > 1.0:
+            await update.message.reply_text("❌ Giá trị phải từ 0.0 đến 1.0")
+            return
+            
+        # Cập nhật giá trị trong Config
+        Config.TITLE_SIMILARITY_THRESHOLD = threshold
+        
+        # Lưu vào Redis để giữ giá trị khi khởi động lại
+        await redis_client.set("title_threshold", str(threshold))
+        
+        await update.message.reply_text(
+            f"✅ Đã cập nhật ngưỡng phát hiện tiêu đề tương tự: {threshold}\n"
+            f"Áp dụng ngay cho các lần quét RSS tiếp theo."
+        )
+    except ValueError:
+        await update.message.reply_text("❌ Giá trị không hợp lệ. Vui lòng nhập số từ 0.0 đến 1.0")
+
 def main():
     global application, shutdown_flag
     
@@ -1138,6 +1342,33 @@ def main():
         # Initialize database and Redis
         loop = asyncio.get_event_loop()
         redis_ok = loop.run_until_complete(init_redis())
+        
+        # Tải cài đặt ngưỡng từ Redis nếu có
+        if redis_ok:
+            dup_threshold = loop.run_until_complete(redis_client.get("duplicate_threshold"))
+            if dup_threshold:
+                try:
+                    Config.DUPLICATE_THRESHOLD = float(dup_threshold.decode())
+                except (ValueError, AttributeError):
+                    pass
+                    
+            title_threshold = loop.run_until_complete(redis_client.get("title_threshold"))
+            if title_threshold:
+                try:
+                    Config.TITLE_SIMILARITY_THRESHOLD = float(title_threshold.decode())
+                except (ValueError, AttributeError):
+                    pass
+                    
+            log_similarity = loop.run_until_complete(redis_client.get("log_similarity_details"))
+            if log_similarity:
+                try:
+                    Config.LOG_SIMILARITY_DETAILS = log_similarity.decode().lower() == "true"
+                except (AttributeError):
+                    pass
+                    
+            logger.info(f"Cài đặt lọc tin trùng: DUPLICATE_THRESHOLD={Config.DUPLICATE_THRESHOLD}, " 
+                      f"TITLE_SIMILARITY_THRESHOLD={Config.TITLE_SIMILARITY_THRESHOLD}, "
+                      f"LOG_SIMILARITY_DETAILS={Config.LOG_SIMILARITY_DETAILS}")
 
         if not redis_ok:
             logger.error("Failed to initialize Redis. Exiting.")
@@ -1153,6 +1384,12 @@ def main():
         application.add_handler(CommandHandler("keywords", view_keywords_command))
         application.add_handler(CommandHandler("set_keywords", set_keywords_command))
         application.add_handler(CommandHandler("clear_keywords", clear_keywords_command))
+        
+        # Thêm lệnh quản lý cài đặt lọc tin trùng
+        application.add_handler(CommandHandler("check_dup_settings", check_dup_settings))
+        application.add_handler(CommandHandler("set_dup_threshold", set_duplicate_threshold))
+        application.add_handler(CommandHandler("set_title_threshold", set_title_threshold))
+        application.add_handler(CommandHandler("toggle_sim_log", toggle_similarity_logging))
 
         # Add callback query handler
         application.add_handler(CallbackQueryHandler(button_callback))
