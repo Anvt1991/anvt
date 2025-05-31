@@ -98,7 +98,7 @@ class Config:
     HOT_NEWS_KEYWORDS = [
         "khẩn cấp", "tin nóng", "breaking", "khủng hoảng", "crash", "sập", "bùng nổ", "tin nhanh chứng khoán", "trước giờ giao dịch", 
         "shock", "ảnh hưởng lớn", "thảm khốc", "thảm họa", "market crash", "sell off", "VNINDEX", "vnindex", "Trump", "fed", "FED",
-        "rơi mạnh", "tăng mạnh", "giảm mạnh", "sụp đổ", "bất thường", "emergency", 
+        "rơi mạnh", "tăng mạnh", "giảm mạnh", "sụp đổ", "bất thường", "emergency", "chứng khoán",
         "urgent", "alert", "cảnh báo", "đột biến", "lịch sử", "kỷ lục", "cao nhất"
     ]
     HOT_NEWS_IMPACT_PHRASES = [
@@ -480,11 +480,24 @@ async def parse_feed(url):
 def extract_image_url(entry):
     """Extract image URL from entry if available"""
     try:
+        # Ưu tiên lấy từ enclosures (chuẩn RSS quốc tế)
+        if hasattr(entry, 'enclosures') and entry.enclosures:
+            for enclosure in entry.enclosures:
+                if hasattr(enclosure, 'type') and 'image' in enclosure.type:
+                    if hasattr(enclosure, 'href'):
+                        return enclosure.href
+                    elif 'url' in enclosure:
+                        return enclosure['url']
+        # Thử lấy từ media_thumbnail
+        if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+            thumb = entry.media_thumbnail[0]
+            if 'url' in thumb:
+                return thumb['url']
+        # media_content (cũ)
         if 'media_content' in entry and entry.media_content:
             for media in entry.media_content:
-                if 'url' in media:
+                if 'url' in media and ('type' not in media or 'image' in media.get('type', '')):
                     return media['url']
-        
         # Try finding image in content
         if 'content' in entry and entry.content:
             for content in entry.content:
@@ -492,7 +505,6 @@ def extract_image_url(entry):
                     match = re.search(r'<img[^>]+src="([^">]+)"', content['value'])
                     if match:
                         return match.group(1)
-        
         # Try finding image in summary
         if hasattr(entry, 'summary'):
             match = re.search(r'<img[^>]+src="([^">]+)"', entry.summary)
@@ -500,16 +512,25 @@ def extract_image_url(entry):
                 return match.group(1)
     except Exception as e:
         logger.warning(f"Lỗi khi extract ảnh: {e}")
-    
     return None
     
 def extract_video_url(entry):
     """Extract video URL from entry if available"""
     try:
-        # RSS chuẩn: media_content có type video
+        # Ưu tiên lấy từ enclosures (chuẩn RSS quốc tế)
+        if hasattr(entry, 'enclosures') and entry.enclosures:
+            for enclosure in entry.enclosures:
+                if hasattr(enclosure, 'type') and 'video' in enclosure.type:
+                    if hasattr(enclosure, 'href'):
+                        return enclosure.href
+                    elif 'url' in enclosure:
+                        return enclosure['url']
+        # media_content có type video
         if 'media_content' in entry and entry.media_content:
             for media in entry.media_content:
                 if 'url' in media and 'type' in media and 'video' in media['type']:
+                    return media['url']
+                if 'url' in media and media['url'].endswith('.mp4'):
                     return media['url']
         # Tìm video trong content (thường là <video src=...> hoặc <source src=... type=...>)
         if 'content' in entry and entry.content:
@@ -529,11 +550,6 @@ def extract_video_url(entry):
             match2 = re.search(r'<source[^>]+src="([^"]+)"[^>]+type="video', entry.summary)
             if match2:
                 return match2.group(1)
-        # Một số feed nhúng mp4 trực tiếp
-        if 'media_content' in entry and entry.media_content:
-            for media in entry.media_content:
-                if 'url' in media and media['url'].endswith('.mp4'):
-                    return media['url']
     except Exception as e:
         logger.warning(f"Lỗi khi extract video: {e}")
     return None
@@ -986,7 +1002,7 @@ async def process_and_send_news(news_data):
 
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
-    Quét tất cả RSS trong FEED_URLS mỗi 5 phút, lọc và cache tin mới. Tin nóng chỉ gửi nếu là mới nhất.
+    Quét tất cả RSS trong FEED_URLS mỗi 5 phút, lọc và cache tin mới. Tin nóng chỉ gửi nếu là mới nhất và chưa từng gửi.
     """
     try:
         logger.info("Đang quét tất cả RSS và cache tin mới...")
@@ -1064,15 +1080,16 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                         "is_hot": is_hot,
                     }
                     if is_hot:
-                        # Chỉ gửi nếu published mới hơn latest_hot_news_published
-                        if published_dt and (not latest_hot_news_published or published_dt > latest_hot_news_published):
+                        # Chỉ gửi nếu published mới hơn latest_hot_news_published VÀ chưa từng gửi (id/hash/title)
+                        already_sent = await is_sent(entry_id) or await is_hash_sent(content_hash) or await is_title_sent(normalized_title)
+                        if published_dt and (not latest_hot_news_published or published_dt > latest_hot_news_published) and not already_sent:
                             await redis_client.rpush("hot_news_queue", json.dumps(news_data))
                             hot_news_count += 1
                             await process_and_send_news(news_data)
                             # Cập nhật latest_hot_news_published
                             await redis_client.set("latest_hot_news_published", published_dt.isoformat())
                         else:
-                            logger.info(f"Bỏ qua tin nóng cũ: {getattr(entry, 'title', '')[:50]}...")
+                            logger.info(f"Bỏ qua tin nóng cũ hoặc đã gửi: {getattr(entry, 'title', '')[:50]}...")
                     else:
                         await redis_client.rpush("news_queue", json.dumps(news_data))
                     await redis_client.sadd("news_queue_ids", entry_id)
