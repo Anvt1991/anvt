@@ -29,6 +29,9 @@ import json
 import signal
 import sys
 import hashlib
+# Thêm import cho phát hiện ngôn ngữ và dịch
+from langdetect import detect
+from googletrans import Translator
 
 # --- 1. Config & setup ---
 class Config:
@@ -73,6 +76,11 @@ class Config:
         "https://news.google.com/rss/search?q=market+crash&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:reuters.com+economy+OR+policy&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:theguardian.com+world+OR+politics&hl=vi&gl=VN&ceid=VN:vi",
+        # --- Thêm nguồn PiQ và CNWire ---
+        # PiQ Twitter/X (dạng RSS qua Nitter hoặc dịch vụ RSS Twitter nếu có, ví dụ nitter.net)
+        "https://nitter.net/piqsuite/rss",  # Nếu không dùng được, cần thay bằng dịch vụ RSS Twitter khác
+        # CNWire (Canada Newswire RSS)
+        "https://www.newswire.ca/news-releases/news-releases-rss-feed-en.xml",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "60000"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
@@ -872,6 +880,67 @@ async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
 
 # --- Các job định kỳ mới ---
 
+async def process_and_send_news(news_data):
+    """
+    Xử lý (AI, dịch, đánh dấu đã gửi) và gửi tin cho tất cả user đã duyệt. Dùng cho cả gửi định kỳ và gửi ngay lập tức.
+    """
+    try:
+        # Lấy danh sách người dùng đã được phê duyệt
+        approved_users_list = [int(uid) for uid in await redis_client.smembers("approved_users")]
+        if Config.ADMIN_ID not in approved_users_list:
+            approved_users_list.append(Config.ADMIN_ID)
+        if not approved_users_list:
+            logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
+            return
+
+        # Phân tích tin tức bằng AI
+        domain = urlparse(news_data['link']).netloc if 'link' in news_data else 'N/A'
+        prompt = f"""
+        Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.
+        \nTiêu đề: {news_data.get('title', 'Không có tiêu đề')}
+        Tóm tắt: {news_data.get('summary', 'Không có tóm tắt')}
+        Nguồn: {domain}
+        \n1. Tóm tắt ngắn gọn nội dung 
+        2. Đánh giá tác động ( 2-3 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
+        3. Mã/ngành liên quan
+        """
+        try:
+            ai_summary = await analyze_news(prompt)
+        except Exception as e:
+            logger.error(f"Lỗi khi phân tích tin bằng AI: {e}")
+            ai_summary = news_data.get('summary', 'Không có phân tích nào.')
+
+        # Nếu là tiếng Anh thì dịch sang tiếng Việt
+        lang = detect_language(news_data.get('title', '') + ' ' + news_data.get('summary', ''))
+        if lang == 'en':
+            ai_summary = await translate_to_vietnamese(ai_summary)
+
+        # Tạo đối tượng entry từ news_data để truyền vào hàm gửi
+        class EntryObject:
+            pass
+        entry = EntryObject()
+        for key, value in news_data.items():
+            setattr(entry, key, value)
+
+        # Xử lý sentiment nếu cần
+        is_hot = news_data.get('is_hot', False)
+        sentiment = await extract_sentiment(ai_summary) if is_hot else 'Trung lập'
+
+        # Đánh dấu tin đã được gửi
+        await mark_sent(news_data.get('id', '') or news_data.get('link', ''))
+
+        # Gửi tin cho tất cả người dùng
+        sent_count = 0
+        for user_id in approved_users_list:
+            try:
+                await send_message_to_user(user_id, ai_summary, entry, news_data.get('is_hot', False))
+                sent_count += 1
+            except Exception as e:
+                logger.error(f"Lỗi khi gửi tin cho user {user_id}: {e}")
+        logger.info(f"Đã gửi tin '{news_data.get('title', '')[:30]}...' cho {sent_count}/{len(approved_users_list)} người dùng.")
+    except Exception as e:
+        logger.error(f"Lỗi trong process_and_send_news: {e}")
+
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
     Job chạy mỗi 10 phút để quét 1 RSS, lọc tin và đẩy vào queue (luân phiên từng nguồn).
@@ -901,7 +970,6 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                     continue
                 entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
                 normalized_title = await normalize_title(getattr(entry, 'title', ''))
-                
                 # 1. Lọc hash nội dung
                 entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
                 entry_text_norm = normalize_text(entry_text)
@@ -909,22 +977,17 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if await is_hash_sent(content_hash):
                     skipped_count += 1
                     continue
-                    
                 # 2. Lọc tiêu đề tương tự
                 if is_similar_title(normalized_title, recent_titles, threshold=Config.TITLE_SIMILARITY_THRESHOLD):
                     skipped_count += 1
                     continue
-                
                 # 3. Nâng cấp: Lọc tin có nội dung tương tự từ các nguồn khác nhau
-                # Chuẩn bị nội dung để so sánh
                 prepared_content = normalize_text(f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}")
                 if is_duplicate_by_content(prepared_content, recent_news_texts, threshold=Config.DUPLICATE_THRESHOLD):
                     logger.info(f"Phát hiện tin trùng lặp nội dung từ nguồn khác nhau: {getattr(entry, 'title', '')[:50]}...")
                     duplicate_content_count += 1
                     continue
-                
                 recent_titles.append(normalized_title)
-                
                 # 4. Lọc tiêu đề đã gửi tuyệt đối
                 if await is_title_sent(normalized_title):
                     skipped_count += 1
@@ -935,10 +998,8 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if await is_sent(entry_id):
                     skipped_count += 1
                     continue
-                
                 # Thêm vào danh sách các nội dung tin gần đây để so sánh cho tin sau
                 recent_news_texts.append(entry_text_norm)
-                
                 # Xác định loại tin & lưu vào queue
                 is_hot = is_hot_news_simple(entry)
                 news_data = {
@@ -952,6 +1013,8 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                 if is_hot:
                     await redis_client.rpush("hot_news_queue", json.dumps(news_data))
                     hot_news_count += 1
+                    # Gửi ngay lập tức tin nóng
+                    await process_and_send_news(news_data)
                 else:
                     await redis_client.rpush("news_queue", json.dumps(news_data))
                 await redis_client.sadd("news_queue_ids", entry_id)
@@ -983,74 +1046,37 @@ async def send_news_from_queue(context: ContextTypes.DEFAULT_TYPE):
     Ưu tiên tin nóng trước.
     """
     try:
-        # Lấy danh sách người dùng đã được phê duyệt
-        approved_users_list = [int(uid) for uid in await redis_client.smembers("approved_users")]
-        if Config.ADMIN_ID not in approved_users_list:
-            approved_users_list.append(Config.ADMIN_ID)
-        if not approved_users_list:
-            logger.warning("Không có người dùng nào được phê duyệt để gửi tin.")
-            return
-            
         # Ưu tiên lấy tin nóng trước
         news_json = await redis_client.lpop("hot_news_queue")
         if not news_json:
             # Nếu không có tin nóng, lấy tin thường
             news_json = await redis_client.lpop("news_queue")
-            
         if not news_json:
             logger.info("Không còn tin trong cả hai queue. Đợi chu kỳ fetch tiếp theo.")
             return
-            
         # Parse JSON thành dict
         news_data = json.loads(news_json)
-        
-        # Phân tích tin tức bằng AI
-        domain = urlparse(news_data['link']).netloc if 'link' in news_data else 'N/A'
-        prompt = f"""
-        Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.
-        \nTiêu đề: {news_data.get('title', 'Không có tiêu đề')}
-        Tóm tắt: {news_data.get('summary', 'Không có tóm tắt')}
-        Nguồn: {domain}
-        \n1. Tóm tắt ngắn gọn nội dung 
-        2. Đánh giá tác động ( 2-3 câu ). Cảm xúc (Tích cực/Tiêu cực/Trung lập)
-	3. Mã/ngành liên quan
-        """
-        
-        try:
-            ai_summary = await analyze_news(prompt)
-        except Exception as e:
-            logger.error(f"Lỗi khi phân tích tin bằng AI: {e}")
-            # Nếu không phân tích được, dùng summary gốc
-            ai_summary = news_data.get('summary', 'Không có phân tích nào.')
-            
-        # Tạo đối tượng entry từ news_data để truyền vào hàm gửi
-        class EntryObject:
-            pass
-            
-        entry = EntryObject()
-        for key, value in news_data.items():
-            setattr(entry, key, value)
-            
-        # Xử lý sentiment nếu cần
-        is_hot = news_data.get('is_hot', False)
-        sentiment = await extract_sentiment(ai_summary) if is_hot else 'Trung lập'
-            
-        # Đánh dấu tin đã được gửi
-        await mark_sent(news_data.get('id', '') or news_data.get('link', ''))
-            
-        # Gửi tin cho tất cả người dùng
-        sent_count = 0
-        for user_id in approved_users_list:
-            try:
-                await send_message_to_user(user_id, ai_summary, entry, news_data.get('is_hot', False))
-                sent_count += 1
-            except Exception as e:
-                logger.error(f"Lỗi khi gửi tin cho user {user_id}: {e}")
-                
-        logger.info(f"Đã gửi tin '{news_data.get('title', '')[:30]}...' cho {sent_count}/{len(approved_users_list)} người dùng.")
-        
+        await process_and_send_news(news_data)
     except Exception as e:
         logger.error(f"Lỗi trong job send_news_from_queue: {e}")
+
+# Hàm phát hiện ngôn ngữ
+def detect_language(text):
+    try:
+        return detect(text)
+    except Exception:
+        return "unknown"
+
+# Hàm dịch sang tiếng Việt
+async def translate_to_vietnamese(text):
+    try:
+        translator = Translator()
+        # googletrans không async, nên dùng to_thread
+        result = await asyncio.to_thread(translator.translate, text, dest='vi')
+        return result.text
+    except Exception as e:
+        logging.error(f"Lỗi khi dịch sang tiếng Việt: {e}")
+        return text
 
 # Function to handle callback queries
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
