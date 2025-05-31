@@ -47,7 +47,7 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "deepseek-r1-distill-llama-70b")
     FEED_URLS = [
-        # Google News theo từ khóa
+        # Google News theo từ khóa (giữ nguyên các nguồn Việt Nam)
         "https://news.google.com/rss/search?q=kinh+t%E1%BA%BF&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=ch%E1%BB%A9ng+kho%C3%A1n&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=v%C4%A9+m%C3%B4&hl=vi&gl=VN&ceid=VN:vi",
@@ -66,21 +66,18 @@ class Config:
         "https://news.google.com/rss/search?q=site:bloomberg.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:ft.com+stock+OR+market+OR+finance&hl=vi&gl=VN&ceid=VN:vi",
         # Bổ sung các nguồn Google News RSS tối ưu
-        # Chứng khoán Việt Nam từ các báo lớn
         "https://news.google.com/rss/search?q=chứng+khoán+site:cafef.vn&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=chứng+khoán+site:vnexpress.net&hl=vi&gl=VN&ceid=VN:vi",
-        # Chính sách vĩ mô
         "https://news.google.com/rss/search?q=chính+sách+vĩ+mô&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=lãi+suất+site:sbv.gov.vn&hl=vi&gl=VN&ceid=VN:vi",
-        # Biến động thế giới, tài chính quốc tế
         "https://news.google.com/rss/search?q=market+crash&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:reuters.com+economy+OR+policy&hl=vi&gl=VN&ceid=VN:vi",
         "https://news.google.com/rss/search?q=site:theguardian.com+world+OR+politics&hl=vi&gl=VN&ceid=VN:vi",
-        # --- Thêm nguồn PiQ và CNWire ---
-        # PiQ Twitter/X (dạng RSS qua Nitter hoặc dịch vụ RSS Twitter nếu có, ví dụ nitter.net)
-        "https://nitter.net/piqsuite/rss",  # Nếu không dùng được, cần thay bằng dịch vụ RSS Twitter khác
-        # CNWire (Canada Newswire RSS)
-        "https://www.newswire.ca/news-releases/news-releases-rss-feed-en.xml",
+        # --- Các nguồn quốc tế ổn định ---
+        "https://feeds.reuters.com/reuters/topNews",
+        "https://feeds.marketwatch.com/marketwatch/topstories/",
+        "https://finance.yahoo.com/news/rssindex",
+        "https://www.bloomberg.com/feed/podcast/etf-report.xml",
     ]
     REDIS_TTL = int(os.getenv("REDIS_TTL", "60000"))  # 6h
     NEWS_JOB_INTERVAL = int(os.getenv("NEWS_JOB_INTERVAL", "800"))
@@ -138,6 +135,8 @@ class Config:
         "bull", "bear", "breakout", "margin", "room ngoại", "ETF", "IPO", "niêm yết", "phát hành", "cổ tức", "chia thưởng",
         # Sự kiện quốc tế
         "fed", "ecb", "boj", "nasdaq", "dow jones", "s&p", "nikkei", "usd", "eur", "jpy", "bitcoin", "crypto",
+        # --- Bổ sung từ khóa tiếng Anh về kinh tế, địa chính trị ---
+        "economy", "macroeconomics", "geopolitics", "geopolitical", "inflation", "interest rate", "recession", "debt ceiling", "federal reserve", "central bank", "monetary policy", "fiscal policy", "trade war", "sanctions", "supply chain", "emerging market", "developed market", "stock market", "bond market", "currency", "exchange rate", "usd", "eur", "cny", "jpy", "oil price", "energy crisis", "commodity", "gold", "crude oil", "brent", "wti", "opec", "gdp", "cpi", "pmi", "unemployment", "jobless", "stimulus", "bailout", "default", "bankruptcy", "sovereign debt", "credit rating", "imf", "world bank", "g20", "g7", "us-china", "us-eu", "russia", "ukraine", "middle east", "conflict", "war", "sanction", "tariff", "trade agreement", "globalization", "deglobalization", "supply disruption", "food crisis", "migration", "refugee", "political risk", "regime change", "election", "summit", "treaty", "alliance", "nato", "united nations", "eu", "china", "us", "usa", "europe", "asia", "africa", "latin america", "brics", "asean", "indo-pacific", "south china sea", "taiwan strait", "north korea", "iran", "israel", "palestine", "syria", "yemen", "afghanistan", "terrorism", "cybersecurity", "espionage", "intelligence", "military", "defense", "nuclear", "missile", "sanction", "diplomacy", "summit", "treaty"
     ]
 
 # Danh sách từ khóa bổ sung
