@@ -7,7 +7,7 @@ import httpx
 import redis.asyncio as aioredis
 import google.generativeai as genai
 # Nhóm import telegram
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 # Nhóm các import khác
 import re
@@ -504,6 +504,41 @@ def extract_image_url(entry):
     
     return None
     
+def extract_video_url(entry):
+    """Extract video URL from entry if available"""
+    try:
+        # RSS chuẩn: media_content có type video
+        if 'media_content' in entry and entry.media_content:
+            for media in entry.media_content:
+                if 'url' in media and 'type' in media and 'video' in media['type']:
+                    return media['url']
+        # Tìm video trong content (thường là <video src=...> hoặc <source src=... type=...>)
+        if 'content' in entry and entry.content:
+            for content in entry.content:
+                if 'value' in content:
+                    match = re.search(r'<video[^>]+src="([^"]+)"', content['value'])
+                    if match:
+                        return match.group(1)
+                    match2 = re.search(r'<source[^>]+src="([^"]+)"[^>]+type="video', content['value'])
+                    if match2:
+                        return match2.group(1)
+        # Tìm video trong summary
+        if hasattr(entry, 'summary'):
+            match = re.search(r'<video[^>]+src="([^"]+)"', entry.summary)
+            if match:
+                return match.group(1)
+            match2 = re.search(r'<source[^>]+src="([^"]+)"[^>]+type="video', entry.summary)
+            if match2:
+                return match2.group(1)
+        # Một số feed nhúng mp4 trực tiếp
+        if 'media_content' in entry and entry.media_content:
+            for media in entry.media_content:
+                if 'url' in media and media['url'].endswith('.mp4'):
+                    return media['url']
+    except Exception as e:
+        logger.warning(f"Lỗi khi extract video: {e}")
+    return None
+
 # --- Command Handler Functions ---
 
 # Admin only decorator
@@ -824,57 +859,66 @@ async def set_current_feed_index(idx):
 application = None
 
 async def send_message_to_user(user_id, message, entry=None, is_hot_news=False):
-    """Send a news message to a user"""
+    """Send a news message to a user, kèm ảnh hoặc video nếu có"""
     try:
         # Chuẩn bị nội dung tin nhắn
         title = getattr(entry, 'title', 'Không có tiêu đề')
         link = getattr(entry, 'link', '#')
-        # Lấy published date với xử lý timezone
         published = getattr(entry, 'published', None)
-        # Nếu published là string, convert sang datetime
         if isinstance(published, str):
             try:
                 published = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %Z')
-                # Đảm bảo published có timezone
                 published = ensure_timezone_aware(published)
             except ValueError:
                 try:
-                    # Thử với format khác (RSS feeds có thể khác nhau)
                     published = datetime.datetime.strptime(published, '%a, %d %b %Y %H:%M:%S %z')
                 except ValueError:
-                    # Fallback nếu parse thất bại
                     published = None
-        # Format date
         date = format_datetime(published) if published else format_datetime(None)
-        # Extract domain from link
         domain = urlparse(link).netloc
-        # Create message with emoji based on news type
         prefix = "🔥 TIN NÓNG: " if is_hot_news else "📰 TIN MỚI: "
-        # Format message
         formatted_message = (
             f"{prefix}<b>{title}</b>\n\n"
             f"<pre>{message}</pre>\n\n"
             f"<i>Nguồn: {domain} • {date}</i>\n"
             f"<a href='{link}'>Đọc chi tiết</a>"
         )
-        # Tạo nút đọc chi tiết
         keyboard = [[InlineKeyboardButton("Đọc chi tiết", url=link)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        # Get the global application's bot
         global application
         if application and application.bot:
             bot = application.bot
         else:
             from telegram import Bot
             bot = Bot(token=Config.BOT_TOKEN)
-        # Luôn gửi tin nhắn text, không gửi ảnh
-        await bot.send_message(
-            chat_id=user_id,
-            text=formatted_message,
-            reply_markup=reply_markup,
-            parse_mode='HTML',
-            disable_web_page_preview=False
-        )
+        # --- Gửi media nếu có ---
+        image_url = extract_image_url(entry)
+        video_url = extract_video_url(entry)
+        if video_url:
+            await bot.send_video(
+                chat_id=user_id,
+                video=video_url,
+                caption=formatted_message,
+                reply_markup=reply_markup,
+                parse_mode='HTML',
+                supports_streaming=True
+            )
+        elif image_url:
+            await bot.send_photo(
+                chat_id=user_id,
+                photo=image_url,
+                caption=formatted_message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        else:
+            await bot.send_message(
+                chat_id=user_id,
+                text=formatted_message,
+                reply_markup=reply_markup,
+                parse_mode='HTML',
+                disable_web_page_preview=False
+            )
     except Exception as e:
         logger.error(f"Lỗi khi gửi tin tức cho user {user_id}: {e}")
 
