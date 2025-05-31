@@ -943,100 +943,109 @@ async def process_and_send_news(news_data):
 
 async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
     """
-    Job chạy mỗi 10 phút để quét 1 RSS, lọc tin và đẩy vào queue (luân phiên từng nguồn).
-    Nâng cấp: chỉ lấy tin trong ngày, lọc trùng tiêu đề đã gửi, chuẩn hóa nội dung khi so sánh trùng lặp, 
-    lọc hash nội dung, lọc tiêu đề tương tự, lọc nội dung tương tự từ các nguồn khác nhau.
+    Quét tất cả RSS trong FEED_URLS mỗi 5 phút, lọc và cache tin mới. Tin nóng chỉ gửi nếu là mới nhất.
     """
     try:
-        logger.info("Đang quét 1 RSS và cache tin mới...")
+        logger.info("Đang quét tất cả RSS và cache tin mới...")
         recent_news_texts_raw = await get_recent_news_texts()
         recent_news_texts = [normalize_text(txt) for txt in recent_news_texts_raw]
-        # Lấy danh sách tiêu đề chuẩn hóa gần đây (giới hạn 200)
         recent_titles = await get_recent_titles(limit=200)
         queued_count = 0
         skipped_count = 0
         duplicate_content_count = 0
         hot_news_count = 0
         feeds = Config.FEED_URLS
-        feed_idx = await get_current_feed_index()
-        feed_url = feeds[feed_idx % len(feeds)]
-        logger.info(f"Quét RSS: {feed_url}")
-        entries = await parse_feed(feed_url)
-        for entry in entries:
+        # Lấy published của tin nóng mới nhất đã gửi (lưu trong Redis, key: latest_hot_news_published)
+        latest_hot_news_published = await redis_client.get("latest_hot_news_published")
+        if latest_hot_news_published:
             try:
-                if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
-                    continue
-                if not is_relevant_news_smart(entry):
-                    continue
-                entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
-                normalized_title = await normalize_title(getattr(entry, 'title', ''))
-                # 1. Lọc hash nội dung
-                entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
-                entry_text_norm = normalize_text(entry_text)
-                content_hash = hashlib.sha256(entry_text_norm.encode('utf-8')).hexdigest()
-                if await is_hash_sent(content_hash):
-                    skipped_count += 1
-                    continue
-                # 2. Lọc tiêu đề tương tự
-                if is_similar_title(normalized_title, recent_titles, threshold=Config.TITLE_SIMILARITY_THRESHOLD):
-                    skipped_count += 1
-                    continue
-                # 3. Nâng cấp: Lọc tin có nội dung tương tự từ các nguồn khác nhau
-                prepared_content = normalize_text(f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}")
-                if is_duplicate_by_content(prepared_content, recent_news_texts, threshold=Config.DUPLICATE_THRESHOLD):
-                    logger.info(f"Phát hiện tin trùng lặp nội dung từ nguồn khác nhau: {getattr(entry, 'title', '')[:50]}...")
-                    duplicate_content_count += 1
-                    continue
-                recent_titles.append(normalized_title)
-                # 4. Lọc tiêu đề đã gửi tuyệt đối
-                if await is_title_sent(normalized_title):
-                    skipped_count += 1
-                    continue
-                if await redis_client.sismember("news_queue_ids", entry_id):
-                    skipped_count += 1
-                    continue
-                if await is_sent(entry_id):
-                    skipped_count += 1
-                    continue
-                # Thêm vào danh sách các nội dung tin gần đây để so sánh cho tin sau
-                recent_news_texts.append(entry_text_norm)
-                # Xác định loại tin & lưu vào queue
-                is_hot = is_hot_news_simple(entry)
-                news_data = {
-                    "id": entry_id,
-                    "title": getattr(entry, "title", ""),
-                    "link": getattr(entry, "link", ""),
-                    "summary": getattr(entry, "summary", ""),
-                    "published": getattr(entry, "published", ""),
-                    "is_hot": is_hot,
-                }
-                if is_hot:
-                    await redis_client.rpush("hot_news_queue", json.dumps(news_data))
-                    hot_news_count += 1
-                    # Gửi ngay lập tức tin nóng
-                    await process_and_send_news(news_data)
-                else:
-                    await redis_client.rpush("news_queue", json.dumps(news_data))
-                await redis_client.sadd("news_queue_ids", entry_id)
-                await redis_client.expire("news_queue_ids", Config.REDIS_TTL)
-                await mark_title_sent(normalized_title)
-                await mark_hash_sent(content_hash)
-                queued_count += 1
-                await add_recent_title(normalized_title)
-                await add_recent_news_text(entry_text_norm)
-            except Exception as e:
-                logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
+                latest_hot_news_published = datetime.datetime.fromisoformat(latest_hot_news_published.decode())
+            except Exception:
+                latest_hot_news_published = None
+        else:
+            latest_hot_news_published = None
+        for feed_url in feeds:
+            logger.info(f"Quét RSS: {feed_url}")
+            entries = await parse_feed(feed_url)
+            for entry in entries:
+                try:
+                    if not is_recent_news(entry, days=Config.FETCH_LIMIT_DAYS):
+                        continue
+                    if not is_relevant_news_smart(entry):
+                        continue
+                    entry_id = getattr(entry, 'id', '') or getattr(entry, 'link', '')
+                    normalized_title = await normalize_title(getattr(entry, 'title', ''))
+                    entry_text = f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}"
+                    entry_text_norm = normalize_text(entry_text)
+                    content_hash = hashlib.sha256(entry_text_norm.encode('utf-8')).hexdigest()
+                    if await is_hash_sent(content_hash):
+                        skipped_count += 1
+                        continue
+                    if is_similar_title(normalized_title, recent_titles, threshold=Config.TITLE_SIMILARITY_THRESHOLD):
+                        skipped_count += 1
+                        continue
+                    prepared_content = normalize_text(f"{getattr(entry, 'title', '')} {getattr(entry, 'summary', '')}")
+                    if is_duplicate_by_content(prepared_content, recent_news_texts, threshold=Config.DUPLICATE_THRESHOLD):
+                        logger.info(f"Phát hiện tin trùng lặp nội dung từ nguồn khác nhau: {getattr(entry, 'title', '')[:50]}...")
+                        duplicate_content_count += 1
+                        continue
+                    recent_titles.append(normalized_title)
+                    if await is_title_sent(normalized_title):
+                        skipped_count += 1
+                        continue
+                    if await redis_client.sismember("news_queue_ids", entry_id):
+                        skipped_count += 1
+                        continue
+                    if await is_sent(entry_id):
+                        skipped_count += 1
+                        continue
+                    recent_news_texts.append(entry_text_norm)
+                    is_hot = is_hot_news_simple(entry)
+                    # Parse published datetime
+                    published_str = getattr(entry, "published", "")
+                    published_dt = None
+                    if published_str:
+                        try:
+                            published_dt = datetime.datetime.strptime(published_str, '%a, %d %b %Y %H:%M:%S %Z')
+                        except ValueError:
+                            try:
+                                published_dt = datetime.datetime.strptime(published_str, '%a, %d %b %Y %H:%M:%S %z')
+                            except ValueError:
+                                published_dt = None
+                    news_data = {
+                        "id": entry_id,
+                        "title": getattr(entry, "title", ""),
+                        "link": getattr(entry, "link", ""),
+                        "summary": getattr(entry, "summary", ""),
+                        "published": published_str,
+                        "is_hot": is_hot,
+                    }
+                    if is_hot:
+                        # Chỉ gửi nếu published mới hơn latest_hot_news_published
+                        if published_dt and (not latest_hot_news_published or published_dt > latest_hot_news_published):
+                            await redis_client.rpush("hot_news_queue", json.dumps(news_data))
+                            hot_news_count += 1
+                            await process_and_send_news(news_data)
+                            # Cập nhật latest_hot_news_published
+                            await redis_client.set("latest_hot_news_published", published_dt.isoformat())
+                        else:
+                            logger.info(f"Bỏ qua tin nóng cũ: {getattr(entry, 'title', '')[:50]}...")
+                    else:
+                        await redis_client.rpush("news_queue", json.dumps(news_data))
+                    await redis_client.sadd("news_queue_ids", entry_id)
+                    await redis_client.expire("news_queue_ids", Config.REDIS_TTL)
+                    await mark_title_sent(normalized_title)
+                    await mark_hash_sent(content_hash)
+                    queued_count += 1
+                    await add_recent_title(normalized_title)
+                    await add_recent_news_text(entry_text_norm)
+                except Exception as e:
+                    logger.warning(f"Lỗi khi xử lý tin từ feed {feed_url}: {e}")
         hot_queue_len = await redis_client.llen("hot_news_queue")
         normal_queue_len = await redis_client.llen("news_queue")
         logger.info(f"Quét RSS hoàn tất: Đã cache {queued_count} tin mới ({hot_news_count} tin nóng), "
                    f"bỏ qua {skipped_count} tin trùng lặp thông thường, {duplicate_content_count} tin trùng nội dung. "
                    f"Số tin trong queue: {hot_queue_len} tin nóng, {normal_queue_len} tin thường.")
-        if queued_count == 0:
-            logger.info("Không có tin mới, chuyển sang feed tiếp theo và sẽ thử sau 1 phút.")
-            await set_current_feed_index((feed_idx + 1) % len(feeds))
-            context.job_queue.run_once(fetch_and_cache_news, 60)
-        else:
-            await set_current_feed_index((feed_idx + 1) % len(feeds))
     except Exception as e:
         logger.error(f"Lỗi trong job fetch_and_cache_news: {e}")
 
@@ -1423,8 +1432,8 @@ def main():
         job_queue = application.job_queue
         
         # Cấu hình các job định kỳ mới:
-        # 1. Job quét RSS mỗi giờ và cache tin
-        job_queue.run_repeating(fetch_and_cache_news, interval=Config.HOURLY_JOB_INTERVAL, first=10)
+        # 1. Job quét RSS tất cả nguồn mỗi 5 phút
+        job_queue.run_repeating(fetch_and_cache_news, interval=300, first=10)
         
         # 2. Job gửi tin từ queue mỗi 800s
         job_queue.run_repeating(send_news_from_queue, interval=Config.NEWS_JOB_INTERVAL, first=30)
