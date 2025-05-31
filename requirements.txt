@@ -9,5 +9,5 @@ python-telegram-bot[job-queue,webhooks]==20.7
 pytz
 scikit-learn
 requests
-langdetect 
+langdetect
 deep-translator

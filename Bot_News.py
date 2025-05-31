@@ -31,7 +31,7 @@ import sys
 import hashlib
 # Thêm import cho phát hiện ngôn ngữ và dịch
 from langdetect import detect
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 # --- 1. Config & setup ---
 class Config:
@@ -1070,10 +1070,9 @@ def detect_language(text):
 # Hàm dịch sang tiếng Việt
 async def translate_to_vietnamese(text):
     try:
-        translator = Translator()
-        # googletrans không async, nên dùng to_thread
-        result = await asyncio.to_thread(translator.translate, text, dest='vi')
-        return result.text
+        # deep-translator không async, nên dùng to_thread
+        result = await asyncio.to_thread(GoogleTranslator(source='auto', target='vi').translate, text)
+        return result
     except Exception as e:
         logging.error(f"Lỗi khi dịch sang tiếng Việt: {e}")
         return text
