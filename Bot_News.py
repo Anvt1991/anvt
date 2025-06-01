@@ -335,40 +335,53 @@ async def extract_sentiment(ai_summary):
     """Extract sentiment from AI summary, chỉ sử dụng rule-based"""
     return extract_sentiment_rule_based(ai_summary)
 
-def is_hot_news(entry, ai_summary, sentiment):
-    """Phát hiện tin nóng dựa trên phân tích nội dung, từ khóa và cảm xúc"""
+# --- Phát hiện tin nóng bằng AI nâng cấp ---
+async def is_hot_news(entry, ai_summary, sentiment):
+    """
+    Phát hiện tin nóng dựa trên phân tích AI về mức độ tác động và từ khóa.
+    """
     try:
+        # 1. Đánh giá mức độ tác động bằng AI
+        impact_prompt = (
+            f"Đánh giá mức độ tác động của tin tức sau đối với thị trường chứng khoán Việt Nam (cao/trung bình/thấp):\n"
+            f"Tiêu đề: {getattr(entry, 'title', '')}\n"
+            f"Tóm tắt: {ai_summary}\n"
+            f"Chỉ trả lời một từ: Cao, Trung bình hoặc Thấp."
+        )
+        impact_score = await analyze_news(impact_prompt)
+        if "cao" in impact_score.lower():
+            return True
+
+        # 2. Kiểm tra từ khóa tin nóng trong tiêu đề hoặc nội dung (backup)
         title = getattr(entry, 'title', '').lower()
         summary = getattr(entry, 'summary', '').lower()
         content_text = f"{title} {summary}".lower()
-        
-        # 1. Kiểm tra từ khóa tin nóng trong tiêu đề hoặc nội dung
         for keyword in Config.HOT_NEWS_KEYWORDS:
             if keyword.lower() in content_text:
-                logging.info(f"Hot news phát hiện bởi từ khóa '{keyword}': {title}")
                 return True
-                
-        # 2. Kiểm tra các cụm từ ảnh hưởng trong AI summary
+
+        # 3. Kiểm tra sentiment và cụm từ tác động mạnh trong AI summary (backup)
         ai_text = ai_summary.lower()
         for phrase in Config.HOT_NEWS_IMPACT_PHRASES:
             if phrase.lower() in ai_text:
-                logging.info(f"Hot news phát hiện bởi cụm từ ảnh hưởng '{phrase}': {title}")
                 return True
-        
-        # 3. Phân tích dựa trên cảm xúc và mức độ ảnh hưởng
         if sentiment != "Trung lập":
-            # Nếu có cảm xúc và các từ chỉ mức độ cao trong phân tích AI
             intensity_words = ["rất", "mạnh", "nghiêm trọng", "đáng kể", "lớn", "quan trọng"]
             for word in intensity_words:
                 if word in ai_text and (
                     "thị trường" in ai_text or "nhà đầu tư" in ai_text or "ảnh hưởng" in ai_text
                 ):
-                    logging.info(f"Hot news phát hiện bởi cảm xúc và mức độ ảnh hưởng: {title}")
                     return True
-        
         return False
     except Exception as e:
-        logging.warning(f"Lỗi khi phát hiện tin nóng: {e}")
+        logger.warning(f"Lỗi khi phát hiện tin nóng (AI): {e}")
+        # Nếu lỗi, fallback về kiểm tra từ khóa
+        title = getattr(entry, 'title', '').lower()
+        summary = getattr(entry, 'summary', '').lower()
+        content_text = f"{title} {summary}".lower()
+        for keyword in Config.HOT_NEWS_KEYWORDS:
+            if keyword.lower() in content_text:
+                return True
         return False
 
 # --- Parse RSS Feed & News Processing ---
@@ -1059,7 +1072,22 @@ async def fetch_and_cache_news(context: ContextTypes.DEFAULT_TYPE):
                         skipped_count += 1
                         continue
                     recent_news_texts.append(entry_text_norm)
-                    is_hot = is_hot_news_simple(entry)
+                    # --- Phát hiện tin nóng bằng AI ---
+                    # 1. Tạo prompt AI summary
+                    ai_prompt = (
+                        f"Tóm tắt và phân tích tin tức sau cho nhà đầu tư chứng khoán Việt Nam.\n"
+                        f"Tiêu đề: {getattr(entry, 'title', '')}\n"
+                        f"Tóm tắt: {getattr(entry, 'summary', '')}\n"
+                        f"Nguồn: {urlparse(getattr(entry, 'link', 'N/A')).netloc}\n"
+                        f"1. Tóm tắt ngắn gọn nội dung\n2. Đánh giá tác động (2-3 câu). Cảm xúc (Tích cực/Tiêu cực/Trung lập)\n3. Mã/ngành liên quan"
+                    )
+                    try:
+                        ai_summary = await analyze_news(ai_prompt)
+                    except Exception as e:
+                        logger.error(f"Lỗi khi phân tích tin bằng AI (hot news detect): {e}")
+                        ai_summary = getattr(entry, 'summary', '')
+                    sentiment = await extract_sentiment(ai_summary)
+                    is_hot = await is_hot_news(entry, ai_summary, sentiment)
                     # Parse published datetime
                     published_str = getattr(entry, "published", "")
                     published_dt = None
@@ -1420,6 +1448,36 @@ async def set_title_threshold(update: Update, context: ContextTypes.DEFAULT_TYPE
     except ValueError:
         await update.message.reply_text("❌ Giá trị không hợp lệ. Vui lòng nhập số từ 0.0 đến 1.0")
 
+# --- Tinh chỉnh ngưỡng phát hiện tin trùng lặp dựa trên feedback ---
+async def tune_duplicate_threshold():
+    """
+    Tự động điều chỉnh ngưỡng phát hiện trùng lặp dựa trên feedback thực tế.
+    Lưu ý: Cần lưu feedback dưới dạng dict {'false_positive': int, 'false_negative': int}
+    """
+    try:
+        feedback_data = await redis_client.get("duplicate_feedback")
+        if not feedback_data:
+            return  # Không có feedback để tinh chỉnh
+        feedback = json.loads(feedback_data)
+        false_positives = feedback.get('false_positive', 0)
+        false_negatives = feedback.get('false_negative', 0)
+        changed = False
+        # Nếu quá nhiều false positive (tin mới bị loại nhầm), tăng threshold (giảm nhạy)
+        if false_positives > 10 and Config.DUPLICATE_THRESHOLD < 0.95:
+            Config.DUPLICATE_THRESHOLD = min(Config.DUPLICATE_THRESHOLD + 0.05, 0.95)
+            changed = True
+        # Nếu quá nhiều false negative (tin trùng bị lọt), giảm threshold (tăng nhạy)
+        if false_negatives > 10 and Config.DUPLICATE_THRESHOLD > 0.3:
+            Config.DUPLICATE_THRESHOLD = max(Config.DUPLICATE_THRESHOLD - 0.05, 0.3)
+            changed = True
+        if changed:
+            await redis_client.set("duplicate_threshold", str(Config.DUPLICATE_THRESHOLD))
+            # Reset feedback sau khi tinh chỉnh
+            await redis_client.set("duplicate_feedback", json.dumps({'false_positive': 0, 'false_negative': 0}))
+            logger.info(f"[TUNE] Đã điều chỉnh DUPLICATE_THRESHOLD thành {Config.DUPLICATE_THRESHOLD}")
+    except Exception as e:
+        logger.error(f"Lỗi khi tinh chỉnh duplicate threshold: {e}")
+
 def main():
     global application, shutdown_flag
     
@@ -1501,11 +1559,15 @@ def main():
         # 3. Job ping giữ awake mỗi 5 phút
         job_queue.run_repeating(job_ping, interval=300, first=60)
         
+        # 4. Job tự động tinh chỉnh ngưỡng duplicate mỗi 1 giờ
+        job_queue.run_repeating(tune_duplicate_threshold, interval=3600, first=120)
+        
         # In thông tin job
-        logger.info(f"Đã thiết lập 3 job định kỳ:\n"
+        logger.info(f"Đã thiết lập 4 job định kỳ:\n"
                     f"- Quét RSS & cache: {Config.HOURLY_JOB_INTERVAL}s/lần\n"
                     f"- Gửi tin từ queue: {Config.NEWS_JOB_INTERVAL}s/lần\n"
-                    f"- Ping giữ awake: 300s/lần")
+                    f"- Ping giữ awake: 300s/lần\n"
+                    f"- Tune duplicate threshold: 3600s/lần")
 
         if Config.WEBHOOK_URL:
             webhook_port = int(os.environ.get("PORT", 8443))
